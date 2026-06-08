@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues } from './model-editor.js';
 import { GraphPane } from './graph-pane.js';
 
 const view = {};
@@ -363,7 +363,8 @@ view.View = class {
                 modified: this._rightPane ? this._rightPane.getDebugState() : { nodeCount: 0, edgeCount: 0, zoom: 1, rendered: false }
             },
             delta: session ? session.delta.toJSON() : [],
-            aggregateStates: session ? session.delta.toAggregateJSON() : {}
+            aggregateStates: session ? session.delta.toAggregateJSON() : {},
+            editedNodeCount: session ? Object.values(session.delta.toAggregateJSON()).filter((state) => state === 'modified').length : 0
         };
     }
 
@@ -644,6 +645,9 @@ view.View = class {
             }
             this._refreshOpenSidebars();
             this._ensureDefaultScreen();
+            if (this._target && this._target.refreshDeltaStyles) {
+                this._target.refreshDeltaStyles();
+            }
         } catch (error) {
             this.error(error, 'Error applying edit.', null);
         }
@@ -686,6 +690,44 @@ view.View = class {
         }
     }
 
+    _resolveGraphIndex(target) {
+        if (!target || !this._editSession) {
+            return 0;
+        }
+        const modifiedModules = this._editSession.modified.model.modules || [];
+        for (let i = 0; i < modifiedModules.length; i++) {
+            if (modifiedModules[i] === target) {
+                return i;
+            }
+        }
+        const originalModules = this._editSession.original.modules || [];
+        for (let i = 0; i < originalModules.length; i++) {
+            if (originalModules[i] === target) {
+                return i;
+            }
+        }
+        const name = target.name || target.identifier;
+        if (name) {
+            for (let i = 0; i < modifiedModules.length; i++) {
+                const graph = modifiedModules[i];
+                if (graph.name === name || graph.identifier === name) {
+                    return i;
+                }
+            }
+        }
+        return 0;
+    }
+
+    _graphOptions(pane, target) {
+        return {
+            paneId: pane.id,
+            container: pane.container,
+            readOnly: pane.readOnly,
+            deltaTracker: pane.deltaTracker,
+            graphIndex: this._resolveGraphIndex(target)
+        };
+    }
+
     _resolveModifiedTarget(target) {
         const session = this._editSession;
         if (!session || !target) {
@@ -723,12 +765,7 @@ view.View = class {
             const document = this._host.document;
             const graph = target;
             const groups = graph.groups || false;
-            const viewGraph = new view.Graph(this, groups, {
-                paneId: pane.id,
-                container,
-                readOnly: pane.readOnly,
-                deltaTracker: pane.deltaTracker
-            });
+            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
             if (state && state.blocks) {
                 viewGraph.blocks = state.blocks;
             }
@@ -741,6 +778,7 @@ view.View = class {
                 viewGraph.update();
                 viewGraph.updateTunnels();
                 viewGraph.restore(state);
+                viewGraph.refreshDeltaStyles();
                 pane._setGraph(viewGraph);
                 pane._logRender();
             } else {
@@ -779,12 +817,7 @@ view.View = class {
             const oldChildren = Array.from(origin.children);
             const graph = this._resolveModifiedTarget(this.activeTarget);
             const groups = graph.groups || false;
-            const viewGraph = new view.Graph(this, groups, {
-                paneId: pane.id,
-                container: pane.container,
-                readOnly: pane.readOnly,
-                deltaTracker: pane.deltaTracker
-            });
+            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
             const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
             if (state && state.blocks) {
                 viewGraph.blocks = state.blocks;
@@ -808,6 +841,7 @@ view.View = class {
                     viewGraph._background.setAttribute('height', 0);
                 }
                 viewGraph.restore(state);
+                viewGraph.refreshDeltaStyles();
                 pane._setGraph(viewGraph);
                 this.target = viewGraph;
             } else {
@@ -2179,6 +2213,8 @@ view.Graph = class extends grapher.Graph {
         this._container = options.container || null;
         this.readOnly = Boolean(options.readOnly);
         this.deltaTracker = options.deltaTracker || null;
+        this.graphIndex = options.graphIndex !== undefined ? options.graphIndex : 0;
+        this._valueEntityIds = new Map();
         this.markerPrefix = this._paneId ? `${this._paneId}-` : '';
         this.counter = 0;
         this._nodeKey = 0;
@@ -2208,6 +2244,8 @@ view.Graph = class extends grapher.Graph {
 .edge-path { stroke: #000; stroke-width: 1px; fill: none; marker-end: url(#${prefix}arrowhead); }
 .edge-path-control-dependency { stroke-dasharray: 2, 2; }
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
+.edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
+.edited > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .edge-path-tunnel { stroke-dasharray: 5, 3; marker-end: url(#${prefix}arrowhead-tunnel); opacity: 0.5; }
 #${prefix}arrowhead { fill: #000; }
 #${prefix}arrowhead-hover { fill: rgba(220, 0, 0, 0.9); }
@@ -2259,6 +2297,9 @@ view.Graph = class extends grapher.Graph {
     createNode(node) {
         const obj = new view.Node(this, node);
         obj.name = (this._nodeKey++).toString();
+        const nodes = this.target && this.target.nodes ? this.target.nodes : [];
+        const nodeIndex = nodes.indexOf(node);
+        obj._entityId = nodeIndex >= 0 ? `graph:${this.graphIndex}/node:${nodeIndex}` : null;
         this._table.set(node, obj);
         return obj;
     }
@@ -2292,10 +2333,26 @@ view.Graph = class extends grapher.Graph {
             this._table.set(value, obj);
         } else {
             const obj = new view.Value(this, value);
+            obj._entityId = this._valueEntityIds.get(value) || null;
             this._values.set(key, obj);
             this._table.set(value, obj);
         }
-        return this._values.get(key);
+        const obj = this._values.get(key);
+        if (obj && !obj._entityId) {
+            obj._entityId = this._valueEntityIds.get(value) || null;
+        }
+        return obj;
+    }
+
+    refreshDeltaStyles() {
+        if (!this.deltaTracker) {
+            return;
+        }
+        for (const obj of this._table.values()) {
+            if (obj && typeof obj.applyDeltaStyle === 'function') {
+                obj.applyDeltaStyle();
+            }
+        }
     }
 
     createArgument(value) {
@@ -2339,6 +2396,12 @@ view.Graph = class extends grapher.Graph {
 
     add(graph, signature) {
         this.target = graph;
+        this._valueEntityIds = new Map();
+        if (this.deltaTracker) {
+            for (const [value, id] of enumerateGraphValues(graph, this.graphIndex)) {
+                this._valueEntityIds.set(value, id);
+            }
+        }
         this.identifier = this.model.identifier;
         this.identifier += graph && graph.name ? `.${graph.name.replace(/\/|\\/g, '.')}` : '';
         const clusters = new Set();
@@ -3213,6 +3276,19 @@ view.Node = class extends grapher.Node {
         return this.value.outputs;
     }
 
+    applyDeltaStyle() {
+        if (!this.element || !this._entityId || !this.context.deltaTracker) {
+            return;
+        }
+        const state = this.context.deltaTracker.getAggregateState(this._entityId);
+        this.element.classList.toggle('edited', state === 'modified' || state === 'added');
+    }
+
+    update() {
+        super.update();
+        this.applyDeltaStyle();
+    }
+
     _add(value, type) {
         const node = (type === 'graph' || type === 'function') ? { type: value } : value;
         const options = this.context.options;
@@ -3655,6 +3731,25 @@ view.Value = class {
                 this.context.setEdge(edge);
                 this._edges.push(edge);
             }
+        }
+        this.applyDeltaStyle();
+    }
+
+    applyDeltaStyle() {
+        if (!this._entityId || !this.context.deltaTracker || !Array.isArray(this._edges)) {
+            return;
+        }
+        const edited = this.context.deltaTracker.getState(this._entityId) !== 'unchanged';
+        for (const edge of this._edges) {
+            if (!edge.element) {
+                continue;
+            }
+            const classes = (edge.class || '').split(/\s+/).filter((name) => name && name !== 'edge-path-edited');
+            if (edited) {
+                classes.push('edge-path-edited');
+            }
+            edge.class = classes.join(' ');
+            edge.element.setAttribute('class', edge.class ? `edge-path ${edge.class}` : 'edge-path');
         }
     }
 
