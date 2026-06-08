@@ -21,11 +21,18 @@ body { touch-action: none; overflow: hidden; width: 100%; height: 100%; margin: 
 button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; }
 .center { position: absolute; margin: auto; top: 0; right: 0; bottom: 0; left: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .select { user-select: text; -webkit-user-select: text; -moz-user-select: text; }
+.diff-container { display: flex; height: 100%; width: 100%; }
+.graph-pane { display: flex; flex: 1; height: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; position: relative; }
+.graph-pane-label { position: absolute; top: 8px; left: 10px; z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
+.graph-pane-original { border-right: 1px solid #ccc; }
+.graph-pane-readonly { cursor: default; }
+.pane-divider { width: 0; flex-shrink: 0; }
 .target { display: flex; height: 100%; width: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; }
 .canvas { margin: auto; flex-shrink: 0; text-rendering: geometricPrecision; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .open-file-dialog { display: none; }
 .default { background-color: #ffffff; }
 .default .logo { display: none; }
+.default .diff-container { display: flex; opacity: 1; }
 .default .target { display: flex; opacity: 1; }
 .default .toolbar { display: flex; }
 .toolbar { display: flex; align-items: center; position: absolute; bottom: 10px; left: 10px; padding: 0; margin: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
@@ -78,6 +85,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .welcome { background-color: #ececec; color: #242424; }
 .welcome .message-text { display: none; opacity: 0; }
 .welcome .message-button { display: none; opacity: 0; }
+.welcome .diff-container { display: none; opacity: 0; }
 .welcome .target { display: none; opacity: 0; }
 .welcome .menu { background-color: #ffffff; }
 .welcome.spinner .logo-spinner { display: block; -webkit-animation: orbit 0.5s infinite linear; animation: orbit 0.5s infinite linear; cursor: wait; }
@@ -88,6 +96,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .notification .message-text { display: inline; opacity: 1; }
 .notification .message-button { display: inline; opacity: 1; }
 .alert { background-color: #ececec; color: #242424; }
+.alert .diff-container { display: none; opacity: 0; }
 .alert .target { display: none; opacity: 0; }
 .alert .toolbar { display: none; opacity: 0; }
 .alert .menu { display: none; opacity: 0; }
@@ -137,13 +146,17 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .welcome.spinner .logo-spinner-stroke { stroke: #ececec; }
 .welcome.spinner .logo-name { display: none; }
 .welcome.spinner .open-file-button { display: none; }
+.welcome.spinner .diff-container { display: flex; opacity: 0; }
 .welcome.spinner .target { display: flex; opacity: 0; }
 .welcome .notification .logo-name { display: none; }
 .welcome .toolbar { display: none; }
 @media (prefers-color-scheme: dark) {
 :root { color-scheme: dark; }
 .default { background-color: #404040; }
+.diff-container { background-color: #404040; }
+.graph-pane { background-color: #404040; }
 .target { background-color: #404040; }
+.graph-pane-original { border-right-color: #555; }
 .welcome { background-color: #1e1e1e; color: #888888; }
 .alert { background-color: #1e1e1e; color: #888888; }
 .logo-stroke { stroke: #888888; }
@@ -213,6 +226,15 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .sidebar-item { margin-bottom: 0px; display: block; }
 .sidebar-item-name { float: left; font-size: 11px; min-width: 95px; max-width: 95px; padding-right: 5px; padding-top: 7px; display: block; }
 .sidebar-item-name input { color: #777; font-family: inherit; font-size: inherit; color: inherit; background-color: inherit; width: 100%; text-align: right; margin: 0; padding: 0; border: 0; outline: none; text-overflow: ellipsis; }
+.sidebar-editable-input { font-family: inherit; font-size: 11px; color: inherit; background-color: #fff; width: 100%; margin: 0; padding: 2px 4px; border: 1px solid #ccc; border-radius: 2px; outline: none; box-sizing: border-box; }
+.sidebar-editable-add-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; margin-bottom: 12px; }
+.sidebar-editable-add-row .sidebar-editable-input { flex: 1 1 120px; }
+.sidebar-add-button { font-family: inherit; font-size: 11px; padding: 4px 10px; border: 1px solid #ccc; border-radius: 3px; background: #f4f4f4; cursor: pointer; }
+.sidebar-add-button:hover { background: #e8e8e8; }
+.sidebar-editable-attribute-row { display: flex; gap: 4px; align-items: center; }
+.sidebar-editable-attribute-row .sidebar-editable-input { flex: 1 1 auto; }
+.sidebar-delete-button { font-family: inherit; font-size: 14px; line-height: 1; padding: 2px 6px; border: 1px solid #ccc; border-radius: 3px; background: #f4f4f4; cursor: pointer; color: #a33; }
+.sidebar-delete-button:hover { background: #fde8e8; }
 .sidebar-item-value-list { margin: 0; margin-left: 105px; overflow: hidden; display: block; padding: 0; }
 .sidebar-item-value { font-size: 11px; background-color: #fcfcfc; border-radius: 2px; border: 1px solid #fcfcfc; margin-top: 3px; margin-bottom: 3px; overflow: auto; }
 .sidebar-item-value-content { background-color: #f8f8f8; border: 1px solid #f8f8f8; }
@@ -277,6 +299,11 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
     .sidebar { background-color: #2d2d2d; color: #dfdfdf; border-left: 1px solid rgba(0, 0, 0, 0); }
     .sidebar-closebutton { padding: 8px 8px 8px 32px; text-decoration: none; font-size: 25px; color: #777777; opacity: 1.0; display: block; transition: 0.2s; position: absolute; top: 0; right: 15px; margin-left: 50px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
     .sidebar-closebutton:hover { color: #ffffff; }
+    .sidebar-editable-input { background-color: #2d2d2d; border-color: #555; color: #dfdfdf; }
+    .sidebar-add-button { background: #383838; border-color: #555; color: #dfdfdf; }
+    .sidebar-add-button:hover { background: #444; }
+    .sidebar-delete-button { background: #383838; border-color: #555; color: #f88; }
+    .sidebar-delete-button:hover { background: #4a3030; }
     .sidebar-item-value { background-color: #383838; border-color: #383838; }
     .sidebar-item-value-content { background-color: #3e3e3e; border-color: #3e3e3e; }
     .sidebar-item-value-line-border { border-color: rgba(0, 0, 0, 0.09); }
@@ -309,7 +336,14 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 </style>
 </head>
 <body class="welcome spinner">
-<div id="target" class="target" tabindex="0">
+<div id="diff-container" class="diff-container">
+    <div id="target-original" class="graph-pane graph-pane-original graph-pane-readonly target" tabindex="0">
+        <div class="graph-pane-label">Original</div>
+    </div>
+    <div id="pane-divider" class="pane-divider"></div>
+    <div id="target-modified" class="graph-pane graph-pane-modified target" tabindex="0">
+        <div class="graph-pane-label">Modified</div>
+    </div>
 </div>
 <div id="sidebar" class="sidebar">
     <h1 id="sidebar-title" class="sidebar-title"></h1>

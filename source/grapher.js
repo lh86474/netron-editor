@@ -12,6 +12,15 @@ grapher.Graph = class {
         this._children = new Map();
         this._children.set('\x00', new Map());
         this._parent = new Map();
+        this._markerPrefix = '';
+    }
+
+    get markerPrefix() {
+        return this._markerPrefix;
+    }
+
+    set markerPrefix(value) {
+        this._markerPrefix = value || '';
     }
 
     setNode(node) {
@@ -107,7 +116,8 @@ grapher.Graph = class {
         origin = origin || document.getElementById('origin');
         const createGroup = (name) => {
             const element = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-            element.setAttribute('id', name);
+            const id = this._markerPrefix ? `${this._markerPrefix}${name}` : name;
+            element.setAttribute('id', id);
             element.setAttribute('class', name);
             return element;
         };
@@ -160,9 +170,10 @@ grapher.Graph = class {
                 e.stopPropagation();
             }
         });
-        edgePathGroupDefs.appendChild(marker("arrowhead"));
-        edgePathGroupDefs.appendChild(marker("arrowhead-select"));
-        edgePathGroupDefs.appendChild(marker("arrowhead-hover"));
+        const markerId = (name) => this._markerPrefix ? `${this._markerPrefix}${name}` : name;
+        edgePathGroupDefs.appendChild(marker(markerId('arrowhead')));
+        edgePathGroupDefs.appendChild(marker(markerId('arrowhead-select')));
+        edgePathGroupDefs.appendChild(marker(markerId('arrowhead-hover')));
         for (const nodeId of this.nodes.keys()) {
             const entry = this.node(nodeId);
             const node = entry.label;

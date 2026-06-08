@@ -228,8 +228,11 @@ desktop.Host = class {
         });
         electron.ipcRenderer.on('window-state', (sender, data) => {
             if (this._environment.titlebar) {
-                this._element('target').style.marginTop = '32px';
-                this._element('target').style.height = 'calc(100% - 32px)';
+                const graphContainer = this._element('diff-container') || this._element('target');
+                if (graphContainer) {
+                    graphContainer.style.marginTop = '32px';
+                    graphContainer.style.height = 'calc(100% - 32px)';
+                }
                 this._element('sidebar-title').style.marginTop = '24px';
                 this._element('sidebar-closebutton').style.marginTop = '24px';
                 this._element('titlebar').classList.add('titlebar-visible');
@@ -672,7 +675,33 @@ desktop.Context = class {
     }
 };
 
+const getEditorDebugState = () => {
+    if (window.__view__ && typeof window.__view__.debugEditorState === 'function') {
+        return window.__view__.debugEditorState();
+    }
+    return {
+        enabled: false,
+        error: window.__view__ ? 'debugEditorState unavailable' : 'view not ready',
+        modelFormat: null,
+        graphCount: 0,
+        nodeCount: 0,
+        activePane: 'modified',
+        panes: {
+            original: { nodeCount: 0, edgeCount: 0, zoom: 1, rendered: false },
+            modified: { nodeCount: 0, edgeCount: 0, zoom: 1, rendered: false }
+        },
+        delta: [],
+        aggregateStates: {}
+    };
+};
+
 if (typeof window !== 'undefined') {
+    electron.contextBridge.exposeInMainWorld('netronDebug', {
+        editorState: () => getEditorDebugState()
+    });
+    electron.contextBridge.exposeInMainWorld('debugEditorState', () => getEditorDebugState());
+    electron.contextBridge.exposeInMainWorld('_debugEditorState', () => getEditorDebugState());
+    electron.contextBridge.exposeInMainWorld('__debugEditorState', () => getEditorDebugState());
     window.addEventListener('load', () => {
         const value = new desktop.Host();
         window.__view__ = new view.View(value);

@@ -35,7 +35,7 @@ playwright.test('browser', async ({ page }) => {
     await fileChooser.setFiles(file);
 
     // Wait for the graph to render
-    await page.waitForSelector('#canvas', { state: 'attached', timeout: 10000 });
+    await page.waitForSelector('#modified-canvas', { state: 'attached', timeout: 10000 });
     await page.waitForSelector('body.default', { timeout: 10000 });
 
     // Open find sidebar
