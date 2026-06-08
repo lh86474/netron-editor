@@ -599,7 +599,17 @@ grapher.Node.Header.Entry = class {
     measure() {
         const yPadding = 4;
         const xPadding = this.padding || 7;
+        const x = this.text.getAttribute('x');
+        const y = this.text.getAttribute('y');
+        this.text.removeAttribute('x');
+        this.text.removeAttribute('y');
         const boundingBox = this.text.getBBox();
+        if (x !== null) {
+            this.text.setAttribute('x', x);
+        }
+        if (y !== null) {
+            this.text.setAttribute('y', y);
+        }
         this.width = boundingBox.width + xPadding + xPadding;
         this.height = boundingBox.height + yPadding + yPadding;
         this.tx = xPadding;
