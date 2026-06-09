@@ -638,10 +638,13 @@ view.View = class {
             if (last && last.entityType === 'attribute' && this.options.attributes) {
                 const modelNode = this._resolveNodeFromChange(last);
                 if (modelNode && this._target) {
-                    await this._target.refreshNodeArgumentList(modelNode);
+                    const heightChanged = await this._target.refreshNodeArgumentList(modelNode);
+                    if (heightChanged) {
+                        await this.refresh(null, { skipShow: true, skipAnimation: true });
+                    }
                 }
             } else if (this._editorChangeNeedsGraphRefresh(last)) {
-                await this.refresh(null, { skipShow: true });
+                await this.refresh(null, { skipShow: true, skipAnimation: true });
             }
             this._refreshOpenSidebars();
             this._ensureDefaultScreen();
@@ -791,6 +794,11 @@ view.View = class {
     }
 
     async refresh(anchor, options = {}) {
+        if (options.skipShow) {
+            this._ensureDefaultScreen();
+        }
+        const pane = this._rightPane;
+        const origin = this._target ? this._target._origin : null;
         const snapshot = new Map();
         if (this._target) {
             for (const [key, entry] of this._target.nodes) {
@@ -803,14 +811,12 @@ view.View = class {
                 }
             }
         }
-        const pane = this._rightPane;
         const container = pane ? pane.container : null;
         const zoom = this._target ? this._target._zoom : 1;
         const blocks = this._target ? this._target.blocks : null;
         if (blocks && blocks.size > 0 && this._path.length > 0) {
             this._path[0].state = Object.assign(this._path[0].state || {}, { blocks });
         }
-        const origin = this._target ? this._target._origin : null;
         let previous = null;
         if (origin && this.activeTarget && pane) {
             previous = origin.getScreenCTM();
@@ -844,6 +850,9 @@ view.View = class {
                 viewGraph.refreshDeltaStyles();
                 pane._setGraph(viewGraph);
                 this.target = viewGraph;
+                if (options.skipShow) {
+                    this._ensureDefaultScreen();
+                }
             } else {
                 for (const child of Array.from(origin.children)) {
                     if (!oldChildren.includes(child)) {
@@ -1044,7 +1053,9 @@ view.View = class {
                 };
                 this._host.window.requestAnimationFrame(tick);
             };
-            animateTransition(snapshot);
+            if (!options.skipAnimation) {
+                animateTransition(snapshot);
+            }
         }
     }
 
@@ -2199,7 +2210,6 @@ view.Worker = class {
         if (this._timeout !== -1) {
             this._host.window.clearTimeout(this._timeout);
             this._timeout = -1;
-            this._host.message();
         }
     }
 };
@@ -2773,6 +2783,14 @@ view.Graph = class extends grapher.Graph {
             this._origin = origin;
             this._background = background;
             this._injectPaneStyles(canvas);
+        } else {
+            this._origin = origin;
+            const canvas = origin.parentElement;
+            if (canvas && canvas.localName === 'svg') {
+                this._canvas = canvas;
+                const backgroundId = this._paneId ? `${this._paneId}-background` : 'background';
+                this._background = document.getElementById(backgroundId);
+            }
         }
         for (const value of this._values.values()) {
             value.build();
@@ -3488,6 +3506,7 @@ view.Node = class extends grapher.Node {
         if (!block || !block.element) {
             return false;
         }
+        const previousHeight = this.height;
         const document = this.context.host.document;
         block._items = [];
         while (block.element.firstChild) {
@@ -3507,10 +3526,11 @@ view.Node = class extends grapher.Node {
         }
         await block.measure();
         await this.measure();
+        const heightChanged = this.height !== previousHeight;
         await block.layout();
         await this.layout();
         this.update();
-        return true;
+        return heightChanged;
     }
 
     activate(source) {
