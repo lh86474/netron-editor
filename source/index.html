@@ -19,12 +19,14 @@
 html { touch-action: none; overflow: hidden; width: 100%; height: 100%; -ms-text-size-adjust: 100%; -webkit-text-size-adjust: 100%; text-rendering: optimizeLegibility; -webkit-text-rendering: optimizeLegibility; -moz-text-rendering: optimizeLegibility; -ms-text-rendering: optimizeLegibility; -o-text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-font-smoothing: antialiased; -ms-font-smoothing: antialiased; -o-font-smoothing: antialiased; }
 body { touch-action: none; overflow: hidden; width: 100%; height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 12px; text-rendering: geometricPrecision; }
 button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; }
+:root { --chrome-height: 32px; --chrome-inset: 8px; --chrome-width: 32px; }
 .center { position: absolute; margin: auto; top: 0; right: 0; bottom: 0; left: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .select { user-select: text; -webkit-user-select: text; -moz-user-select: text; }
 .diff-container { display: flex; height: 100%; width: 100%; }
 .graph-pane { display: flex; flex: 1; height: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; position: relative; }
-.graph-pane-label { position: absolute; top: 8px; left: 10px; z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
+.graph-pane-label { position: absolute; top: 0px; height: var(--chrome-height); display: flex; align-items: center; left: var(--chrome-inset); z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
 .graph-pane-original { border-right: 1px solid #ccc; }
+.graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-readonly { cursor: default; }
 .pane-divider { width: 0; flex-shrink: 0; }
 .target { display: flex; height: 100%; width: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; }
@@ -153,7 +155,6 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .welcome .notification .logo-name { display: none; }
 .welcome .toolbar { display: none; }
 @media (prefers-color-scheme: dark) {
-:root { color-scheme: dark; }
 .default { background-color: #404040; }
 .diff-container { background-color: #404040; }
 .graph-pane { background-color: #404040; }
