@@ -92,6 +92,9 @@ const readModel = (model) => {
         if (value.description !== undefined) {
             cloned.description = value.description;
         }
+        if (value.initializer !== undefined) {
+            cloned.initializer = value.initializer;
+        }
         valueMap.set(value, cloned);
         return cloned;
     };
