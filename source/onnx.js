@@ -1,5 +1,6 @@
 
 import * as protobuf from './protobuf.js';
+import './onnx-encode.js';
 
 const onnx = {};
 
@@ -48,6 +49,13 @@ onnx.Model = class {
 
     constructor(metadata, target) {
         const model = target.model;
+        if (target.name === 'onnx.proto' && target.encoding === 'binary' && target.type === 'model' && !target.offset && onnx.proto && onnx.proto.ModelProto && onnx.proto.ModelProto.encodeBytes) {
+            const bytes = onnx.proto.ModelProto.encodeBytes(model);
+            this._proto = onnx.proto.ModelProto.decode(protobuf.BinaryReader.open(bytes));
+        } else {
+            this._proto = model;
+        }
+        this._exportable = target.name === 'onnx.proto' && target.encoding === 'binary' && target.type === 'model' && !target.offset;
         this._modules = [];
         this._format = target.format;
         this._producer = model.producer_name && model.producer_name.length > 0 ? model.producer_name + (model.producer_version && model.producer_version.length > 0 ? ` ${model.producer_version}` : '') : null;
@@ -119,6 +127,14 @@ onnx.Model = class {
 
     get format() {
         return this._format;
+    }
+
+    get proto() {
+        return this._proto;
+    }
+
+    get exportable() {
+        return this._exportable;
     }
 
     get version() {

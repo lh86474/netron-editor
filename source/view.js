@@ -2,6 +2,7 @@
 import * as base from './base.js';
 import * as grapher from './grapher.js';
 import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues } from './model-editor.js';
+import { canExportOnnx, exportModifiedOnnx, OnnxExportError } from './onnx-export.js';
 import { GraphPane } from './graph-pane.js';
 
 const view = {};
@@ -131,6 +132,11 @@ view.View = class {
                         enabled: () => this.activeTarget
                     });
                     file.add({
+                        label: 'Export Modified Model as &ONNX...',
+                        execute: async () => await this._host.execute('export-onnx'),
+                        enabled: () => this._canExportOnnx()
+                    });
+                    file.add({
                         label: platform === 'darwin' ? '&Close Window' : '&Close',
                         accelerator: 'CmdOrCtrl+W',
                         execute: async () => await this._host.execute('close'),
@@ -152,6 +158,11 @@ view.View = class {
                         accelerator: 'CmdOrCtrl+Alt+E',
                         execute: async () => await this.export(`${this._host.document.title}.svg`),
                         enabled: () => this.activeTarget
+                    });
+                    file.add({
+                        label: 'Export Modified Model as &ONNX...',
+                        execute: async () => await this.exportOnnx(),
+                        enabled: () => this._canExportOnnx()
                     });
                 }
                 const edit = this._menu.group('&Edit');
@@ -1404,10 +1415,37 @@ view.View = class {
         return status;
     }
 
+    _canExportOnnx() {
+        return this._model && this._editSession && canExportOnnx(this._model);
+    }
+
+    async exportOnnx(file) {
+        if (!this._canExportOnnx()) {
+            return;
+        }
+        try {
+            const defaultPath = this._host.document.title || 'model';
+            const target = file || await this._host.save('ONNX Model', 'onnx', defaultPath);
+            if (!target) {
+                return;
+            }
+            const bytes = exportModifiedOnnx(this._model, this._editSession);
+            const blob = new Blob([bytes], { type: 'application/octet-stream' });
+            await this._host.export(target, blob);
+        } catch (error) {
+            const message = error instanceof OnnxExportError ? error.message : (error && error.message ? error.message : error.toString());
+            await this._host.message(message, true, 'OK');
+        }
+    }
+
     async export(file) {
         const window = this.host.window;
         const lastIndex = file.lastIndexOf('.');
         const extension = lastIndex === -1 ? 'png' : file.substring(lastIndex + 1).toLowerCase();
+        if (extension === 'onnx') {
+            await this.exportOnnx(file);
+            return;
+        }
         if (this.activeTarget && (extension === 'png' || extension === 'svg')) {
             const canvas = this._rightPane && this._rightPane.graph ? this._rightPane.graph._canvas : this._element('modified-canvas');
             const clone = canvas.cloneNode(true);

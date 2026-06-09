@@ -470,6 +470,55 @@ protobuf.BinaryReader = class {
     _unexpected() {
         throw new RangeError('Unexpected end of file.');
     }
+
+    readFieldPayload(wireType) {
+        switch (wireType) {
+            case 0:
+                return this.readVarintBytes();
+            case 1:
+                return this.read(8);
+            case 2: {
+                const start = this.position;
+                const length = this.uint32();
+                this.skip(length);
+                return this.readSlice(start, this.position);
+            }
+            case 3: {
+                const chunks = [];
+                for (;;) {
+                    const tag = this.uint32();
+                    const innerType = tag & 7;
+                    if (innerType === 4) {
+                        break;
+                    }
+                    chunks.push(protobuf.BinaryWriter._encodeTag(tag));
+                    chunks.push(this.readFieldPayload(innerType));
+                }
+                return protobuf.BinaryWriter.concat(chunks);
+            }
+            case 5:
+                return this.read(4);
+            default:
+                throw new protobuf.Error(`Invalid type '${wireType}' at offset ${this.position}.`);
+        }
+    }
+
+    readSlice(start, end) {
+        return this.read(end - start);
+    }
+
+    readVarintBytes() {
+        const start = this.position;
+        this.skipVarint();
+        return this.readSlice(start, this.position);
+    }
+
+    storeUnknown(message, tag) {
+        if (!message._unknown) {
+            message._unknown = [];
+        }
+        message._unknown.push({ tag, payload: this.readFieldPayload(tag & 7) });
+    }
 };
 
 protobuf.BufferReader = class extends protobuf.BinaryReader {
@@ -552,6 +601,10 @@ protobuf.BufferReader = class extends protobuf.BinaryReader {
             shift += 7n;
         }
         throw new protobuf.Error('Invalid varint value.');
+    }
+
+    readSlice(start, end) {
+        return this._buffer.slice(start, end);
     }
 };
 
@@ -1384,6 +1437,189 @@ protobuf.TextReader = class {
     }
 };
 
+protobuf.BinaryWriter = class {
+
+    constructor() {
+        this._chunks = [];
+    }
+
+    static concat(chunks) {
+        let length = 0;
+        for (const chunk of chunks) {
+            length += chunk.length;
+        }
+        const result = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) {
+            result.set(chunk, offset);
+            offset += chunk.length;
+        }
+        return result;
+    }
+
+    static _encodeTag(tag) {
+        const writer = new protobuf.BinaryWriter();
+        writer.uint32(tag);
+        return writer.finish();
+    }
+
+    static _toBigInt(value) {
+        return typeof value === 'bigint' ? value : BigInt(value);
+    }
+
+    static _encodeVarint(value) {
+        const bigint = typeof value === 'bigint' ? value : BigInt(value >>> 0);
+        const bytes = [];
+        let current = bigint;
+        while (current >= 0x80n) {
+            bytes.push(Number((current & 0x7Fn) | 0x80n));
+            current >>= 7n;
+        }
+        bytes.push(Number(current & 0x7Fn));
+        return new Uint8Array(bytes);
+    }
+
+    finish() {
+        return protobuf.BinaryWriter.concat(this._chunks);
+    }
+
+    raw(bytes) {
+        if (bytes && bytes.length > 0) {
+            this._chunks.push(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+        }
+    }
+
+    fork() {
+        return new protobuf.BinaryWriter.Fork(this);
+    }
+
+    uint32(value) {
+        this.raw(protobuf.BinaryWriter._encodeVarint(value >>> 0));
+    }
+
+    int32(value) {
+        this.uint32(value | 0);
+    }
+
+    bool(value) {
+        this.uint32(value ? 1 : 0);
+    }
+
+    int64(value) {
+        this.raw(protobuf.BinaryWriter._encodeVarint(protobuf.BinaryWriter._toBigInt(value)));
+    }
+
+    uint64(value) {
+        this.int64(value);
+    }
+
+    sint32(value) {
+        const encoded = (value << 1) ^ (value >> 31);
+        this.uint32(encoded >>> 0);
+    }
+
+    sint64(value) {
+        const bigint = protobuf.BinaryWriter._toBigInt(value);
+        const encoded = (bigint << 1n) ^ (bigint >> 63n);
+        this.raw(protobuf.BinaryWriter._encodeVarint(encoded));
+    }
+
+    fixed32(value) {
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        this.raw(bytes);
+    }
+
+    sfixed32(value) {
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setInt32(0, value | 0, true);
+        this.raw(bytes);
+    }
+
+    fixed64(value) {
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setBigUint64(0, protobuf.BinaryWriter._toBigInt(value), true);
+        this.raw(bytes);
+    }
+
+    sfixed64(value) {
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setBigInt64(0, protobuf.BinaryWriter._toBigInt(value), true);
+        this.raw(bytes);
+    }
+
+    float(value) {
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setFloat32(0, value, true);
+        this.raw(bytes);
+    }
+
+    double(value) {
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setFloat64(0, value, true);
+        this.raw(bytes);
+    }
+
+    bytes(value) {
+        const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+        this.uint32(bytes.length);
+        this.raw(bytes);
+    }
+
+    string(value) {
+        const encoded = new TextEncoder().encode(value);
+        this.uint32(encoded.length);
+        this.raw(encoded);
+    }
+};
+
+protobuf.BinaryWriter.Fork = class {
+
+    constructor(parent) {
+        this._parent = parent;
+        this._writer = new protobuf.BinaryWriter();
+    }
+
+    uint32(value) { this._writer.uint32(value); return this; }
+    int32(value) { this._writer.int32(value); return this; }
+    bool(value) { this._writer.bool(value); return this; }
+    int64(value) { this._writer.int64(value); return this; }
+    uint64(value) { this._writer.uint64(value); return this; }
+    sint32(value) { this._writer.sint32(value); return this; }
+    sint64(value) { this._writer.sint64(value); return this; }
+    fixed32(value) { this._writer.fixed32(value); return this; }
+    sfixed32(value) { this._writer.sfixed32(value); return this; }
+    fixed64(value) { this._writer.fixed64(value); return this; }
+    sfixed64(value) { this._writer.sfixed64(value); return this; }
+    float(value) { this._writer.float(value); return this; }
+    double(value) { this._writer.double(value); return this; }
+    bytes(value) { this._writer.bytes(value); return this; }
+    string(value) { this._writer.string(value); return this; }
+    raw(bytes) { this._writer.raw(bytes); return this; }
+
+    fork() {
+        return new protobuf.BinaryWriter.Fork(this._writer);
+    }
+
+    ldelim() {
+        const bytes = this._writer.finish();
+        this._parent.uint32(bytes.length);
+        this._parent.raw(bytes);
+        return this._parent;
+    }
+};
+
+export const encodeUnknown = (writer, message) => {
+    if (message && message._unknown) {
+        for (const entry of message._unknown) {
+            writer.uint32(entry.tag);
+            writer.raw(entry.payload);
+        }
+    }
+};
+
+export const own = (message, key) => Object.prototype.hasOwnProperty.call(message, key);
+
 protobuf.Error = class extends Error {
 
     constructor(message) {
@@ -1394,4 +1630,5 @@ protobuf.Error = class extends Error {
 };
 
 export const BinaryReader = protobuf.BinaryReader;
+export const BinaryWriter = protobuf.BinaryWriter;
 export const TextReader = protobuf.TextReader;

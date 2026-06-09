@@ -91,7 +91,7 @@ onnx.AttributeProto = class AttributeProto {
                     message.type_protos.push(onnx.TypeProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -281,7 +281,7 @@ onnx.ValueInfoProto = class ValueInfoProto {
                     message.metadata_props.push(onnx.StringStringEntryProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -383,7 +383,7 @@ onnx.NodeProto = class NodeProto {
                     message.device_configurations.push(onnx.NodeDeviceConfigurationProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -495,7 +495,7 @@ onnx.IntIntListEntryProto = class IntIntListEntryProto {
                     message.value = reader.array(message.value, () => reader.int64(), tag);
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -558,7 +558,7 @@ onnx.NodeDeviceConfigurationProto = class NodeDeviceConfigurationProto {
                     message.pipeline_stage = reader.int32();
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -633,7 +633,7 @@ onnx.ShardingSpecProto = class ShardingSpecProto {
                     message.sharded_dim.push(onnx.ShardedDimProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -705,7 +705,7 @@ onnx.ShardedDimProto = class ShardedDimProto {
                     message.simple_sharding.push(onnx.SimpleShardedDimProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -769,7 +769,7 @@ onnx.SimpleShardedDimProto = class SimpleShardedDimProto {
                     message.num_shards = reader.int64();
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -842,7 +842,7 @@ onnx.TrainingInfoProto = class TrainingInfoProto {
                     message.update_binding.push(onnx.StringStringEntryProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -949,7 +949,7 @@ onnx.ModelProto = class ModelProto {
                     message.configuration.push(onnx.DeviceConfigurationProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1078,7 +1078,7 @@ onnx.DeviceConfigurationProto = class DeviceConfigurationProto {
                     message.device.push(reader.string());
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1141,7 +1141,7 @@ onnx.StringStringEntryProto = class StringStringEntryProto {
                     message.value = reader.string();
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1202,7 +1202,7 @@ onnx.TensorAnnotation = class TensorAnnotation {
                     message.quant_parameter_tensor_names.push(onnx.StringStringEntryProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1293,7 +1293,7 @@ onnx.GraphProto = class GraphProto {
                     message.metadata_props.push(onnx.StringStringEntryProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1449,7 +1449,7 @@ onnx.TensorProto = class TensorProto {
                     message.metadata_props.push(onnx.StringStringEntryProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1618,7 +1618,7 @@ onnx.TensorProto.Segment = class Segment {
                     message.end = reader.int64();
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1687,7 +1687,7 @@ onnx.SparseTensorProto = class SparseTensorProto {
                     message.dims = reader.array(message.dims, () => reader.int64(), tag);
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1751,7 +1751,7 @@ onnx.TensorShapeProto = class TensorShapeProto {
                     message.dim.push(onnx.TensorShapeProto.Dimension.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1807,7 +1807,7 @@ onnx.TensorShapeProto.Dimension = class Dimension {
                     message.denotation = reader.string();
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1889,7 +1889,7 @@ onnx.TypeProto = class TypeProto {
                     message.denotation = reader.string();
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -1975,7 +1975,7 @@ onnx.TypeProto.Tensor = class Tensor {
                     message.shape = onnx.TensorShapeProto.decode(reader, reader.uint32());
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -2029,7 +2029,7 @@ onnx.TypeProto.Sequence = class Sequence {
                     message.elem_type = onnx.TypeProto.decode(reader, reader.uint32());
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -2079,7 +2079,7 @@ onnx.TypeProto.Map = class Map {
                     message.value_type = onnx.TypeProto.decode(reader, reader.uint32());
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -2133,7 +2133,7 @@ onnx.TypeProto.Optional = class Optional {
                     message.elem_type = onnx.TypeProto.decode(reader, reader.uint32());
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -2183,7 +2183,7 @@ onnx.TypeProto.SparseTensor = class SparseTensor {
                     message.shape = onnx.TensorShapeProto.decode(reader, reader.uint32());
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -2240,7 +2240,7 @@ onnx.TypeProto.Opaque = class Opaque {
                     message.name = reader.string();
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -2297,7 +2297,7 @@ onnx.OperatorSetIdProto = class OperatorSetIdProto {
                     message.version = reader.int64();
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -2400,7 +2400,7 @@ onnx.FunctionProto = class FunctionProto {
                     message.metadata_props.push(onnx.StringStringEntryProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -2525,7 +2525,7 @@ onnx.OperatorProto = class OperatorProto {
                     message.doc_string = reader.string();
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }
@@ -2622,7 +2622,7 @@ onnx.OperatorSetProto = class OperatorSetProto {
                     message.functions.push(onnx.FunctionProto.decode(reader, reader.uint32()));
                     break;
                 default:
-                    reader.skipType(tag & 7);
+                    reader.storeUnknown(message, tag);
                     break;
             }
         }

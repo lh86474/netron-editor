@@ -178,6 +178,9 @@ desktop.Host = class {
         electron.ipcRenderer.on('export', (sender, data) => {
             this._view.export(data.file);
         });
+        electron.ipcRenderer.on('export-onnx', (sender, data) => {
+            this._view.exportOnnx(data.file);
+        });
         electron.ipcRenderer.on('cut', () => {
             this.document.execCommand('cut');
         });

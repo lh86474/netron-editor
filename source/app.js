@@ -272,10 +272,36 @@ app.Application = class {
         }
     }
 
+    async _exportOnnx() {
+        const view = this._views.activeView;
+        if (view && view.path && view.get('export-onnx.enabled') !== false) {
+            let defaultPath = 'Untitled';
+            const file = view.path;
+            const lastIndex = file.lastIndexOf('.');
+            if (lastIndex !== -1) {
+                defaultPath = file.substring(0, lastIndex);
+            }
+            const owner = electron.BrowserWindow.getFocusedWindow();
+            const options = {
+                title: 'Export Modified Model as ONNX',
+                defaultPath: `${defaultPath}.onnx`,
+                buttonLabel: 'Export',
+                filters: [
+                    { name: 'ONNX', extensions: ['onnx'] }
+                ]
+            };
+            const { filePath, canceled } = await electron.dialog.showSaveDialog(owner, options);
+            if (filePath && !canceled) {
+                view.execute('export-onnx', { 'file': filePath });
+            }
+        }
+    }
+
     async execute(command, value, window) {
         switch (command) {
             case 'open': this._open(value); break;
             case 'export': await this._export(); break;
+            case 'export-onnx': await this._exportOnnx(); break;
             case 'close': window.close(); break;
             case 'quit': electron.app.quit(); break;
             case 'reload': this._reload(); break;
