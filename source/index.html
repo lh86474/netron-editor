@@ -19,12 +19,14 @@
 html { touch-action: none; overflow: hidden; width: 100%; height: 100%; -ms-text-size-adjust: 100%; -webkit-text-size-adjust: 100%; text-rendering: optimizeLegibility; -webkit-text-rendering: optimizeLegibility; -moz-text-rendering: optimizeLegibility; -ms-text-rendering: optimizeLegibility; -o-text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-font-smoothing: antialiased; -ms-font-smoothing: antialiased; -o-font-smoothing: antialiased; }
 body { touch-action: none; overflow: hidden; width: 100%; height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 12px; text-rendering: geometricPrecision; }
 button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; }
+:root { --chrome-height: 32px; --chrome-inset: 8px; --chrome-width: 32px; }
 .center { position: absolute; margin: auto; top: 0; right: 0; bottom: 0; left: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .select { user-select: text; -webkit-user-select: text; -moz-user-select: text; }
 .diff-container { display: flex; height: 100%; width: 100%; }
 .graph-pane { display: flex; flex: 1; height: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; position: relative; }
-.graph-pane-label { position: absolute; top: 8px; left: 10px; z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
+.graph-pane-label { position: absolute; top: 0px; height: var(--chrome-height); display: flex; align-items: center; left: var(--chrome-inset); z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
 .graph-pane-original { border-right: 1px solid #ccc; }
+.graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-readonly { cursor: default; }
 .pane-divider { width: 0; flex-shrink: 0; }
 .target { display: flex; height: 100%; width: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; }
@@ -131,7 +133,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .titlebar-button { display: flex; justify-content: center; align-items: center; width: 46px; height: 32px; user-select: none; -webkit-app-region: no-drag; }
 .titlebar-button:hover { color: #000000; background-color: rgba(0, 0, 0, 0.15); }
 .titlebar-button-close:hover { color: #ffffff; background-color: #b43029; }
-.menu-button { display: flex; justify-content: center; align-items: center; color: #aaaaaa; font-size: 20px; height: 32px; width: 32px; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; -webkit-app-region: no-drag; -webkit-app-region: no-drag; user-select: none; }
+.menu-button { display: flex; justify-content: center; align-items: center; color: #aaaaaa; font-size: 20px; height: 32px; width: 32px; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; -webkit-app-region: no-drag; -webkit-app-region: no-drag; user-select: none; transform: translateY(-2px); }
 .menu-button:hover { color: #000000; }
 .menu { display: block; position: absolute; left: -17em; width: 17em; top: 0; height: 100%; z-index: 2; background-color: #ececec; border-right: 1px solid rgba(255, 255, 255, 0.5); padding-top: 40px; padding-bottom: 2px; margin-left: 0; margin-top: 0; overflow: hidden; transition: 0.1s; }
 .menu .menu-group { margin-bottom: 12px; }
@@ -153,7 +155,6 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .welcome .notification .logo-name { display: none; }
 .welcome .toolbar { display: none; }
 @media (prefers-color-scheme: dark) {
-:root { color-scheme: dark; }
 .default { background-color: #404040; }
 .diff-container { background-color: #404040; }
 .graph-pane { background-color: #404040; }
@@ -278,7 +279,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .sidebar-find-toggle input[type="checkbox"] { display: none; }
 .sidebar-find-toggle input[type="checkbox"]:not(:checked) + svg { fill: #ccc; stroke: #ccc; }
 .sidebar-find-toggle input[type="checkbox"]:checked + svg { fill: #555; stroke: #555; }
-.sidebar-find-toggle-icon { stroke: #555; fill: #555; width: 16px; height: 16px; }
+.sidebar-find-toggle-icon { stroke: #555; fill: #555; width: 16px; height: 16px; bottom: 2px; }
 .sidebar-find-content { flex-grow: 1; padding: 0px 20px 20px 20px; overflow-y: auto; list-style-type: none; margin: 0; outline: 0; }
 .sidebar-find-content li *:first-child { margin-right: 2px; }
 .sidebar-find-content li { color: #666; font-size: 13px; height: 22px; line-height: 22px; padding: 0 12px 0 12px; outline: 0; white-space: nowrap; border-radius: 3px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
