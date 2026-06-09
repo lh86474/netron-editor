@@ -19,9 +19,11 @@ view.View = class {
             attributes: false,
             names: false,
             direction: 'vertical',
-            mousewheel: 'scroll'
+            mousewheel: 'scroll',
+            syncScroll: false
         };
         this._options = { ...this._defaultOptions };
+        this._syncApplying = false;
         this._events = {};
         this._events.selectionchange = () => this._selectionChangeHandler();
         this._model = null;
@@ -62,6 +64,10 @@ view.View = class {
             this._element('zoom-out-button').addEventListener('click', () => {
                 this.zoomOut();
             });
+            this._element('sync-scroll-button').addEventListener('click', () => {
+                this.toggle('syncScroll');
+            });
+            this._updateSyncScrollButton();
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget();
             });
@@ -419,6 +425,16 @@ view.View = class {
             case 'mousewheel':
                 this._options.mousewheel = this._options.mousewheel === 'scroll' ? 'zoom' : 'scroll';
                 break;
+            case 'syncScroll':
+                this._options.syncScroll = !this._options.syncScroll;
+                this._updateSyncScrollButton();
+                if (this._options.syncScroll) {
+                    const graph = this._activePaneGraph();
+                    if (graph) {
+                        this._propagateSync(graph);
+                    }
+                }
+                break;
             default:
                 throw new view.Error(`Unsupported toggle '${name}'.`);
         }
@@ -508,6 +524,63 @@ view.View = class {
             return this._rightPane.graph;
         }
         return this._target;
+    }
+
+    _updateSyncScrollButton() {
+        const button = this._element('sync-scroll-button');
+        if (!button) {
+            return;
+        }
+        const active = Boolean(this._options.syncScroll);
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+
+    _syncEnabled() {
+        if (!this._options.syncScroll || this._syncApplying) {
+            return false;
+        }
+        if (!this._leftPane || !this._rightPane) {
+            return false;
+        }
+        return Boolean(this._leftPane.graph && this._rightPane.graph);
+    }
+
+    _propagateSync(sourceGraph) {
+        if (!this._options.syncScroll || this._syncApplying) {
+            return;
+        }
+        let partnerGraph = null;
+        if (this._leftPane && this._leftPane.graph === sourceGraph) {
+            partnerGraph = this._rightPane ? this._rightPane.graph : null;
+        } else if (this._rightPane && this._rightPane.graph === sourceGraph) {
+            partnerGraph = this._leftPane ? this._leftPane.graph : null;
+        }
+        if (!partnerGraph || partnerGraph === sourceGraph) {
+            return;
+        }
+        const sourceContainer = sourceGraph._containerElement();
+        const partnerContainer = partnerGraph._containerElement();
+        if (!sourceContainer || !partnerContainer) {
+            return;
+        }
+        const srcLeft = sourceContainer.scrollLeft;
+        const srcTop = sourceContainer.scrollTop;
+        const srcZoom = sourceGraph.zoom;
+        this._syncApplying = true;
+        try {
+            if (partnerGraph.zoom !== srcZoom) {
+                partnerGraph.zoom = srcZoom;
+            }
+            if (Math.floor(partnerContainer.scrollLeft) !== Math.floor(srcLeft)) {
+                partnerContainer.scrollLeft = srcLeft;
+            }
+            if (Math.floor(partnerContainer.scrollTop) !== Math.floor(srcTop)) {
+                partnerContainer.scrollTop = srcTop;
+            }
+        } finally {
+            this._syncApplying = false;
+        }
     }
 
     _initGraphPanes() {
@@ -3032,6 +3105,9 @@ view.Graph = class extends grapher.Graph {
         container.scrollLeft = this._scrollLeft;
         container.scrollTop = this._scrollTop;
         this._zoom = zoom;
+        if (this.view._syncEnabled()) {
+            this.view._propagateSync(this);
+        }
     }
 
     _pointerDownHandler(e) {
@@ -3152,6 +3228,9 @@ view.Graph = class extends grapher.Graph {
         }
         if (this._scrollTop && e.target.scrollTop !== Math.floor(this._scrollTop)) {
             delete this._scrollTop;
+        }
+        if (this.view._syncEnabled()) {
+            this.view._propagateSync(this);
         }
     }
 
