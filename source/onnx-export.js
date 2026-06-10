@@ -48,18 +48,89 @@ const parseEntityId = (entityId) => {
     if (nodeMatch) {
         return {
             graphIndex: Number(nodeMatch[1]),
+            target: 'node',
             nodeIndex: Number(nodeMatch[2]),
             attributeIndex: nodeMatch[3] !== undefined ? Number(nodeMatch[3]) : null
+        };
+    }
+    const valueAttrMatch = /^graph:(\d+)\/value:(\d+)\/attr:(\d+)$/.exec(entityId);
+    if (valueAttrMatch) {
+        return {
+            graphIndex: Number(valueAttrMatch[1]),
+            target: 'value',
+            valueIndex: Number(valueAttrMatch[2]),
+            attributeIndex: Number(valueAttrMatch[3])
         };
     }
     const valueMatch = /^graph:(\d+)\/value:(\d+)$/.exec(entityId);
     if (valueMatch) {
         return {
             graphIndex: Number(valueMatch[1]),
+            target: 'value',
             valueIndex: Number(valueMatch[2])
         };
     }
     return null;
+};
+
+const formatMetadataValue = (value) => {
+    if (Array.isArray(value)) {
+        return value.join(', ');
+    }
+    if (value === null || value === undefined) {
+        return '';
+    }
+    return String(value);
+};
+
+const buildMetadataProp = (key, value) => {
+    const entry = new onnx.StringStringEntryProto();
+    entry.key = key;
+    entry.value = formatMetadataValue(value);
+    return entry;
+};
+
+const upsertMetadataProp = (valueInfo, key, value) => {
+    valueInfo.metadata_props = valueInfo.metadata_props || [];
+    const existing = valueInfo.metadata_props.find((entry) => entry.key === key);
+    if (existing) {
+        existing.value = formatMetadataValue(value);
+        return;
+    }
+    valueInfo.metadata_props.push(buildMetadataProp(key, value));
+};
+
+const getValueNameById = (editSession, graphIndex, valueIndex) => {
+    const valueId = `graph:${graphIndex}/value:${valueIndex}`;
+    const modifiedGraph = editSession.modified.getGraph(graphIndex);
+    for (const [value, id] of enumerateGraphValues(modifiedGraph, graphIndex)) {
+        if (id === valueId) {
+            return value.name;
+        }
+    }
+    return null;
+};
+
+const getModifiedValueAttribute = (editSession, location) => {
+    const valueId = `graph:${location.graphIndex}/value:${location.valueIndex}`;
+    const modifiedGraph = editSession.modified.getGraph(location.graphIndex);
+    for (const [value, id] of enumerateGraphValues(modifiedGraph, location.graphIndex)) {
+        if (id === valueId) {
+            return (value.attributes || [])[location.attributeIndex] || null;
+        }
+    }
+    return null;
+};
+
+const ensureValueInfo = (graph, name) => {
+    let valueInfo = findValueInfo(graph, name);
+    if (!valueInfo) {
+        valueInfo = new onnx.ValueInfoProto();
+        valueInfo.name = name;
+        graph.value_info = graph.value_info || [];
+        graph.value_info.push(valueInfo);
+    }
+    return valueInfo;
 };
 
 const cloneModelProto = (model) => {
@@ -286,6 +357,24 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
     }
     for (const change of deletes) {
         const location = parseEntityId(change.entityId);
+        if (!location) {
+            continue;
+        }
+        if (location.target === 'value') {
+            const valueName = getValueNameById(editSession, location.graphIndex, location.valueIndex);
+            if (!valueName) {
+                continue;
+            }
+            const originalValueInfo = findValueInfo(originalProto.graph, valueName);
+            const originalMetadata = (originalValueInfo && originalValueInfo.metadata_props || [])[location.attributeIndex];
+            if (originalMetadata && originalMetadata.key) {
+                const valueInfo = findValueInfo(graph, valueName);
+                if (valueInfo) {
+                    valueInfo.metadata_props = (valueInfo.metadata_props || []).filter((entry) => entry.key !== originalMetadata.key);
+                }
+            }
+            continue;
+        }
         const originalNode = originalProto.graph.node[location.nodeIndex];
         const originalAttribute = (originalNode.attribute || [])[location.attributeIndex];
         if (originalAttribute && originalAttribute.name) {
@@ -295,6 +384,23 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
     }
     for (const change of modifications) {
         const location = parseEntityId(change.entityId);
+        if (!location) {
+            continue;
+        }
+        if (location.target === 'value') {
+            const valueName = getValueNameById(editSession, location.graphIndex, location.valueIndex);
+            if (!valueName) {
+                throw new OnnxExportError(`Value '${change.entityId}' not found for property export.`);
+            }
+            const modifiedAttribute = getModifiedValueAttribute(editSession, location);
+            const name = modifiedAttribute ? modifiedAttribute.name : null;
+            if (!name) {
+                continue;
+            }
+            const valueInfo = ensureValueInfo(graph, valueName);
+            upsertMetadataProp(valueInfo, name, change.newValue);
+            continue;
+        }
         const node = graph.node[location.nodeIndex];
         const attribute = node.attribute[location.attributeIndex];
         if (!attribute) {
@@ -309,9 +415,21 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
     for (const change of additions) {
         const parentId = change.parentId || change.entityId.replace(/\/attr:\d+$/, '');
         const location = parseEntityId(parentId);
-        const node = graph.node[location.nodeIndex];
+        if (!location) {
+            continue;
+        }
         const property = change.property || '';
         const name = property.startsWith('attributes.') ? property.slice('attributes.'.length) : property;
+        if (location.target === 'value') {
+            const valueName = getValueNameById(editSession, location.graphIndex, location.valueIndex);
+            if (!valueName) {
+                throw new OnnxExportError(`Value '${parentId}' not found for property export.`);
+            }
+            const valueInfo = ensureValueInfo(graph, valueName);
+            upsertMetadataProp(valueInfo, name, change.newValue);
+            continue;
+        }
+        const node = graph.node[location.nodeIndex];
         const modifiedNode = editSession.modified.getGraph(location.graphIndex).nodes[location.nodeIndex];
         const modifiedAttribute = (modifiedNode.attributes || []).find((entry) => entry.name === name);
         const attributeType = change.attributeType || (modifiedAttribute && modifiedAttribute.type) || 'string';

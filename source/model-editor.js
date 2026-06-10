@@ -78,6 +78,17 @@ export const enumerateGraphValues = (graph, graphIndex) => {
 
 const readModel = (model) => {
     const valueMap = new Map();
+    const readAttribute = (attribute) => {
+        const result = {
+            name: attribute.name,
+            type: attribute.type,
+            value: cloneAttributeValue(attribute.value)
+        };
+        if (attribute.visible === false) {
+            result.visible = false;
+        }
+        return result;
+    };
     const cloneValue = (value) => {
         if (value === null || value === undefined) {
             return null;
@@ -94,6 +105,17 @@ const readModel = (model) => {
         }
         if (value.initializer !== undefined) {
             cloned.initializer = value.initializer;
+        }
+        if (Array.isArray(value.attributes)) {
+            cloned.attributes = value.attributes.map((attribute) => readAttribute(attribute));
+        } else if (Array.isArray(value.metadata)) {
+            cloned.attributes = value.metadata.map((entry) => ({
+                name: entry.name,
+                type: 'string',
+                value: cloneAttributeValue(entry.value)
+            }));
+        } else {
+            cloned.attributes = [];
         }
         valueMap.set(value, cloned);
         return cloned;
@@ -114,17 +136,6 @@ const readModel = (model) => {
             name: argument.name,
             value: readArgumentValues(argument)
         };
-    };
-    const readAttribute = (attribute) => {
-        const result = {
-            name: attribute.name,
-            type: attribute.type,
-            value: cloneAttributeValue(attribute.value)
-        };
-        if (attribute.visible === false) {
-            result.visible = false;
-        }
-        return result;
     };
     const readNode = (node) => ({
         name: node.name,
@@ -169,6 +180,61 @@ const parseValueEntityId = (entityId) => {
     };
 };
 
+const parseAttributeEntityId = (entityId) => {
+    const nodeMatch = /^graph:(\d+)\/node:(\d+)(?:\/attr:(\d+))?$/.exec(entityId);
+    if (nodeMatch) {
+        return {
+            graphIndex: Number(nodeMatch[1]),
+            target: 'node',
+            targetIndex: Number(nodeMatch[2]),
+            attributeIndex: nodeMatch[3] !== undefined ? Number(nodeMatch[3]) : null
+        };
+    }
+    const valueMatch = /^graph:(\d+)\/value:(\d+)(?:\/attr:(\d+))?$/.exec(entityId);
+    if (valueMatch) {
+        return {
+            graphIndex: Number(valueMatch[1]),
+            target: 'value',
+            targetIndex: Number(valueMatch[2]),
+            attributeIndex: valueMatch[3] !== undefined ? Number(valueMatch[3]) : null
+        };
+    }
+    throw new Error(`Invalid attribute entityId: ${entityId}`);
+};
+
+const parseAttributeParentId = (parentId) => {
+    const nodeMatch = /^graph:(\d+)\/node:(\d+)$/.exec(parentId);
+    if (nodeMatch) {
+        return {
+            graphIndex: Number(nodeMatch[1]),
+            target: 'node',
+            targetIndex: Number(nodeMatch[2])
+        };
+    }
+    const valueMatch = /^graph:(\d+)\/value:(\d+)$/.exec(parentId);
+    if (valueMatch) {
+        return {
+            graphIndex: Number(valueMatch[1]),
+            target: 'value',
+            targetIndex: Number(valueMatch[2])
+        };
+    }
+    throw new Error(`Invalid attribute parentId: ${parentId}`);
+};
+
+const getAttributeTarget = (model, location) => {
+    if (location.target === 'node') {
+        const graph = model.modules[location.graphIndex];
+        return graph.nodes[location.targetIndex];
+    }
+    const valueId = `graph:${location.graphIndex}/value:${location.targetIndex}`;
+    const value = getValueByEntityId(model, valueId);
+    if (!value) {
+        throw new Error(`Value not found for entityId: ${valueId}`);
+    }
+    return value;
+};
+
 const attributeNameFromProperty = (property) => {
     const prefix = 'attributes.';
     if (!property.startsWith(prefix)) {
@@ -207,6 +273,13 @@ const buildOriginalSnapshot = (model) => {
             if (value.type !== undefined) {
                 snapshot.set(`${valueId}:type`, value.type);
             }
+            if (value.description !== undefined) {
+                snapshot.set(`${valueId}:description`, value.description);
+            }
+            (value.attributes || []).forEach((attribute, attributeIndex) => {
+                const attributeId = `${valueId}/attr:${attributeIndex}`;
+                snapshot.set(attributeId, cloneAttributeValue(attribute.value));
+            });
         }
     });
     return snapshot;
@@ -226,17 +299,28 @@ export const AttributeSchemaResolver = {
         return schema && schema.type ? schema.type : 'string';
     },
 
-    validateName(node, attributeName, excludeIndex = -1) {
+    validateNameOnTarget(target, attributeName, excludeIndex = -1, reserved = []) {
         if (!attributeName) {
             return 'Attribute name is required';
         }
-        const attributes = node.attributes || [];
+        if (reserved.includes(attributeName)) {
+            return `Property '${attributeName}' is reserved`;
+        }
+        const attributes = target.attributes || [];
         for (let index = 0; index < attributes.length; index++) {
             if (index !== excludeIndex && attributes[index].name === attributeName) {
                 return `Attribute '${attributeName}' already exists`;
             }
         }
         return null;
+    },
+
+    validateName(node, attributeName, excludeIndex = -1) {
+        return this.validateNameOnTarget(node, attributeName, excludeIndex);
+    },
+
+    validateValuePropertyName(value, propertyName, excludeIndex = -1) {
+        return this.validateNameOnTarget(value, propertyName, excludeIndex, ['name', 'type', 'description']);
     },
 
     parseValue(text, type) {
@@ -298,22 +382,27 @@ class EditorState {
         let changeType = patch.changeType;
 
         if (patch.changeType === 'add' && patch.entityType === 'attribute') {
-            const location = parseNodeEntityId(patch.parentId);
-            const graph = this.modified.getGraph(location.graphIndex);
-            const node = graph.nodes[location.nodeIndex];
+            const location = parseAttributeParentId(patch.parentId);
+            const target = getAttributeTarget(this.modified.model, location);
             const name = attributeNameFromProperty(patch.property);
-            const attributeType = patch.attributeType || AttributeSchemaResolver.resolveType(node.type, name);
-            node.attributes.push({
+            const attributeType = patch.attributeType || (
+                location.target === 'node' ?
+                    AttributeSchemaResolver.resolveType(target.type, name) :
+                    AttributeSchemaResolver.resolveType(null, name)
+            );
+            if (!Array.isArray(target.attributes)) {
+                target.attributes = [];
+            }
+            target.attributes.push({
                 name,
                 type: attributeType,
                 value: Array.isArray(patch.newValue) ? patch.newValue.slice() : patch.newValue
             });
-            entityId = `${patch.parentId}/attr:${node.attributes.length - 1}`;
+            entityId = `${patch.parentId}/attr:${target.attributes.length - 1}`;
         } else if (patch.changeType === 'delete' && patch.entityType === 'attribute') {
-            const location = parseNodeEntityId(entityId);
-            const graph = this.modified.getGraph(location.graphIndex);
-            const node = graph.nodes[location.nodeIndex];
-            node.attributes.splice(location.attributeIndex, 1);
+            const location = parseAttributeEntityId(entityId);
+            const target = getAttributeTarget(this.modified.model, location);
+            target.attributes.splice(location.attributeIndex, 1);
         } else if (patch.entityType === 'value') {
             const value = getValueByEntityId(this.modified.model, entityId);
             if (!value) {
@@ -328,16 +417,17 @@ class EditorState {
             } else {
                 throw new Error(`Unsupported value property: ${patch.property}`);
             }
+        } else if (patch.entityType === 'attribute') {
+            const location = parseAttributeEntityId(entityId);
+            const target = getAttributeTarget(this.modified.model, location);
+            const attribute = target.attributes[location.attributeIndex];
+            attribute.value = Array.isArray(patch.newValue) ? patch.newValue.slice() : patch.newValue;
         } else {
             const location = parseNodeEntityId(entityId.includes('/attr:') ? entityId : patch.parentId || entityId);
             const graph = this.modified.getGraph(location.graphIndex);
             const node = graph.nodes[location.nodeIndex];
 
-            if (patch.entityType === 'attribute') {
-                const attributeLocation = parseNodeEntityId(entityId);
-                const attribute = node.attributes[attributeLocation.attributeIndex];
-                attribute.value = Array.isArray(patch.newValue) ? patch.newValue.slice() : patch.newValue;
-            } else if (patch.entityType === 'node' && patch.property === 'name') {
+            if (patch.entityType === 'node' && patch.property === 'name') {
                 node.name = patch.newValue;
             } else {
                 throw new Error(`Unsupported patch: ${JSON.stringify(patch)}`);

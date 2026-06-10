@@ -4350,6 +4350,50 @@ view.EditableObjectSidebar = class extends view.ObjectSidebar {
         this.addEntry(attribute.name, item);
         return item;
     }
+
+    addAttributeControls(parentId, options) {
+        const row = this.createElement('div', 'sidebar-editable-add-row');
+        const nameInput = this.createElement('input');
+        nameInput.setAttribute('type', 'text');
+        nameInput.setAttribute('class', 'sidebar-editable-input');
+        nameInput.setAttribute('placeholder', options.namePlaceholder || 'attribute name');
+        const valueInput = this.createElement('input');
+        valueInput.setAttribute('type', 'text');
+        valueInput.setAttribute('class', 'sidebar-editable-input');
+        valueInput.setAttribute('placeholder', options.valuePlaceholder || 'value (e.g. 1,2,3)');
+        const button = this.createElement('button');
+        button.setAttribute('class', 'sidebar-add-button');
+        button.setAttribute('type', 'button');
+        button.textContent = options.buttonLabel || '+ Add Attribute';
+        button.addEventListener('click', (e) => {
+            e.preventDefault();
+            const name = nameInput.value.trim();
+            if (!name) {
+                return;
+            }
+            const validationError = options.validateName(name);
+            if (validationError) {
+                this.error(new Error(validationError), true);
+                return;
+            }
+            const attributeType = options.resolveType(name);
+            const parsed = options.parseValue(valueInput.value, attributeType);
+            this._view.applyEditorPatch({
+                parentId,
+                entityType: 'attribute',
+                changeType: 'add',
+                property: `attributes.${name}`,
+                attributeType,
+                newValue: parsed
+            });
+            nameInput.value = '';
+            valueInput.value = '';
+        });
+        row.appendChild(nameInput);
+        row.appendChild(valueInput);
+        row.appendChild(button);
+        this.element.appendChild(row);
+    }
 };
 
 view.NodeSidebar = class extends view.ObjectSidebar {
@@ -4553,7 +4597,12 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
             }
         }
         if (nodeId) {
-            this._addAttributeControls(nodeId);
+            this.addAttributeControls(nodeId, {
+                buttonLabel: '+ Add Attribute',
+                validateName: (name) => AttributeSchemaResolver.validateName(this._node, name),
+                resolveType: (name) => AttributeSchemaResolver.resolveType(this._node.type, name),
+                parseValue: (text, type) => AttributeSchemaResolver.parseValue(text, type)
+            });
         }
         const inputs = node.inputs;
         if (Array.isArray(inputs) && inputs.length > 0) {
@@ -4576,50 +4625,6 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
                 this.addArgument(block.name, block);
             }
         }
-    }
-
-    _addAttributeControls(nodeId) {
-        const row = this.createElement('div', 'sidebar-editable-add-row');
-        const nameInput = this.createElement('input');
-        nameInput.setAttribute('type', 'text');
-        nameInput.setAttribute('class', 'sidebar-editable-input');
-        nameInput.setAttribute('placeholder', 'attribute name');
-        const valueInput = this.createElement('input');
-        valueInput.setAttribute('type', 'text');
-        valueInput.setAttribute('class', 'sidebar-editable-input');
-        valueInput.setAttribute('placeholder', 'value (e.g. 1,2,3)');
-        const button = this.createElement('button');
-        button.setAttribute('class', 'sidebar-add-button');
-        button.setAttribute('type', 'button');
-        button.textContent = '+ Add Attribute';
-        button.addEventListener('click', (e) => {
-            e.preventDefault();
-            const name = nameInput.value.trim();
-            if (!name) {
-                return;
-            }
-            const validationError = AttributeSchemaResolver.validateName(this._node, name);
-            if (validationError) {
-                this.error(new Error(validationError), true);
-                return;
-            }
-            const attributeType = AttributeSchemaResolver.resolveType(this._node.type, name);
-            const parsed = AttributeSchemaResolver.parseValue(valueInput.value, attributeType);
-            this._view.applyEditorPatch({
-                parentId: nodeId,
-                entityType: 'attribute',
-                changeType: 'add',
-                property: `attributes.${name}`,
-                attributeType,
-                newValue: parsed
-            });
-            nameInput.value = '';
-            valueInput.value = '';
-        });
-        row.appendChild(nameInput);
-        row.appendChild(valueInput);
-        row.appendChild(button);
-        this.element.appendChild(row);
     }
 
     activate() {
@@ -5449,17 +5454,39 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
                     newValue: newType
                 });
             }, { style: 'nowrap' });
-            if (value.description !== undefined) {
-                this.addEditableProperty('description', value.description, (newDescription) => {
-                    this._view.applyEditorPatch({
-                        entityId: valueId,
-                        entityType: 'value',
-                        changeType: 'modify',
-                        property: 'description',
-                        newValue: newDescription
-                    });
+            this.addEditableProperty('description', value.description !== undefined ? value.description : '', (newDescription) => {
+                this._view.applyEditorPatch({
+                    entityId: valueId,
+                    entityType: 'value',
+                    changeType: 'modify',
+                    property: 'description',
+                    newValue: newDescription
+                });
+            });
+            const attributes = value.attributes || [];
+            for (let index = 0; index < attributes.length; index++) {
+                const attribute = attributes[index];
+                const attributeId = `${valueId}/attr:${index}`;
+                this.addEditableAttribute(attribute, attributeId, (patch) => {
+                    this._view.applyEditorPatch(patch);
+                }, {
+                    onDelete: () => {
+                        this._view.applyEditorPatch({
+                            entityId: attributeId,
+                            entityType: 'attribute',
+                            changeType: 'delete',
+                            property: `attributes.${attribute.name}`
+                        });
+                    }
                 });
             }
+            this.addAttributeControls(valueId, {
+                buttonLabel: '+ Add Property',
+                namePlaceholder: 'property name',
+                validateName: (name) => AttributeSchemaResolver.validateValuePropertyName(value, name),
+                resolveType: () => 'string',
+                parseValue: (text, type) => AttributeSchemaResolver.parseValue(text, type)
+            });
         } else {
             this.addProperty('name', name);
             if (value.type) {
@@ -5547,6 +5574,13 @@ view.ConnectionSidebar = class extends view.ObjectSidebar {
             const item = new view.ValueView(this._view, value);
             this.addEntry('type', item);
             item.toggle();
+        }
+        if (value.description) {
+            this.addProperty('description', value.description);
+        }
+        const attributes = value.attributes || [];
+        for (const attribute of attributes) {
+            this.addArgument(attribute.name, attribute, 'attribute');
         }
         if (from) {
             this.addSection('Inputs');

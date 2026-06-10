@@ -279,6 +279,7 @@ onnx.Value = class {
         this._initializer = initializer;
         this._description = description;
         this._quantization = annotation ? { type: 'annotation', value: annotation } : null;
+        this._metadata = [];
     }
 
     get name() {
@@ -291,6 +292,14 @@ onnx.Value = class {
 
     get description() {
         return this._description;
+    }
+
+    get metadata() {
+        return this._metadata;
+    }
+
+    set metadata(value) {
+        this._metadata = Array.isArray(value) ? value : [];
     }
 
     get quantization() {
@@ -1189,6 +1198,8 @@ onnx.Context.Graph = class extends onnx.Context {
                 const tensor = this.tensor(value.name);
                 tensor.type = this.createType(value.type);
                 tensor.description = value.doc_string;
+                const metadata_props = value.metadata_props || [];
+                tensor.metadata = metadata_props.map((metadata) => new onnx.Argument(metadata.key, metadata.value));
             }
         }
         for (const node of graph.node) {
@@ -1266,7 +1277,11 @@ onnx.Context.Graph = class extends onnx.Context {
         if (!this._values.has(name)) {
             const tensor = this.tensor(name);
             const type = tensor.initializer ? tensor.initializer.type : tensor.type || null;
-            this._values.set(name, new onnx.Value(name, type, tensor.initializer, tensor.annotation, tensor.description));
+            const value = new onnx.Value(name, type, tensor.initializer, tensor.annotation, tensor.description);
+            if (Array.isArray(tensor.metadata)) {
+                value.metadata = tensor.metadata;
+            }
+            this._values.set(name, value);
         }
         return this._values.get(name);
     }
