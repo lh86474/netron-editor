@@ -439,6 +439,87 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
     }
 };
 
+const collectArgumentValueNames = (argument) => {
+    const names = [];
+    if (!argument || !Array.isArray(argument.value)) {
+        return names;
+    }
+    for (const value of argument.value) {
+        if (value && value.name) {
+            names.push(value.name);
+        }
+    }
+    return names;
+};
+
+const buildNodeProtoFromModified = (modifiedNode) => {
+    const node = new onnx.NodeProto();
+    node.name = modifiedNode.name || '';
+    node.op_type = modifiedNode.type ? (modifiedNode.type.identifier || modifiedNode.type.name) : '';
+    if (modifiedNode.type && modifiedNode.type.module && modifiedNode.type.module !== 'ai.onnx') {
+        node.domain = modifiedNode.type.module;
+    }
+    node.input = [];
+    for (const input of modifiedNode.inputs || []) {
+        node.input.push(...collectArgumentValueNames(input));
+    }
+    node.output = [];
+    for (const output of modifiedNode.outputs || []) {
+        node.output.push(...collectArgumentValueNames(output));
+    }
+    node.attribute = (modifiedNode.attributes || []).map((attribute) => (
+        buildAttributeProto(attribute.name, attribute.type, attribute.value)
+    ));
+    return node;
+};
+
+const syncNodeInputsOutputs = (protoNode, modifiedNode) => {
+    protoNode.input = [];
+    for (const input of modifiedNode.inputs || []) {
+        protoNode.input.push(...collectArgumentValueNames(input));
+    }
+    protoNode.output = [];
+    for (const output of modifiedNode.outputs || []) {
+        protoNode.output.push(...collectArgumentValueNames(output));
+    }
+};
+
+const applyNodeInsertions = (graph, originalProto, editSession) => {
+    const changes = editSession.delta.getChanges();
+    const insertions = changes.filter((change) => (
+        change.entityType === 'node' && change.changeType === 'add' && change.property === 'insert'
+    ));
+    if (insertions.length === 0) {
+        return;
+    }
+    const originalNodesByName = new Map();
+    for (const node of originalProto.graph.node || []) {
+        if (node.name) {
+            originalNodesByName.set(node.name, node);
+        }
+    }
+    const modifiedGraph = editSession.modified.getGraph(0);
+    const rebuiltNodes = [];
+    for (const modifiedNode of modifiedGraph.nodes || []) {
+        const existing = originalNodesByName.get(modifiedNode.name);
+        if (existing) {
+            syncNodeInputsOutputs(existing, modifiedNode);
+            rebuiltNodes.push(existing);
+        } else {
+            rebuiltNodes.push(buildNodeProtoFromModified(modifiedNode));
+        }
+    }
+    graph.node = rebuiltNodes;
+    for (let index = 0; index < (modifiedGraph.outputs || []).length; index++) {
+        const modifiedOutput = modifiedGraph.outputs[index];
+        const protoOutput = (graph.output || [])[index];
+        const modifiedValue = modifiedOutput && Array.isArray(modifiedOutput.value) ? modifiedOutput.value[0] : null;
+        if (protoOutput && modifiedValue && modifiedValue.name && protoOutput.name !== modifiedValue.name) {
+            renameInGraph(graph, protoOutput.name, modifiedValue.name);
+        }
+    }
+};
+
 const applyChanges = (cloned, originalProto, editSession) => {
     const graph = cloned.graph;
     const changes = editSession.delta.getChanges();
@@ -512,6 +593,8 @@ const applyChanges = (cloned, originalProto, editSession) => {
         }
         renameInGraph(graph, oldName, newName);
     }
+
+    applyNodeInsertions(graph, originalProto, editSession);
 };
 
 export const canExportOnnx = (model) => {

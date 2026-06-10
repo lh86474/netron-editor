@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError } from './onnx-export.js';
 import { GraphPane } from './graph-pane.js';
 
@@ -704,6 +704,9 @@ view.View = class {
         if (change.entityType === 'node' && change.property === 'name') {
             return true;
         }
+        if (change.entityType === 'node' && change.changeType === 'add') {
+            return true;
+        }
         if (change.entityType === 'attribute') {
             return false;
         }
@@ -750,6 +753,72 @@ view.View = class {
         // eslint-disable-next-line no-console
         console.log('[editor] Delta updated:', stringifyEditorJSON(this._editSession.delta.toJSON()));
         return change;
+    }
+
+    _canInsertNode() {
+        return this._editSession && this._model && canExportOnnx(this._model);
+    }
+
+    _closeGraphOverlays() {
+        if (this._graphContextMenu) {
+            this._graphContextMenu.close();
+            this._graphContextMenu = null;
+        }
+        if (this._operatorPicker) {
+            this._operatorPicker.close();
+            this._operatorPicker = null;
+        }
+    }
+
+    _showNodeContextMenu(nodeView, event) {
+        if (!this._canInsertNode() || this._target && this._target.readOnly) {
+            return;
+        }
+        this._closeGraphOverlays();
+        const x = event.clientX;
+        const y = event.clientY;
+        this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, [
+            {
+                label: 'Insert Above\u2026',
+                action: () => this._openOperatorPicker(nodeView, 'above', x, y)
+            },
+            {
+                label: 'Insert Below\u2026',
+                action: () => this._openOperatorPicker(nodeView, 'below', x, y)
+            }
+        ]);
+        this._graphContextMenu.open();
+    }
+
+    _openOperatorPicker(nodeView, position, x, y) {
+        this._closeGraphOverlays();
+        this._operatorPicker = new view.OperatorPicker(this, nodeView, position, x, y);
+        this._operatorPicker.open();
+    }
+
+    async insertNodeAt(nodeView, position, opSchema) {
+        if (!this._canInsertNode()) {
+            return;
+        }
+        try {
+            const entity = this._resolveNodeEntity(nodeView.value);
+            if (!entity) {
+                throw new Error('Node entity not found.');
+            }
+            const graph = this._editSession.modified.getGraph(entity.graphIndex);
+            const uniqueName = genUniqueNodeName(`Inserted${opSchema.name}`, graph);
+            const nodeSpec = buildNodeFromMetadata(opSchema, uniqueName, graph);
+            await this.applyEditorPatch({
+                parentId: entity.nodeId,
+                entityType: 'node',
+                changeType: 'add',
+                property: 'insert',
+                position,
+                newValue: nodeSpec
+            });
+        } catch (error) {
+            this.error(error, 'Error inserting node.', null);
+        }
     }
 
     async _refreshModifiedPane() {
@@ -2248,6 +2317,198 @@ view.Menu.Separator = class {
     }
 };
 
+view.GraphContextMenu = class {
+
+    constructor(view, host, x, y, items) {
+        this._view = view;
+        this._host = host;
+        this._document = host.document;
+        this._window = host.window;
+        this._x = x;
+        this._y = y;
+        this._items = items;
+        this._element = this._document.createElement('div');
+        this._element.className = 'graph-context-menu';
+        for (const item of items) {
+            const button = this._document.createElement('button');
+            button.className = 'graph-context-menu-item';
+            button.type = 'button';
+            button.textContent = item.label;
+            button.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.close();
+                item.action();
+            });
+            this._element.appendChild(button);
+        }
+        this._onKeyDown = (e) => {
+            if (e.key === 'Escape') {
+                this.close();
+            }
+        };
+        this._onPointerDown = (e) => {
+            if (!this._element.contains(e.target)) {
+                this.close();
+            }
+        };
+    }
+
+    open() {
+        this._element.style.left = `${this._x}px`;
+        this._element.style.top = `${this._y}px`;
+        this._document.body.appendChild(this._element);
+        this._window.addEventListener('keydown', this._onKeyDown);
+        this._window.addEventListener('pointerdown', this._onPointerDown, true);
+    }
+
+    close() {
+        if (this._element.parentNode) {
+            this._element.parentNode.removeChild(this._element);
+        }
+        this._window.removeEventListener('keydown', this._onKeyDown);
+        this._window.removeEventListener('pointerdown', this._onPointerDown, true);
+        if (this._view._graphContextMenu === this) {
+            this._view._graphContextMenu = null;
+        }
+    }
+};
+
+view.OperatorPicker = class {
+
+    constructor(view, nodeView, position, x, y) {
+        this._view = view;
+        this._nodeView = nodeView;
+        this._position = position;
+        this._host = view._host;
+        this._document = this._host.document;
+        this._window = this._host.window;
+        this._x = x;
+        this._y = y;
+        this._ops = [];
+        this._filtered = [];
+        this._element = this._document.createElement('div');
+        this._element.className = 'operator-picker';
+        this._query = this._document.createElement('input');
+        this._query.className = 'operator-picker-query';
+        this._query.type = 'text';
+        this._query.placeholder = 'Search ONNX operators';
+        this._query.spellcheck = false;
+        this._list = this._document.createElement('div');
+        this._list.className = 'operator-picker-list';
+        this._element.appendChild(this._query);
+        this._element.appendChild(this._list);
+        this._query.addEventListener('input', () => this._updateList());
+        this._query.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                this.close();
+            } else if (e.key === 'Enter' && this._filtered.length > 0) {
+                this._select(this._filtered[0]);
+            }
+        });
+        this._onPointerDown = (e) => {
+            if (!this._element.contains(e.target)) {
+                this.close();
+            }
+        };
+    }
+
+    _getOpSetImports() {
+        const imports = new Map();
+        const model = this._view._model;
+        if (model && model.proto && model.proto.opset_import) {
+            for (const entry of model.proto.opset_import) {
+                imports.set(entry.domain || 'ai.onnx', Number(entry.version));
+            }
+        }
+        if (imports.size === 0 && Array.isArray(model && model.imports)) {
+            for (const entry of model.imports) {
+                const match = /^(.+?) v(\d+)$/.exec(entry);
+                if (match) {
+                    imports.set(match[1], Number(match[2]));
+                }
+            }
+        }
+        if (imports.size === 0) {
+            imports.set('ai.onnx', 13);
+        }
+        return imports;
+    }
+
+    _filterAvailableOps(allTypes) {
+        const imports = this._getOpSetImports();
+        const latest = new Map();
+        for (const type of allTypes) {
+            const module = type.module || 'ai.onnx';
+            const importVersion = imports.get(module);
+            if (importVersion === undefined || type.version > importVersion) {
+                continue;
+            }
+            const key = `${module}:${type.name}`;
+            const current = latest.get(key);
+            if (!current || type.version > current.version) {
+                latest.set(key, type);
+            }
+        }
+        return Array.from(latest.values()).sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    async _loadMetadata() {
+        const data = await this._host.asset('onnx-metadata.json');
+        const types = JSON.parse(data);
+        this._ops = this._filterAvailableOps(types);
+        this._filtered = this._ops.slice(0, 200);
+    }
+
+    _updateList() {
+        const term = this._query.value.trim().toLowerCase();
+        this._filtered = term ?
+            this._ops.filter((entry) => entry.name.toLowerCase().includes(term)).slice(0, 200) :
+            this._ops.slice(0, 200);
+        this._list.replaceChildren();
+        for (const entry of this._filtered) {
+            const button = this._document.createElement('button');
+            button.className = 'operator-picker-item';
+            button.type = 'button';
+            button.textContent = entry.name;
+            button.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._select(entry);
+            });
+            this._list.appendChild(button);
+        }
+    }
+
+    async _select(entry) {
+        this.close();
+        await this._view.insertNodeAt(this._nodeView, this._position, entry);
+    }
+
+    async open() {
+        this._element.style.left = `${this._x}px`;
+        this._element.style.top = `${this._y}px`;
+        this._document.body.appendChild(this._element);
+        this._window.addEventListener('pointerdown', this._onPointerDown, true);
+        try {
+            await this._loadMetadata();
+            this._updateList();
+            this._query.focus();
+        } catch (error) {
+            this.close();
+            this._view.error(error, 'Error loading operator metadata.', null);
+        }
+    }
+
+    close() {
+        if (this._element.parentNode) {
+            this._element.parentNode.removeChild(this._element);
+        }
+        this._window.removeEventListener('pointerdown', this._onPointerDown, true);
+        if (this._view._operatorPicker === this) {
+            this._view._operatorPicker = null;
+        }
+    }
+};
+
 view.Worker = class {
 
     constructor(host) {
@@ -3396,6 +3657,13 @@ view.Node = class extends grapher.Node {
                     }
                 }
             }
+        }
+        if (type !== 'graph' && type !== 'function') {
+            this.onContextMenu = (event) => {
+                if (!this.context.readOnly && this.context.view && this.context.view._canInsertNode()) {
+                    this.context.view._showNodeContextMenu(this, event);
+                }
+            };
         }
     }
 

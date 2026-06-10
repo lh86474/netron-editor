@@ -131,6 +131,60 @@ export class DeltaTracker {
         return () => this._listeners.delete(callback);
     }
 
+    _remapEntityId(entityId, graphIndex, fromIndex, offset) {
+        const prefix = `graph:${graphIndex}/node:`;
+        if (!entityId.startsWith(prefix)) {
+            return entityId;
+        }
+        const rest = entityId.slice(prefix.length);
+        const match = /^(\d+)(\/attr:\d+)?$/.exec(rest);
+        if (!match) {
+            return entityId;
+        }
+        const nodeIndex = Number(match[1]);
+        if (nodeIndex < fromIndex) {
+            return entityId;
+        }
+        return `${prefix}${nodeIndex + offset}${match[2] || ''}`;
+    }
+
+    remapNodeIndices(graphIndex, fromIndex, offset) {
+        if (!offset) {
+            return false;
+        }
+        let changed = false;
+        const remappedChanges = new Map();
+        for (const [entityId, change] of this._changes) {
+            const newId = this._remapEntityId(entityId, graphIndex, fromIndex, offset);
+            const newChange = { ...change, entityId: newId };
+            if (change.parentId) {
+                newChange.parentId = this._remapEntityId(change.parentId, graphIndex, fromIndex, offset);
+            }
+            if (newId !== entityId) {
+                changed = true;
+            }
+            remappedChanges.set(newId, newChange);
+        }
+        if (changed) {
+            this._changes = remappedChanges;
+        }
+        const remappedOriginal = new Map();
+        for (const [key, value] of this._original) {
+            const nodeKeyMatch = /^graph:(\d+)\/node:(\d+)(\/attr:\d+)?$/.exec(key);
+            if (nodeKeyMatch && Number(nodeKeyMatch[1]) === graphIndex && Number(nodeKeyMatch[2]) >= fromIndex) {
+                const newKey = `graph:${nodeKeyMatch[1]}/node:${Number(nodeKeyMatch[2]) + offset}${nodeKeyMatch[3] || ''}`;
+                remappedOriginal.set(newKey, value);
+                changed = true;
+            } else {
+                remappedOriginal.set(key, value);
+            }
+        }
+        if (changed) {
+            this._original = remappedOriginal;
+        }
+        return changed;
+    }
+
     _emit() {
         for (const callback of this._listeners) {
             callback(this.getChanges());

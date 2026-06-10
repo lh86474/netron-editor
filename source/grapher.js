@@ -410,6 +410,13 @@ grapher.Node = class {
             block.build(document, this.element);
         }
         this.element.appendChild(this.border);
+        if (this.onContextMenu) {
+            this.element.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                this.onContextMenu(e);
+            });
+        }
     }
 
     async measure() {

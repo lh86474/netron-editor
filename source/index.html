@@ -144,6 +144,14 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .menu .menu-group .menu-command .menu-label { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .menu .menu-group .menu-command .menu-shortcut { display: block; float: right; margin-left: 25px; color: #888888; }
 .menu .menu-group .menu-separator { border-top: 1px; border-bottom: 0; border-style: solid; border-color: #e5e5e5; margin-left: 12px; margin-right: 12px; }
+.graph-context-menu { position: fixed; z-index: 1000; min-width: 160px; background-color: #ececec; border: 1px solid #cccccc; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); padding: 4px 0; }
+.graph-context-menu-item { display: block; border: none; border-radius: 0; background-color: transparent; color: #000000; width: 100%; text-align: left; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+.graph-context-menu-item:hover, .graph-context-menu-item:focus { color: #ffffff; background-color: #2e6bd2; outline: none; }
+.operator-picker { position: fixed; z-index: 1001; width: 280px; background-color: #ececec; border: 1px solid #cccccc; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); padding: 8px; }
+.operator-picker-query { display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px; border: 1px solid #cccccc; margin-bottom: 6px; }
+.operator-picker-list { max-height: 300px; overflow-y: auto; }
+.operator-picker-item { display: block; border: none; border-radius: 0; background-color: transparent; color: #000000; width: 100%; text-align: left; padding: 4px 8px; font-size: 12px; cursor: pointer; }
+.operator-picker-item:hover, .operator-picker-item:focus { color: #ffffff; background-color: #2e6bd2; outline: none; }
 .about .titlebar-visible { opacity: 0; }
 @-webkit-keyframes orbit { 0% { -webkit-transform: rotate(0deg); transform: rotate(0deg); } 100% { -webkit-transform: rotate(360deg); transform: rotate(360deg); } }
 @keyframes orbit { 0% { -webkit-transform: rotate(0deg); transform: rotate(0deg); }  100% { -webkit-transform: rotate(360deg); transform: rotate(360deg); } }
@@ -206,6 +214,13 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .menu .menu-group .menu-command:disabled { color: #888888; }
 .menu .menu-group .menu-command .shortcut { color: #888888; }
 .menu .menu-group .menu-separator { border-color: #363636; }
+.graph-context-menu { background-color: #2d2d2d; border-color: #444444; }
+.graph-context-menu-item { color: #ffffff; }
+.graph-context-menu-item:hover, .graph-context-menu-item:focus { color: #ffffff; background-color: #2e6bd2; }
+.operator-picker { background-color: #2d2d2d; border-color: #444444; }
+.operator-picker-query { background-color: #1e1e1e; color: #ffffff; border-color: #444444; }
+.operator-picker-item { color: #ffffff; }
+.operator-picker-item:hover, .operator-picker-item:focus { color: #ffffff; background-color: #2e6bd2; }
 }
 @media all and (max-width: 640px) {
 .logo { width: 240px; }

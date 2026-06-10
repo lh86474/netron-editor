@@ -257,6 +257,232 @@ const getValueByEntityId = (model, entityId) => {
     return null;
 };
 
+export const collectGraphValueNames = (graph) => {
+    const names = new Set();
+    const track = (value) => {
+        if (value && value.name) {
+            names.add(value.name);
+        }
+    };
+    for (const input of graph.inputs || []) {
+        trackArgumentValues(input, track);
+    }
+    for (const output of graph.outputs || []) {
+        trackArgumentValues(output, track);
+    }
+    for (const node of graph.nodes || []) {
+        for (const input of node.inputs || []) {
+            trackArgumentValues(input, track);
+        }
+        for (const output of node.outputs || []) {
+            trackArgumentValues(output, track);
+        }
+    }
+    return names;
+};
+
+export const genUniqueTensorName = (prefix, graph) => {
+    const names = collectGraphValueNames(graph);
+    let index = 0;
+    let name = prefix;
+    while (names.has(name)) {
+        index++;
+        name = `${prefix}_${index}`;
+    }
+    names.add(name);
+    return name;
+};
+
+export const genUniqueNodeName = (prefix, graph) => {
+    const names = new Set((graph.nodes || []).map((node) => node.name).filter(Boolean));
+    let index = 0;
+    let name = prefix;
+    while (names.has(name)) {
+        index++;
+        name = `${prefix}_${index}`;
+    }
+    return name;
+};
+
+export const findValueConsumers = (graph, value) => {
+    const consumers = [];
+    if (!value) {
+        return consumers;
+    }
+    const valueName = value.name;
+    const matches = (candidate) => candidate === value || (valueName && candidate && candidate.name === valueName);
+    for (const node of graph.nodes || []) {
+        for (const input of node.inputs || []) {
+            if (!Array.isArray(input.value)) {
+                continue;
+            }
+            for (let index = 0; index < input.value.length; index++) {
+                if (matches(input.value[index])) {
+                    consumers.push({ node, argument: input, index });
+                }
+            }
+        }
+    }
+    for (const output of graph.outputs || []) {
+        if (!Array.isArray(output.value)) {
+            continue;
+        }
+        for (let index = 0; index < output.value.length; index++) {
+            if (matches(output.value[index])) {
+                consumers.push({ node: null, argument: output, index, graphOutput: true });
+            }
+        }
+    }
+    return consumers;
+};
+
+export const buildNodeFromMetadata = (opSchema, uniqueName, graph) => {
+    const type = {
+        name: opSchema.name,
+        identifier: opSchema.name,
+        module: opSchema.module || 'ai.onnx',
+        version: opSchema.version
+    };
+    if (Array.isArray(opSchema.attributes)) {
+        type.attributes = opSchema.attributes.map((entry) => ({
+            name: entry.name,
+            type: entry.type,
+            default: entry.default,
+            required: entry.required
+        }));
+    }
+    const attributes = (opSchema.attributes || [])
+        .filter((entry) => entry.default !== undefined)
+        .map((entry) => ({
+            name: entry.name,
+            type: entry.type,
+            value: cloneAttributeValue(entry.default)
+        }));
+    const schemaInputs = Array.isArray(opSchema.inputs) ? opSchema.inputs : [];
+    const schemaOutputs = Array.isArray(opSchema.outputs) ? opSchema.outputs : [];
+    const minInputs = opSchema.min_input !== undefined ? opSchema.min_input : Math.max(schemaInputs.length, 1);
+    const minOutputs = opSchema.min_output !== undefined ? opSchema.min_output : Math.max(schemaOutputs.length, 1);
+    const inputs = [];
+    for (let index = 0; index < Math.max(schemaInputs.length, minInputs); index++) {
+        const schema = schemaInputs[index];
+        inputs.push({
+            name: schema ? schema.name : `input_${index}`,
+            value: []
+        });
+    }
+    const outputs = [];
+    for (let index = 0; index < Math.max(schemaOutputs.length, minOutputs); index++) {
+        const schema = schemaOutputs[index];
+        outputs.push({
+            name: schema ? schema.name : `output_${index}`,
+            value: []
+        });
+    }
+    return {
+        name: uniqueName || genUniqueNodeName(`Inserted${opSchema.name}`, graph),
+        type,
+        attributes,
+        inputs,
+        outputs
+    };
+};
+
+export const insertNode = (graph, refNodeIndex, position, nodeSpec) => {
+    const nodes = graph.nodes || [];
+    const refNode = nodes[refNodeIndex];
+    if (!refNode) {
+        throw new Error(`Reference node at index ${refNodeIndex} not found`);
+    }
+    if (position !== 'above' && position !== 'below') {
+        throw new Error(`Invalid insert position: ${position}`);
+    }
+    const prefix = nodeSpec.name || 'inserted';
+    const newNode = {
+        name: nodeSpec.name,
+        type: nodeSpec.type,
+        attributes: (nodeSpec.attributes || []).map((attribute) => ({
+            name: attribute.name,
+            type: attribute.type,
+            value: cloneAttributeValue(attribute.value)
+        })),
+        inputs: [],
+        outputs: []
+    };
+    if (position === 'above') {
+        const refInputs = refNode.inputs || [];
+        const inputCount = Math.max(refInputs.length, (nodeSpec.inputs || []).length, 1);
+        for (let index = 0; index < inputCount; index++) {
+            const refInput = refInputs[index];
+            const schemaInput = (nodeSpec.inputs || [])[index];
+            const inputValues = refInput && Array.isArray(refInput.value) ? refInput.value.slice() : [];
+            newNode.inputs.push({
+                name: schemaInput ? schemaInput.name : (refInput ? refInput.name : `input_${index}`),
+                value: inputValues
+            });
+        }
+        const outputCount = Math.max((nodeSpec.outputs || []).length, refInputs.length, 1);
+        for (let index = 0; index < outputCount; index++) {
+            const schemaOutput = (nodeSpec.outputs || [])[index];
+            const tensorName = genUniqueTensorName(`${prefix}_out_${index}`, graph);
+            const newValue = { name: tensorName, attributes: [] };
+            newNode.outputs.push({
+                name: schemaOutput ? schemaOutput.name : `output_${index}`,
+                value: [newValue]
+            });
+            if (index < refInputs.length && refInputs[index]) {
+                refInputs[index].value = [newValue];
+            }
+        }
+    } else {
+        const refOutputs = refNode.outputs || [];
+        const inputCount = Math.max(refOutputs.length, (nodeSpec.inputs || []).length, 1);
+        for (let index = 0; index < inputCount; index++) {
+            const refOutput = refOutputs[index];
+            const schemaInput = (nodeSpec.inputs || [])[index];
+            const inputValues = refOutput && Array.isArray(refOutput.value) ? refOutput.value.slice() : [];
+            newNode.inputs.push({
+                name: schemaInput ? schemaInput.name : (refOutput ? refOutput.name : `input_${index}`),
+                value: inputValues
+            });
+        }
+        const outputCount = Math.max((nodeSpec.outputs || []).length, refOutputs.length, 1);
+        const oldOutputValues = refOutputs.map((output) => (
+            Array.isArray(output.value) && output.value.length > 0 ? output.value[0] : null
+        ));
+        const newOutputValues = [];
+        for (let index = 0; index < outputCount; index++) {
+            const schemaOutput = (nodeSpec.outputs || [])[index];
+            const tensorName = genUniqueTensorName(`${prefix}_out_${index}`, graph);
+            const newValue = { name: tensorName, attributes: [] };
+            newOutputValues.push(newValue);
+            newNode.outputs.push({
+                name: schemaOutput ? schemaOutput.name : `output_${index}`,
+                value: [newValue]
+            });
+        }
+        for (let index = 0; index < oldOutputValues.length; index++) {
+            const oldValue = oldOutputValues[index];
+            const newValue = newOutputValues[Math.min(index, newOutputValues.length - 1)];
+            if (!oldValue || !newValue) {
+                continue;
+            }
+            const consumers = findValueConsumers(graph, oldValue);
+            for (const consumer of consumers) {
+                if (consumer.node === newNode) {
+                    continue;
+                }
+                consumer.argument.value[consumer.index] = newValue;
+            }
+        }
+    }
+    const insertIndex = position === 'above' ? refNodeIndex : refNodeIndex + 1;
+    nodes.splice(insertIndex, 0, newNode);
+    if (!graph.nodes) {
+        graph.nodes = nodes;
+    }
+    return { insertIndex, node: newNode };
+};
+
 const buildOriginalSnapshot = (model) => {
     const snapshot = new Map();
     model.modules.forEach((graph, graphIndex) => {
@@ -422,6 +648,14 @@ class EditorState {
             const target = getAttributeTarget(this.modified.model, location);
             const attribute = target.attributes[location.attributeIndex];
             attribute.value = Array.isArray(patch.newValue) ? patch.newValue.slice() : patch.newValue;
+        } else if (patch.changeType === 'add' && patch.entityType === 'node' && patch.property === 'insert') {
+            const location = parseNodeEntityId(patch.parentId);
+            const graph = this.modified.getGraph(location.graphIndex);
+            const position = patch.position;
+            const { insertIndex } = insertNode(graph, location.nodeIndex, position, patch.newValue);
+            this.delta.remapNodeIndices(location.graphIndex, insertIndex, 1);
+            entityId = `graph:${location.graphIndex}/node:${insertIndex}`;
+            changeType = 'add';
         } else {
             const location = parseNodeEntityId(entityId.includes('/attr:') ? entityId : patch.parentId || entityId);
             const graph = this.modified.getGraph(location.graphIndex);
@@ -441,6 +675,12 @@ class EditorState {
             property: patch.property,
             newValue: patch.newValue
         };
+        if (patch.parentId) {
+            change.parentId = patch.parentId;
+        }
+        if (patch.position) {
+            change.position = patch.position;
+        }
         this.delta.record(change);
         const recorded = this.delta.getChanges().find((entry) => entry.entityId === entityId);
         return recorded || {
