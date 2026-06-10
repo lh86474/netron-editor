@@ -3,6 +3,7 @@ import * as base from './base.js';
 import * as grapher from './grapher.js';
 import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
+import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
 import { GraphPane } from './graph-pane.js';
 
 const view = {};
@@ -38,6 +39,7 @@ view.View = class {
         this._selection = [];
         this._rangeBegin = null;
         this._rangeEnd = null;
+        this._exportBasenameOverride = null;
         this._sidebar = new view.Sidebar(this._host);
         this._find = null;
         this._modelFactoryService = new view.ModelFactoryService(this._host);
@@ -135,7 +137,7 @@ view.View = class {
                     });
                     file.add({
                         label: 'Export Modified Model as &ONNX...',
-                        execute: async () => await this._host.execute('export-onnx'),
+                        execute: async () => await this.exportOnnx(),
                         enabled: () => this._canExportOnnx()
                     });
                     file.add({
@@ -870,6 +872,9 @@ view.View = class {
             if (this._model && this._model.proto) {
                 this._model.proto.graph = rebuildGraphProtoFromModified(extracted, this._model.proto);
             }
+            const exportBase = stripExportExtension(this._host.document.title || 'model');
+            this._exportBasenameOverride = buildSubgraphExportBasename(exportBase, beginNode.name, endNode.name);
+            this._host.document.title = `${this._exportBasenameOverride}.onnx`;
             this._rangeBegin = null;
             this._rangeEnd = null;
             this._sidebar.close();
@@ -1347,6 +1352,7 @@ view.View = class {
 
     async open(context) {
         this._sidebar.close();
+        this._exportBasenameOverride = null;
         await this._timeout(2);
         try {
             const model = await this._modelFactoryService.open(context);
@@ -1581,19 +1587,30 @@ view.View = class {
         return this._model && this._editSession && canExportOnnx(this._model);
     }
 
+    _suggestedExportBasename() {
+        if (this._exportBasenameOverride) {
+            return this._exportBasenameOverride;
+        }
+        return stripExportExtension(this._host.document.title || 'model');
+    }
+
     async exportOnnx(file) {
         if (!this._canExportOnnx()) {
             return;
         }
         try {
-            const defaultPath = this._host.document.title || 'model';
+            const defaultPath = this._suggestedExportBasename();
             const target = file || await this._host.save('ONNX Model', 'onnx', defaultPath);
             if (!target) {
                 return;
             }
+            const filename = normalizeExportFilename(target, 'onnx');
+            if (!filename) {
+                return;
+            }
             const bytes = exportModifiedOnnx(this._model, this._editSession);
             const blob = new Blob([bytes], { type: 'application/octet-stream' });
-            await this._host.export(target, blob);
+            await this._host.export(filename, blob);
         } catch (error) {
             const message = error instanceof OnnxExportError ? error.message : (error && error.message ? error.message : error.toString());
             await this._host.message(message, true, 'OK');

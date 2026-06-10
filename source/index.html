@@ -66,6 +66,13 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .welcome .message-text a:visited { color: inherit; }
 .welcome .message-text a:hover { color: #242424; text-decoration: underline; }
 .message-button { display: inline; text-align: center; width: 125px; margin-left: auto; margin-right: auto; }
+.save-dialog { display: none; position: fixed; inset: 0; z-index: 1002; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.35); }
+.save-dialog-panel { background-color: #ececec; border: 1px solid #cccccc; border-radius: 8px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2); padding: 16px 20px; min-width: 320px; max-width: 90vw; }
+.save-dialog-title { font-size: 13px; font-weight: bold; margin-bottom: 10px; text-align: center; }
+.save-dialog-input { display: block; width: 100%; box-sizing: border-box; font-size: 13px; padding: 6px 8px; border: 1px solid #cccccc; border-radius: 4px; margin-bottom: 12px; }
+.save-dialog-buttons { display: flex; gap: 8px; justify-content: center; }
+.save-dialog-buttons .logo-button { width: auto; min-width: 90px; height: auto; padding: 6px 14px; font-size: 12px; }
+.save-dialog-open .toolbar { display: none; }
 .logo-text { top: -57px; width: 582px; transition: 0.1s; }
 .logo-name { top: -170px; width: 582px; transition: 0.1s; }
 .logo-icon { left: 248px; top: -18px; width: 106px; height: 106px; transition: 0.1s; }
@@ -223,6 +230,8 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .graph-context-menu-item:disabled { color: #666666; }
 .graph-context-menu-item:disabled:hover, .graph-context-menu-item:disabled:focus { color: #666666; background-color: transparent; }
 .graph-context-menu-separator { border-color: #444444; }
+.save-dialog-panel { background-color: #2d2d2d; border-color: #444444; color: #ffffff; }
+.save-dialog-input { background-color: #1e1e1e; color: #ffffff; border-color: #444444; }
 .operator-picker { background-color: #2d2d2d; border-color: #444444; }
 .operator-picker-query { background-color: #1e1e1e; color: #ffffff; border-color: #444444; }
 .operator-picker-item { color: #ffffff; }
@@ -637,6 +646,16 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 <div id="message" class="message">
     <div id="message-text" class="message-text"></div>
     <button id="message-button" class="logo-button message-button" tabindex="0">OK</button>
+</div>
+<div id="save-dialog" class="save-dialog">
+    <div class="save-dialog-panel">
+        <div id="save-dialog-title" class="save-dialog-title"></div>
+        <input id="save-dialog-input" class="save-dialog-input" type="text" spellcheck="false">
+        <div class="save-dialog-buttons">
+            <button id="save-dialog-cancel" class="logo-button" type="button">Cancel</button>
+            <button id="save-dialog-confirm" class="logo-button" type="button">Export</button>
+        </div>
+    </div>
 </div>
 <div id="titlebar" class="titlebar">
     <svg style="position: absolute; width: 0px; height: 0px; overflow: hidden;" aria-hidden="true">

@@ -1,5 +1,6 @@
 
 import * as base from './base.js';
+import { normalizeExportFilename } from './export-filename.js';
 
 const browser = {};
 
@@ -234,7 +235,79 @@ browser.Host = class {
     }
 
     async save(name, extension, defaultPath) {
-        return `${defaultPath}.${extension}`;
+        const suggestedName = normalizeExportFilename(defaultPath, extension) || `${defaultPath}.${extension}`;
+        const window = this.window;
+        if (typeof window.showSaveFilePicker === 'function') {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName,
+                    types: [{
+                        description: name,
+                        accept: { 'application/octet-stream': [`.${extension}`] }
+                    }]
+                });
+                return handle.name;
+            } catch (error) {
+                if (error && error.name === 'AbortError') {
+                    return null;
+                }
+            }
+        }
+        return this._promptSaveFilename(name, extension, defaultPath);
+    }
+
+    async _promptSaveFilename(name, extension, defaultPath) {
+        const document = this.document;
+        const window = this.window;
+        const dialog = this._element('save-dialog');
+        const title = this._element('save-dialog-title');
+        const input = this._element('save-dialog-input');
+        const confirm = this._element('save-dialog-confirm');
+        const cancel = this._element('save-dialog-cancel');
+        if (!dialog || !title || !input || !confirm || !cancel) {
+            const fallback = window.prompt(`Export ${name}`, defaultPath);
+            if (fallback === null) {
+                return null;
+            }
+            return normalizeExportFilename(fallback, extension);
+        }
+        return new Promise((resolve) => {
+            const previousClass = document.body.getAttribute('class');
+            const cleanup = () => {
+                confirm.onclick = null;
+                cancel.onclick = null;
+                input.onkeydown = null;
+                document.body.setAttribute('class', previousClass || 'default');
+                dialog.style.display = 'none';
+            };
+            title.textContent = `Export ${name}`;
+            input.value = defaultPath;
+            dialog.style.display = 'flex';
+            document.body.setAttribute('class', 'save-dialog-open');
+            const finish = (value) => {
+                cleanup();
+                resolve(value);
+            };
+            confirm.onclick = () => {
+                finish(normalizeExportFilename(input.value, extension));
+            };
+            cancel.onclick = () => {
+                finish(null);
+            };
+            input.onkeydown = (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    finish(normalizeExportFilename(input.value, extension));
+                } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    finish(null);
+                }
+            };
+            window.setTimeout(() => {
+                input.focus();
+                input.select();
+            }, 0);
+        });
     }
 
     async export(file, blob) {

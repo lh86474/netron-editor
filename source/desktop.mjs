@@ -10,6 +10,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as url from 'url';
 import * as view from './view.js';
+import { normalizeExportFilename } from './export-filename.js';
 
 const desktop = {};
 
@@ -302,9 +303,10 @@ desktop.Host = class {
                     resolve(data.filePath);
                 }
             });
+            const suggested = normalizeExportFilename(defaultPath, extension) || `${defaultPath}.${extension}`;
             electron.ipcRenderer.send('show-save-dialog', {
-                title: 'Export Tensor',
-                defaultPath,
+                title: `Export ${name}`,
+                defaultPath: suggested,
                 buttonLabel: 'Export',
                 filters: [{ name, extensions: [extension] }]
             });
