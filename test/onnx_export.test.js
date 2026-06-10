@@ -4,7 +4,10 @@ import { onnx } from '../source/onnx-proto.js';
 import '../source/onnx-encode.js';
 import { BinaryReader } from '../source/protobuf.js';
 import { ModelEditor } from '../source/model-editor.js';
-import { exportModifiedOnnx, OnnxExportError } from '../source/onnx-export.js';
+import { exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from '../source/onnx-export.js';
+
+import { identityNodeSpec } from './fixtures/mock-graph.js';
+import { extractSubgraph } from '../source/model-editor.js';
 
 const buildMinimalModel = () => {
     const model = new onnx.ModelProto();
@@ -65,6 +68,134 @@ const buildViewModel = (proto) => ({
     }]
 });
 
+const buildChainModel = () => {
+    const model = new onnx.ModelProto();
+    model.ir_version = 8n;
+    const opset = new onnx.OperatorSetIdProto();
+    opset.domain = 'ai.onnx';
+    opset.version = 13n;
+    model.opset_import = [opset];
+    const graph = new onnx.GraphProto();
+    graph.name = 'chain_graph';
+    const input = new onnx.ValueInfoProto();
+    input.name = 'x';
+    graph.input = [input];
+    const output = new onnx.ValueInfoProto();
+    output.name = 'y';
+    graph.output = [output];
+    const first = new onnx.NodeProto();
+    first.op_type = 'Identity';
+    first.name = 'first';
+    first.input = ['x'];
+    first.output = ['hidden'];
+    const second = new onnx.NodeProto();
+    second.op_type = 'Identity';
+    second.name = 'second';
+    second.input = ['hidden'];
+    second.output = ['y'];
+    graph.node = [first, second];
+    model.graph = graph;
+    return model;
+};
+
+const buildChainViewModel = (proto) => ({
+    format: 'ONNX v8',
+    exportable: true,
+    proto,
+    modules: [{
+        name: 'chain_graph',
+        identifier: 'chain_graph',
+        inputs: [{ name: 'x', value: [{ name: 'x' }] }],
+        outputs: [{ name: 'y', value: [{ name: 'y' }] }],
+        nodes: [
+            {
+                name: 'first',
+                type: { name: 'Identity', identifier: 'Identity' },
+                attributes: [],
+                inputs: [{ name: '', value: [{ name: 'x' }] }],
+                outputs: [{ name: '', value: [{ name: 'hidden' }] }]
+            },
+            {
+                name: 'second',
+                type: { name: 'Identity', identifier: 'Identity' },
+                attributes: [],
+                inputs: [{ name: '', value: [{ name: 'hidden' }] }],
+                outputs: [{ name: '', value: [{ name: 'y' }] }]
+            }
+        ]
+    }]
+});
+
+const buildThreeNodeChainModel = () => {
+    const model = new onnx.ModelProto();
+    model.ir_version = 8n;
+    const opset = new onnx.OperatorSetIdProto();
+    opset.domain = 'ai.onnx';
+    opset.version = 13n;
+    model.opset_import = [opset];
+    const graph = new onnx.GraphProto();
+    graph.name = 'chain3_graph';
+    const input = new onnx.ValueInfoProto();
+    input.name = 'x';
+    graph.input = [input];
+    const output = new onnx.ValueInfoProto();
+    output.name = 'y';
+    graph.output = [output];
+    const first = new onnx.NodeProto();
+    first.op_type = 'Identity';
+    first.name = 'first';
+    first.input = ['x'];
+    first.output = ['hidden1'];
+    const second = new onnx.NodeProto();
+    second.op_type = 'Identity';
+    second.name = 'second';
+    second.input = ['hidden1'];
+    second.output = ['hidden2'];
+    const third = new onnx.NodeProto();
+    third.op_type = 'Identity';
+    third.name = 'third';
+    third.input = ['hidden2'];
+    third.output = ['y'];
+    graph.node = [first, second, third];
+    model.graph = graph;
+    return model;
+};
+
+const buildThreeNodeChainViewModel = (proto) => ({
+    format: 'ONNX v8',
+    exportable: true,
+    proto,
+    modules: [{
+        name: 'chain3_graph',
+        identifier: 'chain3_graph',
+        inputs: [{ name: 'x', value: [{ name: 'x' }] }],
+        outputs: [{ name: 'y', value: [{ name: 'y' }] }],
+        nodes: [
+            {
+                name: 'first',
+                type: { name: 'Identity', identifier: 'Identity' },
+                attributes: [],
+                inputs: [{ name: '', value: [{ name: 'x' }] }],
+                outputs: [{ name: '', value: [{ name: 'hidden1' }] }]
+            },
+            {
+                name: 'second',
+                type: { name: 'Identity', identifier: 'Identity' },
+                attributes: [],
+                inputs: [{ name: '', value: [{ name: 'hidden1' }] }],
+                outputs: [{ name: '', value: [{ name: 'hidden2' }] }]
+            },
+            {
+                name: 'third',
+                type: { name: 'Identity', identifier: 'Identity' },
+                attributes: [],
+                inputs: [{ name: '', value: [{ name: 'hidden2' }] }],
+                outputs: [{ name: '', value: [{ name: 'y' }] }]
+            }
+        ]
+    }]
+});
+
 describe('ONNX export', () => {
     it('round-trips an unmodified minimal model', () => {
         const model = buildMinimalModel();
@@ -119,5 +250,72 @@ describe('ONNX export', () => {
         viewModel.exportable = false;
         const editor = ModelEditor.createSession(viewModel);
         assert.throws(() => exportModifiedOnnx(viewModel, editor), OnnxExportError);
+    });
+
+    it('exports graph after insert below reference node', () => {
+        const proto = buildChainModel();
+        const viewModel = buildChainViewModel(proto);
+        const editor = ModelEditor.createSession(viewModel);
+        editor.applyPatch({
+            parentId: 'graph:0/node:0',
+            entityType: 'node',
+            changeType: 'add',
+            property: 'insert',
+            position: 'below',
+            newValue: identityNodeSpec('inserted_below')
+        });
+        const bytes = exportModifiedOnnx(viewModel, editor);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        assert.equal(decoded.graph.node.length, 3);
+        const inserted = decoded.graph.node.find((node) => node.name === 'inserted_below');
+        assert.ok(inserted);
+        assert.equal(inserted.input[0], 'hidden');
+        const second = decoded.graph.node.find((node) => node.name === 'second');
+        assert.ok(second);
+        assert.notEqual(second.input[0], 'hidden');
+        assert.equal(second.input[0], inserted.output[0]);
+    });
+
+    it('exports graph after insert above reference node', () => {
+        const proto = buildChainModel();
+        const viewModel = buildChainViewModel(proto);
+        const editor = ModelEditor.createSession(viewModel);
+        editor.applyPatch({
+            parentId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'add',
+            property: 'insert',
+            position: 'above',
+            newValue: identityNodeSpec('inserted_above')
+        });
+        const bytes = exportModifiedOnnx(viewModel, editor);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        assert.equal(decoded.graph.node.length, 3);
+        const inserted = decoded.graph.node.find((node) => node.name === 'inserted_above');
+        assert.ok(inserted);
+        assert.equal(inserted.input[0], 'hidden');
+        const second = decoded.graph.node.find((node) => node.name === 'second');
+        assert.ok(second);
+        assert.equal(second.input[0], inserted.output[0]);
+        assert.notEqual(second.input[0], 'hidden');
+    });
+
+    it('exports graph after subgraph extract and proto rebuild', () => {
+        const proto = buildThreeNodeChainModel();
+        const viewModel = buildThreeNodeChainViewModel(proto);
+        const editor = ModelEditor.createSession(viewModel);
+        const graph = editor.modified.getGraph();
+        const extracted = extractSubgraph(graph, graph.nodes[0], graph.nodes[1]);
+        editor.replaceGraph(0, extracted);
+        viewModel.proto.graph = rebuildGraphProtoFromModified(extracted, viewModel.proto);
+        const bytes = exportModifiedOnnx(viewModel, editor);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        assert.equal(decoded.graph.node.length, 2);
+        assert.equal(decoded.graph.node[0].name, 'first');
+        assert.equal(decoded.graph.node[1].name, 'second');
+        assert.equal(decoded.graph.input[0].name, 'x');
+        assert.equal(decoded.graph.output[0].name, 'hidden2');
+        assert.equal(decoded.graph.node[0].input[0], 'x');
+        assert.equal(decoded.graph.node[1].output[0], 'hidden2');
     });
 });
