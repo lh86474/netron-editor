@@ -484,6 +484,135 @@ const syncNodeInputsOutputs = (protoNode, modifiedNode) => {
     }
 };
 
+const syncNodeFromModified = (protoNode, modifiedNode) => {
+    syncNodeInputsOutputs(protoNode, modifiedNode);
+    protoNode.name = modifiedNode.name || '';
+    protoNode.op_type = modifiedNode.type ? (modifiedNode.type.identifier || modifiedNode.type.name) : protoNode.op_type;
+    if (modifiedNode.type && modifiedNode.type.module && modifiedNode.type.module !== 'ai.onnx') {
+        protoNode.domain = modifiedNode.type.module;
+    } else {
+        delete protoNode.domain;
+    }
+    protoNode.attribute = (modifiedNode.attributes || []).map((attribute) => (
+        buildAttributeProto(attribute.name, attribute.type, attribute.value)
+    ));
+};
+
+const collectArgumentValueNamesFromGraph = (graph) => {
+    const names = new Set();
+    const track = (argument) => {
+        for (const name of collectArgumentValueNames(argument)) {
+            names.add(name);
+        }
+    };
+    for (const input of graph.inputs || []) {
+        track(input);
+    }
+    for (const output of graph.outputs || []) {
+        track(output);
+    }
+    for (const node of graph.nodes || []) {
+        for (const input of node.inputs || []) {
+            track(input);
+        }
+        for (const output of node.outputs || []) {
+            track(output);
+        }
+    }
+    return names;
+};
+
+const copyValueInfo = (valueInfo) => {
+    if (!valueInfo) {
+        return null;
+    }
+    const copy = new onnx.ValueInfoProto();
+    copy.name = valueInfo.name || '';
+    if (valueInfo.doc_string !== undefined) {
+        copy.doc_string = valueInfo.doc_string;
+    }
+    if (valueInfo.type) {
+        copy.type = valueInfo.type;
+    }
+    if (Array.isArray(valueInfo.metadata_props)) {
+        copy.metadata_props = valueInfo.metadata_props.map((entry) => {
+            const item = new onnx.StringStringEntryProto();
+            item.key = entry.key;
+            item.value = entry.value;
+            return item;
+        });
+    }
+    return copy;
+};
+
+const buildGraphValueInfo = (argument, sourceGraph, usedNames) => {
+    const infos = [];
+    for (const name of collectArgumentValueNames(argument)) {
+        if (!usedNames.has(name)) {
+            continue;
+        }
+        const existing = findValueInfo(sourceGraph, name);
+        if (existing) {
+            infos.push(copyValueInfo(existing));
+            continue;
+        }
+        const valueInfo = new onnx.ValueInfoProto();
+        valueInfo.name = name;
+        infos.push(valueInfo);
+    }
+    return infos;
+};
+
+export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
+    if (!sourceProto || !sourceProto.graph) {
+        throw new OnnxExportError('Original ONNX protobuf is not available for graph rebuild.');
+    }
+    const sourceGraph = sourceProto.graph;
+    const originalByName = new Map();
+    for (const node of sourceGraph.node || []) {
+        if (node.name) {
+            originalByName.set(node.name, node);
+        }
+    }
+    const usedNames = collectArgumentValueNamesFromGraph(modifiedGraph);
+    const nodes = [];
+    for (const modifiedNode of modifiedGraph.nodes || []) {
+        const existing = originalByName.get(modifiedNode.name);
+        if (existing) {
+            syncNodeFromModified(existing, modifiedNode);
+            nodes.push(existing);
+        } else {
+            nodes.push(buildNodeProtoFromModified(modifiedNode));
+        }
+    }
+    const input = [];
+    for (const modifiedInput of modifiedGraph.inputs || []) {
+        input.push(...buildGraphValueInfo(modifiedInput, sourceGraph, usedNames));
+    }
+    const output = [];
+    for (const modifiedOutput of modifiedGraph.outputs || []) {
+        output.push(...buildGraphValueInfo(modifiedOutput, sourceGraph, usedNames));
+    }
+    const initializer = (sourceGraph.initializer || []).filter((tensor) => tensor.name && usedNames.has(tensor.name));
+    const value_info = (sourceGraph.value_info || []).filter((value) => value.name && usedNames.has(value.name));
+    const sparse_initializer = (sourceGraph.sparse_initializer || []).filter((tensor) => {
+        const valuesName = tensor.values && tensor.values.name;
+        const indicesName = tensor.indices && tensor.indices.name;
+        return (valuesName && usedNames.has(valuesName)) || (indicesName && usedNames.has(indicesName));
+    });
+    return {
+        name: modifiedGraph.name || sourceGraph.name || '',
+        doc_string: sourceGraph.doc_string || '',
+        node: nodes,
+        input,
+        output,
+        initializer,
+        value_info,
+        sparse_initializer,
+        quantization_annotation: sourceGraph.quantization_annotation || []
+    };
+};
+
 const applyNodeInsertions = (graph, originalProto, editSession) => {
     const changes = editSession.delta.getChanges();
     const insertions = changes.filter((change) => (

@@ -147,6 +147,9 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .graph-context-menu { position: fixed; z-index: 1000; min-width: 160px; background-color: #ececec; border: 1px solid #cccccc; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); padding: 4px 0; }
 .graph-context-menu-item { display: block; border: none; border-radius: 0; background-color: transparent; color: #000000; width: 100%; text-align: left; padding: 6px 12px; font-size: 12px; cursor: pointer; }
 .graph-context-menu-item:hover, .graph-context-menu-item:focus { color: #ffffff; background-color: #2e6bd2; outline: none; }
+.graph-context-menu-item:disabled { color: #888888; cursor: default; }
+.graph-context-menu-item:disabled:hover, .graph-context-menu-item:disabled:focus { color: #888888; background-color: transparent; }
+.graph-context-menu-separator { border-top: 1px solid #cccccc; margin: 4px 0; }
 .operator-picker { position: fixed; z-index: 1001; width: 280px; background-color: #ececec; border: 1px solid #cccccc; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); padding: 8px; }
 .operator-picker-query { display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px; border: 1px solid #cccccc; margin-bottom: 6px; }
 .operator-picker-list { max-height: 300px; overflow-y: auto; }
@@ -217,6 +220,9 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .graph-context-menu { background-color: #2d2d2d; border-color: #444444; }
 .graph-context-menu-item { color: #ffffff; }
 .graph-context-menu-item:hover, .graph-context-menu-item:focus { color: #ffffff; background-color: #2e6bd2; }
+.graph-context-menu-item:disabled { color: #666666; }
+.graph-context-menu-item:disabled:hover, .graph-context-menu-item:disabled:focus { color: #666666; background-color: transparent; }
+.graph-context-menu-separator { border-color: #444444; }
 .operator-picker { background-color: #2d2d2d; border-color: #444444; }
 .operator-picker-query { background-color: #1e1e1e; color: #ffffff; border-color: #444444; }
 .operator-picker-item { color: #ffffff; }

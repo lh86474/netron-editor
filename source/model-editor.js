@@ -50,6 +50,13 @@ const trackArgumentValues = (argument, track) => {
     }
 };
 
+const argumentValues = (argument) => {
+    if (!argument || argument.value === null || argument.value === undefined) {
+        return [];
+    }
+    return Array.isArray(argument.value) ? argument.value : [argument.value];
+};
+
 export const enumerateGraphValues = (graph, graphIndex) => {
     const map = new Map();
     let index = 0;
@@ -304,6 +311,42 @@ export const genUniqueNodeName = (prefix, graph) => {
     return name;
 };
 
+export class SubgraphExtractError extends Error {
+
+    constructor(message) {
+        super(message);
+        this.name = 'SubgraphExtractError';
+    }
+}
+
+export const findValueProducers = (graph, value) => {
+    const producers = [];
+    if (!value) {
+        return producers;
+    }
+    const valueName = value.name;
+    const matches = (candidate) => candidate === value || (valueName && candidate && candidate.name === valueName);
+    for (const input of graph.inputs || []) {
+        for (let index = 0; index < argumentValues(input).length; index++) {
+            const value = argumentValues(input)[index];
+            if (matches(value)) {
+                producers.push({ node: null, argument: input, index, graphInput: true });
+            }
+        }
+    }
+    for (const node of graph.nodes || []) {
+        for (const output of node.outputs || []) {
+            for (let index = 0; index < argumentValues(output).length; index++) {
+                const value = argumentValues(output)[index];
+                if (matches(value)) {
+                    producers.push({ node, argument: output, index });
+                }
+            }
+        }
+    }
+    return producers;
+};
+
 export const findValueConsumers = (graph, value) => {
     const consumers = [];
     if (!value) {
@@ -313,27 +356,241 @@ export const findValueConsumers = (graph, value) => {
     const matches = (candidate) => candidate === value || (valueName && candidate && candidate.name === valueName);
     for (const node of graph.nodes || []) {
         for (const input of node.inputs || []) {
-            if (!Array.isArray(input.value)) {
-                continue;
-            }
-            for (let index = 0; index < input.value.length; index++) {
-                if (matches(input.value[index])) {
+            for (let index = 0; index < argumentValues(input).length; index++) {
+                const value = argumentValues(input)[index];
+                if (matches(value)) {
                     consumers.push({ node, argument: input, index });
                 }
             }
         }
     }
     for (const output of graph.outputs || []) {
-        if (!Array.isArray(output.value)) {
-            continue;
-        }
-        for (let index = 0; index < output.value.length; index++) {
-            if (matches(output.value[index])) {
+        for (let index = 0; index < argumentValues(output).length; index++) {
+            const value = argumentValues(output)[index];
+            if (matches(value)) {
                 consumers.push({ node: null, argument: output, index, graphOutput: true });
             }
         }
     }
     return consumers;
+};
+
+export const collectNodesBetween = (graph, beginNode, endNode) => {
+    if (!beginNode || !endNode) {
+        throw new SubgraphExtractError('Begin and end nodes are required.');
+    }
+    if (beginNode === endNode) {
+        return new Set([beginNode]);
+    }
+    const forward = new Set();
+    const forwardQueue = [beginNode];
+    while (forwardQueue.length > 0) {
+        const node = forwardQueue.shift();
+        if (forward.has(node)) {
+            continue;
+        }
+        forward.add(node);
+        for (const output of node.outputs || []) {
+            for (const value of argumentValues(output)) {
+                if (!value || !value.name) {
+                    continue;
+                }
+                for (const consumer of findValueConsumers(graph, value)) {
+                    if (consumer.node && !forward.has(consumer.node)) {
+                        forwardQueue.push(consumer.node);
+                    }
+                }
+            }
+        }
+    }
+    if (!forward.has(endNode)) {
+        throw new SubgraphExtractError('End node is not reachable from begin node.');
+    }
+    const backward = new Set();
+    const backwardQueue = [endNode];
+    while (backwardQueue.length > 0) {
+        const node = backwardQueue.shift();
+        if (backward.has(node)) {
+            continue;
+        }
+        backward.add(node);
+        for (const input of node.inputs || []) {
+            for (const value of argumentValues(input)) {
+                if (!value || value.initializer || !value.name) {
+                    continue;
+                }
+                for (const producer of findValueProducers(graph, value)) {
+                    if (producer.node && !backward.has(producer.node)) {
+                        backwardQueue.push(producer.node);
+                    }
+                }
+            }
+        }
+    }
+    const result = new Set();
+    for (const node of forward) {
+        if (backward.has(node)) {
+            result.add(node);
+        }
+    }
+    if (!result.has(beginNode) || !result.has(endNode)) {
+        throw new SubgraphExtractError('No valid path exists between begin and end nodes.');
+    }
+    return result;
+};
+
+const cloneExtractValue = (value, valueMap) => {
+    if (!value) {
+        return null;
+    }
+    if (valueMap.has(value)) {
+        return valueMap.get(value);
+    }
+    const cloned = {
+        name: value.name,
+        attributes: (value.attributes || []).map((attribute) => ({
+            name: attribute.name,
+            type: attribute.type,
+            value: cloneAttributeValue(attribute.value)
+        }))
+    };
+    if (value.type !== undefined) {
+        cloned.type = value.type;
+    }
+    if (value.description !== undefined) {
+        cloned.description = value.description;
+    }
+    if (value.initializer !== undefined) {
+        cloned.initializer = value.initializer;
+    }
+    if (value.visible === false) {
+        cloned.visible = false;
+    }
+    valueMap.set(value, cloned);
+    return cloned;
+};
+
+const cloneExtractNode = (node, valueMap) => ({
+    name: node.name,
+    type: readType(node.type),
+    attributes: (node.attributes || []).map((attribute) => ({
+        name: attribute.name,
+        type: attribute.type,
+        value: cloneAttributeValue(attribute.value)
+    })),
+    inputs: (node.inputs || []).map((input) => ({
+        name: input.name,
+        value: argumentValues(input).map((entry) => cloneExtractValue(entry, valueMap)).filter((entry) => entry !== null)
+    })),
+    outputs: (node.outputs || []).map((output) => ({
+        name: output.name,
+        value: argumentValues(output).map((entry) => cloneExtractValue(entry, valueMap)).filter((entry) => entry !== null)
+    }))
+});
+
+export const extractSubgraph = (graph, beginNode, endNode) => {
+    const keepSet = collectNodesBetween(graph, beginNode, endNode);
+    const valueMap = new Map();
+    const keptNodes = (graph.nodes || []).filter((node) => keepSet.has(node)).map((node) => cloneExtractNode(node, valueMap));
+
+    const internalNames = new Set();
+    for (const node of keptNodes) {
+        for (const output of node.outputs || []) {
+            for (const value of output.value || []) {
+                if (value && value.name) {
+                    internalNames.add(value.name);
+                }
+            }
+        }
+    }
+
+    const boundaryInputs = new Map();
+    for (const node of keptNodes) {
+        for (const input of node.inputs || []) {
+            for (const value of input.value || []) {
+                if (!value || !value.name || value.initializer || internalNames.has(value.name)) {
+                    continue;
+                }
+                if (!boundaryInputs.has(value.name)) {
+                    boundaryInputs.set(value.name, {
+                        name: input.name,
+                        value: [cloneExtractValue(value, valueMap)]
+                    });
+                }
+            }
+        }
+    }
+
+    const boundaryOutputs = new Map();
+    for (const node of keptNodes) {
+        for (const output of node.outputs || []) {
+            for (const value of output.value || []) {
+                if (!value || !value.name || boundaryOutputs.has(value.name)) {
+                    continue;
+                }
+                const consumers = findValueConsumers(graph, value);
+                const isBoundary = consumers.some((consumer) => {
+                    if (consumer.graphOutput) {
+                        return true;
+                    }
+                    return consumer.node && !keepSet.has(consumer.node);
+                });
+                if (isBoundary) {
+                    boundaryOutputs.set(value.name, {
+                        name: output.name,
+                        value: [cloneExtractValue(value, valueMap)]
+                    });
+                }
+            }
+        }
+    }
+
+    if (boundaryOutputs.size === 0 && endNode) {
+        for (const output of endNode.outputs || []) {
+            for (const value of output.value || []) {
+                if (value && value.name && !boundaryOutputs.has(value.name)) {
+                    boundaryOutputs.set(value.name, {
+                        name: output.name,
+                        value: [cloneExtractValue(value, valueMap)]
+                    });
+                }
+            }
+        }
+    }
+
+    const orderedInputs = [];
+    for (const input of graph.inputs || []) {
+        for (const value of argumentValues(input)) {
+            if (value && value.name && boundaryInputs.has(value.name)) {
+                orderedInputs.push(boundaryInputs.get(value.name));
+                boundaryInputs.delete(value.name);
+            }
+        }
+    }
+    for (const entry of boundaryInputs.values()) {
+        orderedInputs.push(entry);
+    }
+
+    const orderedOutputs = [];
+    for (const output of graph.outputs || []) {
+        for (const value of argumentValues(output)) {
+            if (value && value.name && boundaryOutputs.has(value.name)) {
+                orderedOutputs.push(boundaryOutputs.get(value.name));
+                boundaryOutputs.delete(value.name);
+            }
+        }
+    }
+    for (const entry of boundaryOutputs.values()) {
+        orderedOutputs.push(entry);
+    }
+
+    return {
+        name: graph.name,
+        identifier: graph.identifier,
+        inputs: orderedInputs,
+        outputs: orderedOutputs,
+        nodes: keptNodes
+    };
 };
 
 export const buildNodeFromMetadata = (opSchema, uniqueName, graph) => {
@@ -601,6 +858,12 @@ class EditorState {
 
     get original() {
         return this._original;
+    }
+
+    replaceGraph(graphIndex, newGraph) {
+        this.modified.model.modules[graphIndex] = newGraph;
+        this._snapshot = buildOriginalSnapshot(this.modified.model);
+        this.delta = new DeltaTracker(this._snapshot);
     }
 
     applyPatch(patch) {

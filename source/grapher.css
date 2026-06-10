@@ -72,6 +72,9 @@
 
 .select > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .edited > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
+.range-begin > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
+.range-end > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
+.range-begin.range-end > .node.node-border { stroke: rgba(120, 0, 160, 0.95); stroke-width: 2px; }
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }
 .edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }
 .select.node-argument > rect { fill: transparent; stroke: rgba(220, 0, 0, 0.9); }
@@ -99,6 +102,9 @@
 
     .select > .node.node-border { stroke: rgba(192, 0, 0, 0.8); }
     .edited > .node.node-border { stroke: rgba(192, 0, 0, 0.8); }
+    .range-begin > .node.node-border { stroke: rgba(80, 200, 80, 0.9); }
+    .range-end > .node.node-border { stroke: rgba(100, 160, 255, 0.9); }
+    .range-begin.range-end > .node.node-border { stroke: rgba(180, 120, 255, 0.9); }
     .select.edge-path { stroke: rgba(192, 0, 0, 0.8); }
     .edge-path.edge-path-edited { stroke: rgba(192, 0, 0, 0.8); }
     .select.node-argument > rect { fill: transparent; stroke: rgba(192, 0, 0, 0.8); }

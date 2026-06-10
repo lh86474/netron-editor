@@ -1,8 +1,8 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName } from './model-editor.js';
-import { canExportOnnx, exportModifiedOnnx, OnnxExportError } from './onnx-export.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError } from './model-editor.js';
+import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { GraphPane } from './graph-pane.js';
 
 const view = {};
@@ -36,6 +36,8 @@ view.View = class {
         this._activePane = 'modified';
         this._path = [];
         this._selection = [];
+        this._rangeBegin = null;
+        this._rangeEnd = null;
         this._sidebar = new view.Sidebar(this._host);
         this._find = null;
         this._modelFactoryService = new view.ModelFactoryService(this._host);
@@ -777,7 +779,7 @@ view.View = class {
         this._closeGraphOverlays();
         const x = event.clientX;
         const y = event.clientY;
-        this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, [
+        const items = [
             {
                 label: 'Insert Above\u2026',
                 action: () => this._openOperatorPicker(nodeView, 'above', x, y)
@@ -785,9 +787,98 @@ view.View = class {
             {
                 label: 'Insert Below\u2026',
                 action: () => this._openOperatorPicker(nodeView, 'below', x, y)
+            },
+            { separator: true },
+            {
+                label: 'Mark as Beginning',
+                action: () => this._markRangeBegin(nodeView)
+            },
+            {
+                label: 'Mark as End',
+                action: () => this._markRangeEnd(nodeView)
+            },
+            {
+                label: 'Clear Range Markers',
+                action: () => this._clearRangeMarkers(),
+                enabled: Boolean(this._rangeBegin || this._rangeEnd)
+            },
+            {
+                label: 'Extract Subgraph',
+                action: () => this._extractAndReplaceGraph(),
+                enabled: Boolean(this._rangeBegin && this._rangeEnd)
             }
-        ]);
+        ];
+        this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, items);
         this._graphContextMenu.open();
+    }
+
+    _markRangeBegin(nodeView) {
+        const entity = this._resolveNodeEntity(nodeView.value);
+        if (!entity) {
+            return;
+        }
+        this._rangeBegin = entity;
+        if (this._rangeEnd && this._rangeEnd.graphIndex !== entity.graphIndex) {
+            this._rangeEnd = null;
+        }
+        this._refreshRangeMarkerStyles();
+    }
+
+    _markRangeEnd(nodeView) {
+        const entity = this._resolveNodeEntity(nodeView.value);
+        if (!entity) {
+            return;
+        }
+        this._rangeEnd = entity;
+        if (this._rangeBegin && this._rangeBegin.graphIndex !== entity.graphIndex) {
+            this._rangeBegin = null;
+        }
+        this._refreshRangeMarkerStyles();
+    }
+
+    _clearRangeMarkers() {
+        this._rangeBegin = null;
+        this._rangeEnd = null;
+        this._refreshRangeMarkerStyles();
+    }
+
+    _refreshRangeMarkerStyles() {
+        const graph = this._activePaneGraph();
+        if (graph && graph.refreshRangeMarkerStyles) {
+            graph.refreshRangeMarkerStyles();
+        }
+    }
+
+    async _extractAndReplaceGraph() {
+        if (!this._editSession || !this._rangeBegin || !this._rangeEnd) {
+            return;
+        }
+        if (this._rangeBegin.graphIndex !== this._rangeEnd.graphIndex) {
+            await this._host.message('Begin and end nodes must be in the same graph.', true, 'OK');
+            return;
+        }
+        try {
+            const graphIndex = this._rangeBegin.graphIndex;
+            const graph = this._editSession.modified.getGraph(graphIndex);
+            const beginNode = graph.nodes[this._rangeBegin.nodeIndex];
+            const endNode = graph.nodes[this._rangeEnd.nodeIndex];
+            if (!beginNode || !endNode) {
+                throw new SubgraphExtractError('Marked nodes are no longer available.');
+            }
+            const extracted = extractSubgraph(graph, beginNode, endNode);
+            this._editSession.replaceGraph(graphIndex, extracted);
+            if (this._model && this._model.proto) {
+                this._model.proto.graph = rebuildGraphProtoFromModified(extracted, this._model.proto);
+            }
+            this._rangeBegin = null;
+            this._rangeEnd = null;
+            this._sidebar.close();
+            this._bindEditorSession();
+            await this._refreshModifiedPane();
+        } catch (error) {
+            const message = error instanceof SubgraphExtractError ? error.message : (error && error.message ? error.message : error.toString());
+            await this._host.message(message, true, 'OK');
+        }
     }
 
     _openOperatorPicker(nodeView, position, x, y) {
@@ -935,6 +1026,7 @@ view.View = class {
                 viewGraph.updateTunnels();
                 viewGraph.restore(state);
                 viewGraph.refreshDeltaStyles();
+                viewGraph.refreshRangeMarkerStyles();
                 pane._setGraph(viewGraph);
                 pane._logRender();
             } else {
@@ -1001,6 +1093,7 @@ view.View = class {
                 }
                 viewGraph.restore(state);
                 viewGraph.refreshDeltaStyles();
+                viewGraph.refreshRangeMarkerStyles();
                 pane._setGraph(viewGraph);
                 this.target = viewGraph;
                 if (options.skipShow) {
@@ -2330,12 +2423,24 @@ view.GraphContextMenu = class {
         this._element = this._document.createElement('div');
         this._element.className = 'graph-context-menu';
         for (const item of items) {
+            if (item.separator) {
+                const separator = this._document.createElement('div');
+                separator.className = 'graph-context-menu-separator';
+                this._element.appendChild(separator);
+                continue;
+            }
             const button = this._document.createElement('button');
             button.className = 'graph-context-menu-item';
             button.type = 'button';
             button.textContent = item.label;
+            if (item.enabled === false) {
+                button.disabled = true;
+            }
             button.addEventListener('click', (e) => {
                 e.stopPropagation();
+                if (button.disabled) {
+                    return;
+                }
                 this.close();
                 item.action();
             });
@@ -2733,6 +2838,14 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyDeltaStyle === 'function') {
                 obj.applyDeltaStyle();
+            }
+        }
+    }
+
+    refreshRangeMarkerStyles() {
+        for (const obj of this._table.values()) {
+            if (obj && typeof obj.applyRangeMarkerStyle === 'function') {
+                obj.applyRangeMarkerStyle();
             }
         }
     }
@@ -3687,9 +3800,21 @@ view.Node = class extends grapher.Node {
         this.element.classList.toggle('edited', state === 'modified' || state === 'added');
     }
 
+    applyRangeMarkerStyle() {
+        if (!this.element || !this._entityId || !this.context.view) {
+            return;
+        }
+        const view = this.context.view;
+        const isBegin = view._rangeBegin && view._rangeBegin.nodeId === this._entityId;
+        const isEnd = view._rangeEnd && view._rangeEnd.nodeId === this._entityId;
+        this.element.classList.toggle('range-begin', Boolean(isBegin));
+        this.element.classList.toggle('range-end', Boolean(isEnd));
+    }
+
     update() {
         super.update();
         this.applyDeltaStyle();
+        this.applyRangeMarkerStyle();
     }
 
     _add(value, type) {
