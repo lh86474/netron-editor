@@ -32,6 +32,7 @@ view.View = class {
         this._editSession = null;
         this._editSessionError = null;
         this._deltaUnsubscribe = null;
+        // new leftPane and rightPane fields for the two graph panes
         this._leftPane = null;
         this._rightPane = null;
         this._activePane = 'modified';
@@ -69,6 +70,7 @@ view.View = class {
             this._element('zoom-out-button').addEventListener('click', () => {
                 this.zoomOut();
             });
+            // sync scroll button
             this._element('sync-scroll-button').addEventListener('click', () => {
                 this.toggle('syncScroll');
             });
@@ -561,6 +563,7 @@ view.View = class {
         return Boolean(this._leftPane.graph && this._rightPane.graph);
     }
 
+    // actually sync the scroll here and zoom
     _propagateSync(sourceGraph) {
         if (!this._options.syncScroll || this._syncApplying) {
             return;
@@ -814,6 +817,7 @@ view.View = class {
         this._graphContextMenu.open();
     }
 
+    // mark begin node for graph extraction
     _markRangeBegin(nodeView) {
         const entity = this._resolveNodeEntity(nodeView.value);
         if (!entity) {
@@ -826,6 +830,7 @@ view.View = class {
         this._refreshRangeMarkerStyles();
     }
 
+    // mark end node for graph extraction
     _markRangeEnd(nodeView) {
         const entity = this._resolveNodeEntity(nodeView.value);
         if (!entity) {
@@ -851,6 +856,7 @@ view.View = class {
         }
     }
 
+    // extract and replace graph
     async _extractAndReplaceGraph() {
         if (!this._editSession || !this._rangeBegin || !this._rangeEnd) {
             return;
@@ -917,6 +923,7 @@ view.View = class {
         }
     }
 
+    // refresh pane after edits
     async _refreshModifiedPane() {
         if (!this._rightPane || !this.activeTarget) {
             return;
@@ -1003,6 +1010,7 @@ view.View = class {
         return session.modified.getGraph(0);
     }
 
+    // render the graph in the pane
     async _renderGraphInPane(pane, target, signature, state) {
         const container = pane.container;
         const label = container.querySelector('.graph-pane-label');
@@ -1047,6 +1055,7 @@ view.View = class {
         if (options.skipShow) {
             this._ensureDefaultScreen();
         }
+        // because right is modify pane
         const pane = this._rightPane;
         const origin = this._target ? this._target._origin : null;
         const snapshot = new Map();
@@ -1568,6 +1577,7 @@ view.View = class {
             });
             const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
             const modifiedTarget = this._resolveModifiedTarget(target);
+            // doubles the status for the two panes
             status = await this._rightPane.render(modifiedTarget, signature, state);
             const leftStatus = await this._leftPane.render(target, signature, state);
             if (status === '') {
@@ -1594,6 +1604,7 @@ view.View = class {
         return stripExportExtension(this._host.document.title || 'model');
     }
 
+    // save dialog, blob download
     async exportOnnx(file) {
         if (!this._canExportOnnx()) {
             return;
@@ -1608,6 +1619,7 @@ view.View = class {
             if (!filename) {
                 return;
             }
+            // export the modified model as ONNX
             const bytes = exportModifiedOnnx(this._model, this._editSession);
             const blob = new Blob([bytes], { type: 'application/octet-stream' });
             await this._host.export(filename, blob);
@@ -1617,6 +1629,7 @@ view.View = class {
         }
     }
 
+    // the normal export function, for png and svg
     async export(file) {
         const window = this.host.window;
         const lastIndex = file.lastIndexOf('.');
@@ -2495,6 +2508,7 @@ view.GraphContextMenu = class {
     }
 };
 
+// This is the operator picker popup that appears when you right click on a node
 view.OperatorPicker = class {
 
     constructor(view, nodeView, position, x, y) {
@@ -3809,14 +3823,17 @@ view.Node = class extends grapher.Node {
         return this.value.outputs;
     }
 
+    // apply delta style to the node, the edit thing
     applyDeltaStyle() {
         if (!this.element || !this._entityId || !this.context.deltaTracker) {
             return;
         }
         const state = this.context.deltaTracker.getAggregateState(this._entityId);
+        // change css
         this.element.classList.toggle('edited', state === 'modified' || state === 'added');
     }
 
+    // apply range marker style for graph extraction
     applyRangeMarkerStyle() {
         if (!this.element || !this._entityId || !this.context.view) {
             return;
@@ -3824,6 +3841,7 @@ view.Node = class extends grapher.Node {
         const view = this.context.view;
         const isBegin = view._rangeBegin && view._rangeBegin.nodeId === this._entityId;
         const isEnd = view._rangeEnd && view._rangeEnd.nodeId === this._entityId;
+        // change css
         this.element.classList.toggle('range-begin', Boolean(isBegin));
         this.element.classList.toggle('range-end', Boolean(isEnd));
     }
@@ -4747,6 +4765,7 @@ view.ObjectSidebar = class extends view.Control {
     }
 };
 
+// base for inline editing of properties and attributes
 view.EditableObjectSidebar = class extends view.ObjectSidebar {
 
     addEditableProperty(name, value, onCommit, options = {}) {
@@ -4919,6 +4938,7 @@ view.NodeSidebar = class extends view.ObjectSidebar {
     }
 };
 
+// edit node name, type, attributes
 view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
 
     constructor(context, node, editSession) {
@@ -5147,6 +5167,7 @@ view.TextView = class extends view.Control {
     }
 };
 
+// edit text properties
 view.EditableTextView = class extends view.Control {
 
     constructor(context, value, options = {}) {
@@ -5824,6 +5845,7 @@ view.NodeListView = class extends view.Control {
     }
 };
 
+// edit conection and value properties
 view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
 
     constructor(context, value, from, to, editSession) {
@@ -5936,6 +5958,7 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
             this._focused = this._focused || new Set();
             this._focused.add(value);
         });
+        // edit conection and value properties
         entry.on('blur', (sender, value) => {
             this.emit('blur', value);
             this._focused = this._focused || new Set();

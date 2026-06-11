@@ -1,6 +1,12 @@
-
+/*
+    This was a new file that was created to show two graphs at once. 
+    Since each side needs to hvae its own permissions and rendered graph, we make this class
+    So view.js can treat both of this the same way instead of maintaining two parallel implementations
+    graph-pane.js handles just one pane
+    Author: Luray He
+*/
 export class GraphPane {
-
+    // readonly is essentially the difference between the two panes
     constructor(view, container, options = {}) {
         this._view = view;
         this._container = container;
@@ -40,6 +46,7 @@ export class GraphPane {
         return status;
     }
 
+    // sets the graph for the pane, so we know which one to use
     _setGraph(graph) {
         this._graph = graph;
         this._rendered = Boolean(graph);

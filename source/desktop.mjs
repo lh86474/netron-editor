@@ -13,7 +13,9 @@ import * as view from './view.js';
 import { normalizeExportFilename } from './export-filename.js';
 
 const desktop = {};
-
+// Environment host for an Electron-based desktop application
+// desk.host implements an interface that he application's core logic (view.js) uses to interact
+// with the desktop environment
 desktop.Host = class {
 
     constructor() {
@@ -25,6 +27,7 @@ desktop.Host = class {
             this.exception(error, true);
             this.message(error.message);
         });
+        // eval required for security purposes. Environment details from Electron's main process
         this._global.eval = () => {
             throw new Error('eval.eval() not supported.');
         };
@@ -43,6 +46,7 @@ desktop.Host = class {
                 fs.writeFileSync(file, JSON.stringify(__coverage__));
             }
         });
+        // ask user for consent regarding cookies and telemetry
         this._environment = electron.ipcRenderer.sendSync('get-environment', {});
         this._environment.menu = this._environment.titlebar && this._environment.platform !== 'darwin';
         this._files = [];
@@ -129,6 +133,7 @@ desktop.Host = class {
                 this.set('consent', Date.now());
             }
         };
+        // Used to track usage and error reporting
         const telemetry = async () => {
             if (this._environment.packaged) {
                 const measurement_id = '848W2NVWVH';
@@ -313,6 +318,8 @@ desktop.Host = class {
         });
     }
 
+    // This supports the export functionality of the function
+    // Note that this is not a general purpose export function, but rather a specific implementation
     async export(file, blob) {
         const window = this.window;
         const reader = new window.FileReader();
@@ -354,6 +361,7 @@ desktop.Host = class {
         return this.fetch(file, 'utf-8', null);
     }
 
+    // fetch functionality, which is used to read files from the desktop environment
     async fetch(file, encoding, basename) {
         return new Promise((resolve, reject) => {
             const dirname = path.dirname(url.fileURLToPath(import.meta.url));
@@ -364,6 +372,8 @@ desktop.Host = class {
                 reject(new Error(`The path '${pathname}' is invalid.`));
                 return;
             }
+            // fs for file system: Node.js module
+            // path for read files from hard drive
             fs.stat(pathname, (err, stat) => {
                 if (err && err.code === 'ENOENT') {
                     reject(new Error(`The file '${file}' does not exist.`));
@@ -371,6 +381,7 @@ desktop.Host = class {
                     reject(err);
                 } else if (!stat.isFile()) {
                     reject(new Error(`The path '${file}' is not a file.`));
+                // Check the file size. Handle small sizes by reading the file into memory
                 } else if (stat && stat.size < 0x40000000) {
                     fs.readFile(pathname, encoding, (err, data) => {
                         if (err) {
@@ -381,6 +392,7 @@ desktop.Host = class {
                     });
                 } else if (encoding) {
                     reject(new Error(`The file '${file}' size (${stat.size.toString()}) for encoding '${encoding}' is greater than 2 GB.`));
+                // This is if the file is too large to read into memory. Prevent freezing / crashing
                 } else {
                     const stream = new node.FileStream(pathname, 0, stat.size, stat.mtimeMs);
                     resolve(stream);
@@ -641,6 +653,8 @@ desktop.Host = class {
     }
 };
 
+// encapsulate the data of a specific file or folder the user has opened
+// file stream, identifier
 desktop.Context = class {
 
     constructor(host, folder, identifier, stream, entries) {

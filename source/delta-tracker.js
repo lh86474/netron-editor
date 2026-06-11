@@ -1,4 +1,14 @@
+/*
+    This file mainly defines the DeltaTracker class and some other helper functions
+    The main purpose of this file is to have a goodnotepad of all ofthe changes that the user has made
+    to the modified graph
+    Author: Luray He
+*/
 
+/*
+ A lot of equality checks to compare changes to the original graph
+ False denotes that there is a change. 
+*/
 const scalarEqual = (a, b) => {
     if (a === b) {
         return true;
@@ -8,7 +18,7 @@ const scalarEqual = (a, b) => {
     }
     return false;
 };
-
+// For more complicated objects like Arrays
 const deepEqual = (a, b) => {
     if (scalarEqual(a, b)) {
         return true;
@@ -46,8 +56,11 @@ const deepEqual = (a, b) => {
     return false;
 };
 
+// The actual tracker
+// Creatively amed by composer 2.5. Delta means change
 export class DeltaTracker {
-
+    // this._changes is quite important because the getter function is used very frequently in onnx-export.js
+    // orignialSnapshot is created with buildOriginalSnapshot in model-editor.js
     constructor(originalSnapshot) {
         this._original = originalSnapshot;
         this._changes = new Map();
@@ -61,10 +74,13 @@ export class DeltaTracker {
         return change.entityId;
     }
 
+    // This is the actual recorder. 
+    // We get some change from the editor, which include name, type, and description
     record(change) {
         const snapshotKey = this._snapshotKey(change);
         const originalValue = this._original.get(snapshotKey);
         const existsInOriginal = this._original.has(snapshotKey);
+        // handles delete
         if (change.changeType === 'delete') {
             if (!existsInOriginal) {
                 this._changes.delete(change.entityId);
@@ -86,6 +102,7 @@ export class DeltaTracker {
         return this._changes.get(change.entityId) || null;
     }
 
+    // add , delete, or modified
     getState(entityId) {
         const change = this._changes.get(entityId);
         if (!change) {
@@ -93,7 +110,7 @@ export class DeltaTracker {
         }
         return change.changeType === 'add' ? 'added' : change.changeType === 'delete' ? 'deleted' : 'modified';
     }
-
+    // checks if directerd children or nested entities have been deleted or modified
     getAggregateState(parentId) {
         const prefix = `${parentId}/`;
         let aggregate = 'unchanged';
@@ -108,6 +125,7 @@ export class DeltaTracker {
         return aggregate;
     }
 
+    // returns all changes in an array
     getChanges() {
         return Array.from(this._changes.values());
     }

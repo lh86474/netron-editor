@@ -739,7 +739,8 @@ export const insertNode = (graph, refNodeIndex, position, nodeSpec) => {
     }
     return { insertIndex, node: newNode };
 };
-
+// This builds a picture of the old graph
+// essentially, this works by iterating through the graph and adding the nodes and attributes to the snapshot
 const buildOriginalSnapshot = (model) => {
     const snapshot = new Map();
     model.modules.forEach((graph, graphIndex) => {

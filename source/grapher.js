@@ -15,10 +15,12 @@ grapher.Graph = class {
         this._markerPrefix = '';
     }
 
+    // added this to make sure that the IDs between the two split screens are different
+    // markerPrefix is used to prefix the IDs of the nodes and edges in the graph
     get markerPrefix() {
         return this._markerPrefix;
     }
-
+    // values too since their IDs would clash as well
     set markerPrefix(value) {
         this._markerPrefix = value || '';
     }
@@ -409,11 +411,19 @@ grapher.Node = class {
             block.last = i === this.blocks.length - 1;
             block.build(document, this.element);
         }
+        // to support right-click on a node to insert above / below
+        // this is a context-menu hook
+        // makes sure to override the browser's default right-click behavior
+        // sometimes, might need to disable cache developer tools to see the new context menu as old grapher.js may cache in the browser
         this.element.appendChild(this.border);
         if (this.onContextMenu) {
+            // the trigger of the contextmenu
             this.element.addEventListener('contextmenu', (e) => {
+                // blocks the browser's default behavior
                 e.preventDefault();
+                // no bubbling up the DOM tree
                 e.stopPropagation();
+                // executing the actual hook. 
                 this.onContextMenu(e);
             });
         }
@@ -602,7 +612,9 @@ grapher.Node.Header.Entry = class {
         }
         this.text.textContent = this.content || '\u00A0';
     }
-
+    // There was a bug that was fixed in measure
+    // When node headers were rebuilt during editing, getBBox() on header text gave wrong sizes
+    // x / y were hardcoded as 0, which is wrong
     measure() {
         const yPadding = 4;
         const xPadding = this.padding || 7;
@@ -617,6 +629,7 @@ grapher.Node.Header.Entry = class {
         if (y !== null) {
             this.text.setAttribute('y', y);
         }
+        // Here, we compute the width and height of the header entry
         this.width = boundingBox.width + xPadding + xPadding;
         this.height = boundingBox.height + yPadding + yPadding;
         this.tx = xPadding;

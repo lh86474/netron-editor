@@ -1,4 +1,12 @@
 
+/*
+    This file defines a lot of different helper functions to encode the graph into the ONNX IR
+    Very extensive as it needs to cover all data types supported by ONNX IR
+    Support export of all data types supported by ONNX IR
+    It also supports all of the Protobuf classes that are used to build an .onnx graph
+    Check onnx.proto3 for the full structure of the messages. EVerything here is based on onnx.proto3
+    Author: Luray He
+*/
 import { onnx } from './onnx-proto.js';
 import { BinaryWriter, encodeUnknown, own } from './protobuf.js';
 
@@ -425,5 +433,5 @@ onnx.ModelProto.encodeBytes = (message) => {
     onnx.ModelProto.encode(writer, message);
     return writer.finish();
 };
-
+// exports the onnx.ModelProto class to be used in other files
 export { onnx };

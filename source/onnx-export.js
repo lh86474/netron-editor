@@ -1,9 +1,14 @@
-
+/*
+This file defines some functions that are used to support the export of the graph
+Author: Luray He
+*/
 import './onnx-encode.js';
 import { onnx } from './onnx-proto.js';
 import { BinaryReader } from './protobuf.js';
 import { enumerateGraphValues } from './model-editor.js';
-
+// class to create the ONNXExportError
+// Holds the error message and has property ONNX Export Error
+// from parent class Error
 export class OnnxExportError extends Error {
 
     constructor(message) {
@@ -11,13 +16,14 @@ export class OnnxExportError extends Error {
         this.name = 'ONNX Export Error';
     }
 }
-
+// Looks at the field numbers assigned in .proto3 and creates a map to store the field numbers for the data types
 const dataTypeByName = new Map([
     ['undefined', 0], ['float32', 1], ['uint8', 2], ['int8', 3], ['uint16', 4], ['int16', 5],
     ['int32', 6], ['int64', 7], ['string', 8], ['boolean', 9], ['float16', 10], ['float64', 11],
     ['uint32', 12], ['uint64', 13], ['complex<float32>', 14], ['complex<float64>', 15], ['bfloat16', 16]
 ]);
-
+// This is also a map, albeit not consistent with using the Map() oject
+// The key is the data type and the value is an object with the type and field properties
 const attributeTypeMap = {
     'float32': { type: 1, field: 'f' },
     'float': { type: 1, field: 'f' },
@@ -33,6 +39,8 @@ const attributeTypeMap = {
     'string[]': { type: 8, field: 'strings' }
 };
 
+// This function is a utility function that helps us get the name of some value
+// For example, it is used in lines 205, 216, 309 to access the name of nodes
 const referenceName = (value) => {
     if (typeof value === 'string') {
         return value;
@@ -42,7 +50,11 @@ const referenceName = (value) => {
     }
     return '';
 };
-
+// entityIds point to some editable in a loaded graph. 
+// Those are keys in DeltaTracker, the handles in editor patches, what export/UI code uses to find the right node
+// this function uses some fancy regex and parsing to extract the graph index, target, index, and attribute index
+// For example, if the entityId is 'graph:0/node:0/attr:0', the function will return:
+// { graphIndex: 0, target: 'node', nodeIndex: 0, attributeIndex: 0 }
 const parseEntityId = (entityId) => {
     const nodeMatch = /^graph:(\d+)\/node:(\d+)(?:\/attr:(\d+))?$/.exec(entityId);
     if (nodeMatch) {
@@ -72,7 +84,8 @@ const parseEntityId = (entityId) => {
     }
     return null;
 };
-
+// This is just a formatter for metadata. It joins arrays with commas and handles
+// null values and undefined by turning them into empty strings
 const formatMetadataValue = (value) => {
     if (Array.isArray(value)) {
         return value.join(', ');
@@ -82,14 +95,18 @@ const formatMetadataValue = (value) => {
     }
     return String(value);
 };
-
+// In official ONNX, there is a StringStringEntryProto class that is used to store metadata
+// "StringString" denotes that it has a string key and a string value
+// This serves as a sort of constructor for the class
 const buildMetadataProp = (key, value) => {
     const entry = new onnx.StringStringEntryProto();
     entry.key = key;
     entry.value = formatMetadataValue(value);
     return entry;
 };
-
+// this function puts the data into the metadata_props array of the valueInfo object
+// a valueinfo object is a placeholder for a value in the graph
+// it is used to store the name, type, and metadata of the value
 const upsertMetadataProp = (valueInfo, key, value) => {
     valueInfo.metadata_props = valueInfo.metadata_props || [];
     const existing = valueInfo.metadata_props.find((entry) => entry.key === key);
@@ -99,7 +116,8 @@ const upsertMetadataProp = (valueInfo, key, value) => {
     }
     valueInfo.metadata_props.push(buildMetadataProp(key, value));
 };
-
+// This function gets the name of a value by its graph index and value index
+// editsession is the session that contains the modified graph
 const getValueNameById = (editSession, graphIndex, valueIndex) => {
     const valueId = `graph:${graphIndex}/value:${valueIndex}`;
     const modifiedGraph = editSession.modified.getGraph(graphIndex);
@@ -110,7 +128,7 @@ const getValueNameById = (editSession, graphIndex, valueIndex) => {
     }
     return null;
 };
-
+// This gets the attribute of a value, important for exporting the type of a value to graph
 const getModifiedValueAttribute = (editSession, location) => {
     const valueId = `graph:${location.graphIndex}/value:${location.valueIndex}`;
     const modifiedGraph = editSession.modified.getGraph(location.graphIndex);
@@ -121,7 +139,8 @@ const getModifiedValueAttribute = (editSession, location) => {
     }
     return null;
 };
-
+// Makes sure we have a valueInfo object for a value, else creates one for us
+// valueinfo is a placeholder for a value in the graph
 const ensureValueInfo = (graph, name) => {
     let valueInfo = findValueInfo(graph, name);
     if (!valueInfo) {
@@ -132,19 +151,27 @@ const ensureValueInfo = (graph, name) => {
     }
     return valueInfo;
 };
-
+// This clones the model proto, the container of the graph. 
+// Since we are modifying a graph, we need a safe deep copy to work with
 const cloneModelProto = (model) => {
+    //encodeBytes is a method on the ModelProto class that encodes the model into a binary string
+    // These are defined in onnx-encode.js
     const bytes = onnx.ModelProto.encodeBytes(model);
+    //decode is a method on the ModelProto class that decodes a binary string into a model object
     return onnx.ModelProto.decode(BinaryReader.open(bytes));
 };
 
 const encodeText = (value) => new TextEncoder().encode(value);
 
+// This builds the AttributeProto object
+// Refer to onnx docs for more info about attributeproto
+// We need to build this to match ONNX IR for export
 const buildAttributeProto = (name, type, value) => {
     const mapping = attributeTypeMap[type] || attributeTypeMap['string'];
     const attribute = new onnx.AttributeProto();
     attribute.name = name;
     attribute.type = mapping.type;
+    // WE check for the field type and set the appropriate attribute
     if (mapping.field === 's') {
         attribute.s = encodeText(String(value));
     } else if (mapping.field === 'f') {
@@ -162,7 +189,7 @@ const buildAttributeProto = (name, type, value) => {
     }
     return attribute;
 };
-
+// returns a TypeProto, which is needed for the ONNX IR
 const parseTensorTypeString = (typeString) => {
     if (!typeString || typeof typeString !== 'string') {
         throw new OnnxExportError('Value type is required for export.');
@@ -197,6 +224,7 @@ const parseTensorTypeString = (typeString) => {
     return type;
 };
 
+// Makes sure node inputs / outputs are represented as simple string names
 const normalizeGraphReferences = (graph) => {
     for (const node of graph.node || []) {
         node.input = (node.input || []).map(referenceName);
@@ -613,11 +641,14 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
     };
 };
 
+// This support any new nodes and insertions into the graph
 const applyNodeInsertions = (graph, originalProto, editSession) => {
     const changes = editSession.delta.getChanges();
+    // pipeline to filter through the changes to find just the insertions
     const insertions = changes.filter((change) => (
         change.entityType === 'node' && change.changeType === 'add' && change.property === 'insert'
     ));
+    // return if no insertions
     if (insertions.length === 0) {
         return;
     }
@@ -649,6 +680,8 @@ const applyNodeInsertions = (graph, originalProto, editSession) => {
     }
 };
 
+// This applies the changes to the graph
+// delta is our tracker that contains what we have changed. 
 const applyChanges = (cloned, originalProto, editSession) => {
     const graph = cloned.graph;
     const changes = editSession.delta.getChanges();
@@ -730,13 +763,19 @@ export const canExportOnnx = (model) => {
     return model && model.exportable === true;
 };
 
+// This is the main function that actually exports the graph
+// It first detects some common errors through our helper functions
+// We make sure all graph references are string
+// check for dangling referenes and return the encoded .onnx
 export const exportModifiedOnnx = (model, editSession) => {
     if (!canExportOnnx(model)) {
         throw new OnnxExportError('This model cannot be exported as ONNX.');
     }
+    // Must be modified
     if (!editSession) {
         throw new OnnxExportError('No editor session is available for export.');
     }
+    // We can't support proto, just .onnx
     const proto = model.proto;
     if (!proto) {
         throw new OnnxExportError('Original ONNX protobuf is not available for export.');

@@ -1,9 +1,12 @@
-
+/*
+ * Browser-side host for a web app
+ */
 import * as base from './base.js';
 import { normalizeExportFilename } from './export-filename.js';
 
 const browser = {};
-
+// Disables window.eval() to prevent cross-scripting (XSS) attacks
+// Determine app version, deployment date, platform, scrape <meta>
 browser.Host = class {
 
     constructor() {
@@ -145,6 +148,7 @@ browser.Host = class {
         await capabilities();
     }
 
+    // route the app to the appropriate view based on the URL
     async start() {
         if (this._meta.file) {
             const [url] = this._meta.file;
@@ -534,6 +538,7 @@ browser.Host = class {
         return await this._openContext(context);
     }
 
+    // Wrap HTML5 filereader API to open files from the user's system
     async _open(file, files) {
         this._view.show('welcome spinner');
         const context = new browser.BrowserFileContext(this, file, files);
@@ -747,6 +752,7 @@ browser.BrowserFileContext = class {
                             const slice = blob.slice(position, Math.min(position + size, blob.size));
                             reader.readAsArrayBuffer(slice);
                         } else {
+                            // implement chunking
                             const stream = new browser.FileStream(chunks, size, 0, position);
                             resolve(stream);
                         }
@@ -902,6 +908,7 @@ browser.FileStream = class {
     }
 };
 
+// Handle remote files fetched over the network
 browser.Context = class {
 
     constructor(host, url, identifier, name, stream) {
