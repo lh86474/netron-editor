@@ -38,8 +38,9 @@ view.View = class {
         this._activePane = 'modified';
         this._path = [];
         this._selection = [];
-        this._rangeBegin = null;
-        this._rangeEnd = null;
+        // arrays to support multiple begin and end marker
+        this._rangeBegins = [];
+        this._rangeEnds = [];
         this._exportBasenameOverride = null;
         this._sidebar = new view.Sidebar(this._host);
         this._find = null;
@@ -784,6 +785,14 @@ view.View = class {
         this._closeGraphOverlays();
         const x = event.clientX;
         const y = event.clientY;
+        const entity = this._resolveNodeEntity(nodeView.value);
+        const isBegin = this._isRangeBegin(entity);
+        const isEnd = this._isRangeEnd(entity);
+        const hasMarkers = this._rangeBegins.length > 0 || this._rangeEnds.length > 0;
+        const canExtract = this._rangeBegins.length > 0 && this._rangeEnds.length > 0;
+        const extractLabel = canExtract
+            ? `Extract Subgraph (${this._rangeBegins.length} start${this._rangeBegins.length === 1 ? '' : 's'}, ${this._rangeEnds.length} end${this._rangeEnds.length === 1 ? '' : 's'})`
+            : 'Extract Subgraph';
         const items = [
             {
                 label: 'Insert Above\u2026',
@@ -795,27 +804,27 @@ view.View = class {
             },
             { separator: true },
             {
-                label: 'Mark as Beginning',
+                label: isBegin ? 'Unmark Beginning' : 'Mark as Beginning',
                 action: () => this._markRangeBegin(nodeView)
             },
             {
-                label: 'Mark as End',
+                label: isEnd ? 'Unmark End' : 'Mark as End',
                 action: () => this._markRangeEnd(nodeView)
             },
             {
                 label: 'Clear Range Markers',
                 action: () => this._clearRangeMarkers(),
-                enabled: Boolean(this._rangeBegin || this._rangeEnd)
+                enabled: hasMarkers
             },
             {
-                label: 'Extract Subgraph',
+                label: extractLabel,
                 action: () => this._extractAndReplaceGraph(),
-                enabled: Boolean(this._rangeBegin && this._rangeEnd)
+                enabled: canExtract
             }
         ];
         this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, items);
         this._graphContextMenu.open();
-    }
+    } 
 
     // mark begin node for graph extraction
     _markRangeBegin(nodeView) {
@@ -823,9 +832,12 @@ view.View = class {
         if (!entity) {
             return;
         }
-        this._rangeBegin = entity;
-        if (this._rangeEnd && this._rangeEnd.graphIndex !== entity.graphIndex) {
-            this._rangeEnd = null;
+        if (this._isRangeBegin(entity)) {
+            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== entity.nodeId);
+        } else {
+            this._clearRangeMarkersOnOtherGraph(entity.graphIndex);
+            this._rangeBegins.push(entity);
+            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== entity.nodeId);
         }
         this._refreshRangeMarkerStyles();
     }
@@ -836,16 +848,19 @@ view.View = class {
         if (!entity) {
             return;
         }
-        this._rangeEnd = entity;
-        if (this._rangeBegin && this._rangeBegin.graphIndex !== entity.graphIndex) {
-            this._rangeBegin = null;
+        if (this._isRangeEnd(entity)) {
+            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== entity.nodeId);
+        } else {
+            this._clearRangeMarkersOnOtherGraph(entity.graphIndex);
+            this._rangeEnds.push(entity);
+            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== entity.nodeId);
         }
         this._refreshRangeMarkerStyles();
     }
 
     _clearRangeMarkers() {
-        this._rangeBegin = null;
-        this._rangeEnd = null;
+        this._rangeBegins = [];
+        this._rangeEnds = [];
         this._refreshRangeMarkerStyles();
     }
 
@@ -856,33 +871,60 @@ view.View = class {
         }
     }
 
+    _isRangeBegin(entity) {
+        return entity && this._rangeBegins.some((entry) => entry.nodeId === entity.nodeId);
+    }
+
+    _isRangeEnd(entity) {
+        return entity && this._rangeEnds.some((entry) => entry.nodeId === entity.nodeId);
+    }
+
+    _clearRangeMarkersOnOtherGraph(graphIndex) {
+        this._rangeBegins = this._rangeBegins.filter((entry) => entry.graphIndex === graphIndex);
+        this._rangeEnds = this._rangeEnds.filter((entry) => entry.graphIndex === graphIndex);
+    }
+
+    _resolveMarkedNodes(entities, graph) {
+        const nodes = [];
+        for (const entity of entities) {
+            const node = graph.nodes[entity.nodeIndex];
+            if (!node) {
+                throw new SubgraphExtractError('Marked nodes are no longer available.');
+            }
+            nodes.push(node);
+        }
+        return nodes;
+    }
+
     // extract and replace graph
     async _extractAndReplaceGraph() {
-        if (!this._editSession || !this._rangeBegin || !this._rangeEnd) {
+        if (!this._editSession || this._rangeBegins.length === 0 || this._rangeEnds.length === 0) {
             return;
         }
-        if (this._rangeBegin.graphIndex !== this._rangeEnd.graphIndex) {
-            await this._host.message('Begin and end nodes must be in the same graph.', true, 'OK');
+        const graphIndex = this._rangeBegins[0].graphIndex;
+        if (this._rangeBegins.some((entry) => entry.graphIndex !== graphIndex) ||
+            this._rangeEnds.some((entry) => entry.graphIndex !== graphIndex)) {
+            await this._host.message('All marked nodes must be in the same graph.', true, 'OK');
             return;
         }
         try {
-            const graphIndex = this._rangeBegin.graphIndex;
             const graph = this._editSession.modified.getGraph(graphIndex);
-            const beginNode = graph.nodes[this._rangeBegin.nodeIndex];
-            const endNode = graph.nodes[this._rangeEnd.nodeIndex];
-            if (!beginNode || !endNode) {
-                throw new SubgraphExtractError('Marked nodes are no longer available.');
-            }
-            const extracted = extractSubgraph(graph, beginNode, endNode);
+            const beginNodes = this._resolveMarkedNodes(this._rangeBegins, graph);
+            const endNodes = this._resolveMarkedNodes(this._rangeEnds, graph);
+            const extracted = extractSubgraph(graph, beginNodes, endNodes);
             this._editSession.replaceGraph(graphIndex, extracted);
             if (this._model && this._model.proto) {
                 this._model.proto.graph = rebuildGraphProtoFromModified(extracted, this._model.proto);
             }
             const exportBase = stripExportExtension(this._host.document.title || 'model');
-            this._exportBasenameOverride = buildSubgraphExportBasename(exportBase, beginNode.name, endNode.name);
+            this._exportBasenameOverride = buildSubgraphExportBasename(
+                exportBase,
+                beginNodes.map((node) => node.name),
+                endNodes.map((node) => node.name)
+            );
             this._host.document.title = `${this._exportBasenameOverride}.onnx`;
-            this._rangeBegin = null;
-            this._rangeEnd = null;
+            this._rangeBegins = [];
+            this._rangeEnds = [];
             this._sidebar.close();
             this._bindEditorSession();
             await this._refreshModifiedPane();
@@ -3839,8 +3881,8 @@ view.Node = class extends grapher.Node {
             return;
         }
         const view = this.context.view;
-        const isBegin = view._rangeBegin && view._rangeBegin.nodeId === this._entityId;
-        const isEnd = view._rangeEnd && view._rangeEnd.nodeId === this._entityId;
+        const isBegin = view._rangeBegins.some((entry) => entry.nodeId === this._entityId);
+        const isEnd = view._rangeEnds.some((entry) => entry.nodeId === this._entityId);
         // change css
         this.element.classList.toggle('range-begin', Boolean(isBegin));
         this.element.classList.toggle('range-end', Boolean(isEnd));

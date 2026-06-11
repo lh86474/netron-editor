@@ -439,6 +439,161 @@ export const collectNodesBetween = (graph, beginNode, endNode) => {
     return result;
 };
 
+const normalizeNodeList = (nodes) => {
+    if (!nodes) {
+        return [];
+    }
+    return Array.isArray(nodes) ? nodes.filter(Boolean) : [nodes];
+};
+
+const hasInGraphProducer = (graph, node) => {
+    for (const input of node.inputs || []) {
+        for (const value of argumentValues(input)) {
+            if (!value || !value.name || value.initializer) {
+                continue;
+            }
+            for (const producer of findValueProducers(graph, value)) {
+                if (producer.node) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+};
+
+export const computeNodeLevels = (graph) => {
+    const levels = new Map();
+    for (const node of graph.nodes || []) {
+        if (!hasInGraphProducer(graph, node)) {
+            levels.set(node, 0);
+        }
+    }
+    let changed = true;
+    while (changed) {
+        changed = false;
+        for (const node of graph.nodes || []) {
+            for (const input of node.inputs || []) {
+                for (const value of argumentValues(input)) {
+                    if (!value || !value.name || value.initializer) {
+                        continue;
+                    }
+                    for (const producer of findValueProducers(graph, value)) {
+                        if (!producer.node) {
+                            continue;
+                        }
+                        const base = levels.get(producer.node);
+                        if (base === undefined) {
+                            continue;
+                        }
+                        const next = base + 1;
+                        if (!levels.has(node) || levels.get(node) < next) {
+                            levels.set(node, next);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return levels;
+};
+
+const nodeDisplayName = (node) => node.name || (node.type && node.type.name) || 'unknown';
+
+const assertSameLevel = (nodes, levels, label) => {
+    const seen = new Set();
+    for (const node of nodes) {
+        const level = levels.get(node);
+        if (level === undefined) {
+            throw new SubgraphExtractError(`Could not determine level for ${label.toLowerCase()} node '${nodeDisplayName(node)}'.`);
+        }
+        seen.add(level);
+    }
+    if (seen.size > 1) {
+        const details = nodes.map((node) => `${nodeDisplayName(node)} (${levels.get(node)})`).join(', ');
+        throw new SubgraphExtractError(`${label} nodes must be on the same level: ${details}.`);
+    }
+};
+
+export const isNodeReachable = (graph, beginNode, endNode) => {
+    if (!beginNode || !endNode) {
+        return false;
+    }
+    if (beginNode === endNode) {
+        return true;
+    }
+    const forward = new Set();
+    const queue = [beginNode];
+    while (queue.length > 0) {
+        const node = queue.shift();
+        if (forward.has(node)) {
+            continue;
+        }
+        forward.add(node);
+        for (const output of node.outputs || []) {
+            for (const value of argumentValues(output)) {
+                if (!value || !value.name) {
+                    continue;
+                }
+                for (const consumer of findValueConsumers(graph, value)) {
+                    if (consumer.node && !forward.has(consumer.node)) {
+                        queue.push(consumer.node);
+                    }
+                }
+            }
+        }
+    }
+    return forward.has(endNode);
+};
+
+export const validateMarkedRangeNodes = (graph, beginNodes, endNodes) => {
+    const begins = normalizeNodeList(beginNodes);
+    const ends = normalizeNodeList(endNodes);
+    if (begins.length === 0 || ends.length === 0) {
+        throw new SubgraphExtractError('At least one begin and one end node are required.');
+    }
+    const levels = computeNodeLevels(graph);
+    assertSameLevel(begins, levels, 'Begin');
+    assertSameLevel(ends, levels, 'End');
+    const beginLevel = levels.get(begins[0]);
+    const endLevel = levels.get(ends[0]);
+    if (beginLevel > endLevel) {
+        throw new SubgraphExtractError('Begin nodes must not be deeper than end nodes.');
+    }
+    for (const end of ends) {
+        if (!begins.some((begin) => isNodeReachable(graph, begin, end))) {
+            throw new SubgraphExtractError(`End node '${nodeDisplayName(end)}' is not reachable from any marked begin node.`);
+        }
+    }
+    for (const begin of begins) {
+        if (!ends.some((end) => isNodeReachable(graph, begin, end))) {
+            throw new SubgraphExtractError(`Begin node '${nodeDisplayName(begin)}' cannot reach any marked end node.`);
+        }
+    }
+};
+
+export const collectNodesBetweenMulti = (graph, beginNodes, endNodes) => {
+    const begins = normalizeNodeList(beginNodes);
+    const ends = normalizeNodeList(endNodes);
+    validateMarkedRangeNodes(graph, begins, ends);
+    const result = new Set();
+    for (const begin of begins) {
+        for (const end of ends) {
+            if (!isNodeReachable(graph, begin, end)) {
+                continue;
+            }
+            for (const node of collectNodesBetween(graph, begin, end)) {
+                result.add(node);
+            }
+        }
+    }
+    if (result.size === 0) {
+        throw new SubgraphExtractError('No valid paths exist between marked begin and end nodes.');
+    }
+    return result;
+};
+
 const cloneExtractValue = (value, valueMap) => {
     if (!value) {
         return null;
@@ -488,8 +643,10 @@ const cloneExtractNode = (node, valueMap) => ({
     }))
 });
 
-export const extractSubgraph = (graph, beginNode, endNode) => {
-    const keepSet = collectNodesBetween(graph, beginNode, endNode);
+export const extractSubgraph = (graph, beginNodes, endNodes) => {
+    const begins = normalizeNodeList(beginNodes);
+    const ends = normalizeNodeList(endNodes);
+    const keepSet = collectNodesBetweenMulti(graph, begins, ends);
     const valueMap = new Map();
     const keptNodes = (graph.nodes || []).filter((node) => keepSet.has(node)).map((node) => cloneExtractNode(node, valueMap));
 
@@ -545,14 +702,16 @@ export const extractSubgraph = (graph, beginNode, endNode) => {
         }
     }
 
-    if (boundaryOutputs.size === 0 && endNode) {
-        for (const output of endNode.outputs || []) {
-            for (const value of output.value || []) {
-                if (value && value.name && !boundaryOutputs.has(value.name)) {
-                    boundaryOutputs.set(value.name, {
-                        name: output.name,
-                        value: [cloneExtractValue(value, valueMap)]
-                    });
+    if (boundaryOutputs.size === 0) {
+        for (const endNode of ends) {
+            for (const output of endNode.outputs || []) {
+                for (const value of output.value || []) {
+                    if (value && value.name && !boundaryOutputs.has(value.name)) {
+                        boundaryOutputs.set(value.name, {
+                            name: output.name,
+                            value: [cloneExtractValue(value, valueMap)]
+                        });
+                    }
                 }
             }
         }

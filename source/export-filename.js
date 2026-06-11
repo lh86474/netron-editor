@@ -30,10 +30,24 @@ export const sanitizeExportBasename = (name, maxLength = 120) => {
     return sanitized || 'model';
 };
 
-export const buildSubgraphExportBasename = (base, beginName, endName) => {
+const formatNameGroup = (names, maxLength = 120) => {
+    const list = (Array.isArray(names) ? names : [names])
+        .filter((name) => name && typeof name === 'string')
+        .map((name) => sanitizeExportBasename(name));
+    if (list.length === 0) {
+        return '';
+    }
+    let joined = list.join('+');
+    if (joined.length > maxLength) {
+        joined = joined.substring(0, maxLength).replace(/[+_]+$/, '');
+    }
+    return joined || '';
+};
+
+export const buildSubgraphExportBasename = (base, beginNames, endNames) => {
     const sanitizedBase = sanitizeExportBasename(stripExportExtension(base));
-    const begin = beginName ? sanitizeExportBasename(beginName) : '';
-    const end = endName ? sanitizeExportBasename(endName) : '';
+    const begin = formatNameGroup(beginNames);
+    const end = formatNameGroup(endNames);
     if (begin && end) {
         return `${sanitizedBase}_${begin}_to_${end}`;
     }
