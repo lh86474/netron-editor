@@ -54,6 +54,12 @@ export const buildSubgraphExportBasename = (base, beginNames, endNames) => {
     return `${sanitizedBase}_subgraph`;
 };
 
+export const buildMergeFilename = (upstreamName, downstreamName) => {
+    const upstream = sanitizeExportBasename(stripExportExtension(upstreamName || 'upstream'));
+    const downstream = sanitizeExportBasename(stripExportExtension(downstreamName || 'downstream'));
+    return `${upstream}_merged_${downstream}.onnx`;
+};
+
 export const normalizeExportFilename = (filename, extension) => {
     if (!filename || typeof filename !== 'string') {
         return null;

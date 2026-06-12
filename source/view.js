@@ -5,6 +5,7 @@ import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolv
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
 import { GraphPane } from './graph-pane.js';
+import { MergeWorkspaceController } from './merge-workspace.js';
 
 const view = {};
 const markdown = {};
@@ -47,6 +48,7 @@ view.View = class {
         this._modelFactoryService = new view.ModelFactoryService(this._host);
         this._modelFactoryService.import();
         this._worker = this._host.environment('serial') ? null : new view.Worker(this._host);
+        this._mergeWorkspace = new MergeWorkspaceController(this);
     }
 
     async start() {
@@ -76,6 +78,7 @@ view.View = class {
                 this.toggle('syncScroll');
             });
             this._updateSyncScrollButton();
+            this._mergeWorkspace.bindEvents();
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget();
             });
@@ -297,6 +300,14 @@ view.View = class {
             this._menu.close();
         }
         this._applyScreen(page);
+    }
+
+    _canMergeOnnx() {
+        return this._mergeWorkspace.canMergeOnnx(this._model);
+    }
+
+    async _startMergeWorkspace(options = {}) {
+        await this._mergeWorkspace.start(options);
     }
 
     _applyScreen(page) {

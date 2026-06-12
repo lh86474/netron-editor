@@ -29,6 +29,36 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-readonly { cursor: default; }
 .pane-divider { width: 0; flex-shrink: 0; }
+.merge-container { display: none; flex-direction: column; height: 100%; width: 100%; overflow: hidden; }
+.merge-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #ccc; flex-shrink: 0; }
+.merge-title { font-size: 14px; font-weight: 600; }
+.merge-toolbar { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #ccc; flex-shrink: 0; }
+.merge-slot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.merge-slot-name { min-width: 140px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #555; }
+.merge-role-badge { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; background: #eee; color: #888; }
+.merge-role-badge.merge-role-active { background: #dfe8ff; color: #204080; }
+.merge-role-badge.merge-role-downstream { background: #e8f5e9; color: #1b5e20; }
+.merge-action-button { font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid #888; background: #f5f5f5; cursor: pointer; }
+.merge-action-button:hover { background: #ececec; }
+.merge-action-button:disabled { opacity: 0.45; cursor: default; }
+.merge-mapping-strip { flex-shrink: 0; border-bottom: 1px solid #ccc; padding: 8px 12px; max-height: 220px; overflow: auto; }
+.merge-mapping-strip h2 { margin: 0 0 8px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #666; }
+.merge-mapping-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.merge-mapping-table th, .merge-mapping-table td { padding: 4px 8px; border-bottom: 1px solid #e0e0e0; text-align: left; vertical-align: middle; }
+.merge-mapping-table th { color: #666; font-weight: 600; }
+.merge-mapping-select { min-width: 160px; max-width: 240px; font-size: 12px; padding: 2px 4px; }
+.merge-validation-summary { margin-top: 8px; font-size: 12px; white-space: pre-wrap; color: #444; }
+.merge-status-ok { color: #1b5e20; font-weight: 700; }
+.merge-status-warning { color: #9a6700; font-weight: 700; }
+.merge-status-error { color: #b00020; font-weight: 700; }
+.merge-graph-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.merge-preview-pane { display: flex; flex: 1; min-height: 0; overflow: auto; position: relative; }
+.merge-footer { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 12px; border-top: 1px solid #ccc; flex-shrink: 0; }
+.merge-workspace .diff-container { display: none !important; opacity: 0; }
+.merge-workspace .toolbar { display: none; }
+.merge-workspace .logo { display: none; }
+.merge-workspace .merge-container { display: flex; opacity: 1; }
+.merge-workspace .target { display: none; opacity: 0; }
 .target { display: flex; height: 100%; width: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; }
 .canvas { margin: auto; flex-shrink: 0; text-rendering: geometricPrecision; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .open-file-dialog { display: none; }
@@ -178,6 +208,19 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .graph-pane { background-color: #404040; }
 .target { background-color: #404040; }
 .graph-pane-original { border-right-color: #555; }
+.merge-container { background-color: #404040; color: #e0e0e0; }
+.merge-header, .merge-toolbar, .merge-mapping-strip, .merge-footer { border-color: #555; }
+.merge-slot-name { color: #bbb; }
+.merge-role-badge { background: #333; color: #888; }
+.merge-role-badge.merge-role-active { background: #2a3f66; color: #b8cff5; }
+.merge-role-badge.merge-role-downstream { background: #264028; color: #b9e4bc; }
+.merge-action-button { border-color: #666; background: #333; color: #eee; }
+.merge-action-button:hover { background: #444; }
+.merge-mapping-table th, .merge-mapping-table td { border-color: #555; }
+.merge-mapping-table th { color: #aaa; }
+.merge-mapping-select { background: #2d2d2d; color: #eee; border: 1px solid #555; }
+.merge-validation-summary { color: #ccc; }
+.merge-preview-pane { background-color: #404040; }
 .welcome { background-color: #1e1e1e; color: #888888; }
 .alert { background-color: #1e1e1e; color: #888888; }
 .logo-stroke { stroke: #888888; }
@@ -379,6 +422,54 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
     <div id="target-modified" class="graph-pane graph-pane-modified target" tabindex="0">
         <div class="graph-pane-label">Modified</div>
     </div>
+</div>
+<div id="merge-container" class="merge-container">
+    <div class="merge-header">
+        <div class="merge-title">Merge ONNX Graphs</div>
+        <button id="merge-cancel-button" class="merge-action-button" type="button">Cancel</button>
+    </div>
+    <div class="merge-toolbar">
+        <div class="merge-slot">
+            <span>Model A:</span>
+            <span id="merge-slot-a-name" class="merge-slot-name">No model loaded</span>
+            <button id="merge-slot-a-browse" class="merge-action-button" type="button">Browse…</button>
+            <span id="merge-slot-a-role" class="merge-role-badge"></span>
+        </div>
+        <div class="merge-slot">
+            <span>Model B:</span>
+            <span id="merge-slot-b-name" class="merge-slot-name">No model loaded</span>
+            <button id="merge-slot-b-browse" class="merge-action-button" type="button">Browse…</button>
+            <span id="merge-slot-b-role" class="merge-role-badge"></span>
+        </div>
+        <button id="merge-swap-roles-button" class="merge-action-button" type="button" disabled>Swap roles</button>
+    </div>
+    <div class="merge-mapping-strip">
+        <h2>Connection mapping</h2>
+        <table class="merge-mapping-table">
+            <thead>
+                <tr>
+                    <th>Downstream input</th>
+                    <th>Type</th>
+                    <th>Upstream output</th>
+                    <th>Upstream type</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="merge-mapping-body"></tbody>
+        </table>
+        <div id="merge-validation-summary" class="merge-validation-summary">Load both models to detect merge direction.</div>
+    </div>
+    <div id="merge-graph-area" class="merge-graph-area">
+        <div id="merge-preview-pane" class="graph-pane merge-preview-pane graph-pane-readonly target" tabindex="0">
+            <div class="graph-pane-label">Merged preview</div>
+        </div>
+    </div>
+    <div class="merge-footer">
+        <button id="merge-export-button" class="merge-action-button" type="button" disabled>Export merged…</button>
+        <button id="merge-open-button" class="merge-action-button" type="button" disabled>Open merged</button>
+    </div>
+    <input type="file" id="merge-slot-a-file-dialog" class="open-file-dialog" accept=".onnx">
+    <input type="file" id="merge-slot-b-file-dialog" class="open-file-dialog" accept=".onnx">
 </div>
 <div id="sidebar" class="sidebar">
     <h1 id="sidebar-title" class="sidebar-title"></h1>
@@ -634,6 +725,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
         </svg>
     </a>
     <button id="open-file-button" class="center logo-button open-file-button" tabindex="0">Open Model&hellip;</button>
+    <button id="merge-onnx-button" class="center logo-button open-file-button" tabindex="0" style="top: 220px;">Merge Two ONNX Graphs&hellip;</button>
     <div class="center progress">
         <div id="progress-bar" class="progress-bar"></div>
     </div>
