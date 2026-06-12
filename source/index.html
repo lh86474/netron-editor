@@ -48,17 +48,30 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .merge-mapping-table th { color: #666; font-weight: 600; }
 .merge-mapping-select { min-width: 160px; max-width: 240px; font-size: 12px; padding: 2px 4px; }
 .merge-validation-summary { margin-top: 8px; font-size: 12px; white-space: pre-wrap; color: #444; }
+.merge-validation-summary.merge-summary-ready { color: #1b5e20; }
+.merge-validation-summary.merge-summary-warning { color: #7a5b00; }
+.merge-validation-summary.merge-summary-error { color: #b00020; }
+.merge-validation-summary.merge-summary-pending { color: #666; }
+.merge-mapping-table tr.merge-mapping-row-error { background: #fdecea; }
+.merge-mapping-table tr.merge-mapping-row-warning { background: #fff8e1; }
 .merge-status-ok { color: #1b5e20; font-weight: 700; }
 .merge-status-warning { color: #9a6700; font-weight: 700; }
 .merge-status-error { color: #b00020; font-weight: 700; }
 .merge-graph-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.merge-source-row { display: none; flex: 1; min-height: 0; flex-direction: row; overflow: hidden; }
+.merge-graph-area.show-source-graphs .merge-source-row { display: flex; }
+.merge-source-pane { flex: 1; min-width: 0; min-height: 0; overflow: auto; position: relative; border-bottom: 1px solid #ccc; }
+.merge-upstream-pane { border-right: 1px solid #ccc; }
 .merge-preview-pane { display: flex; flex: 1; min-height: 0; overflow: auto; position: relative; }
+.merge-graph-area.show-source-graphs .merge-preview-pane { flex: 1.2; min-height: 35%; }
+.merge-source-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; user-select: none; }
+.merge-source-toggle input { margin: 0; }
 .merge-footer { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 12px; border-top: 1px solid #ccc; flex-shrink: 0; }
 .merge-workspace .diff-container { display: none !important; opacity: 0; }
 .merge-workspace .toolbar { display: none; }
 .merge-workspace .logo { display: none; }
 .merge-workspace .merge-container { display: flex; opacity: 1; }
-.merge-workspace .target { display: none; opacity: 0; }
+.merge-workspace .merge-graph-area .graph-pane { display: flex; opacity: 1; }
 .target { display: flex; height: 100%; width: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; }
 .canvas { margin: auto; flex-shrink: 0; text-rendering: geometricPrecision; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .open-file-dialog { display: none; }
@@ -220,7 +233,16 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .merge-mapping-table th { color: #aaa; }
 .merge-mapping-select { background: #2d2d2d; color: #eee; border: 1px solid #555; }
 .merge-validation-summary { color: #ccc; }
+.merge-validation-summary.merge-summary-ready { color: #b9e4bc; }
+.merge-validation-summary.merge-summary-warning { color: #e6c76a; }
+.merge-validation-summary.merge-summary-error { color: #f5a8a8; }
+.merge-validation-summary.merge-summary-pending { color: #aaa; }
+.merge-mapping-table tr.merge-mapping-row-error { background: #4a2a2a; }
+.merge-mapping-table tr.merge-mapping-row-warning { background: #4a4020; }
 .merge-preview-pane { background-color: #404040; }
+.merge-source-pane { background-color: #404040; border-bottom-color: #555; }
+.merge-upstream-pane { border-right-color: #555; }
+.merge-source-toggle { color: #ccc; }
 .welcome { background-color: #1e1e1e; color: #888888; }
 .alert { background-color: #1e1e1e; color: #888888; }
 .logo-stroke { stroke: #888888; }
@@ -442,6 +464,10 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
             <span id="merge-slot-b-role" class="merge-role-badge"></span>
         </div>
         <button id="merge-swap-roles-button" class="merge-action-button" type="button" disabled>Swap roles</button>
+        <label id="merge-show-source-graphs-label" class="merge-source-toggle">
+            <input type="checkbox" id="merge-show-source-graphs" disabled>
+            Show source graphs
+        </label>
     </div>
     <div class="merge-mapping-strip">
         <h2>Connection mapping</h2>
@@ -460,7 +486,15 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
         <div id="merge-validation-summary" class="merge-validation-summary">Load both models to detect merge direction.</div>
     </div>
     <div id="merge-graph-area" class="merge-graph-area">
-        <div id="merge-preview-pane" class="graph-pane merge-preview-pane graph-pane-readonly target" tabindex="0">
+        <div id="merge-source-row" class="merge-source-row">
+            <div id="merge-upstream-pane" class="graph-pane merge-source-pane merge-upstream-pane graph-pane-readonly" tabindex="0">
+                <div class="graph-pane-label">Upstream</div>
+            </div>
+            <div id="merge-downstream-pane" class="graph-pane merge-source-pane merge-downstream-pane graph-pane-readonly" tabindex="0">
+                <div class="graph-pane-label">Downstream</div>
+            </div>
+        </div>
+        <div id="merge-preview-pane" class="graph-pane merge-preview-pane graph-pane-readonly" tabindex="0">
             <div class="graph-pane-label">Merged preview</div>
         </div>
     </div>

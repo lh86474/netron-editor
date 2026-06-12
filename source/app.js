@@ -297,11 +297,19 @@ app.Application = class {
         }
     }
 
+    async _mergeOnnx() {
+        const view = this._views.activeView;
+        if (view) {
+            await view.startMergeWorkspace();
+        }
+    }
+
     async execute(command, value, window) {
         switch (command) {
             case 'open': this._open(value); break;
             case 'export': await this._export(); break;
             case 'export-onnx': await this._exportOnnx(); break;
+            case 'merge-onnx': await this._mergeOnnx(); break;
             case 'close': window.close(); break;
             case 'quit': electron.app.quit(); break;
             case 'reload': this._reload(); break;
@@ -444,6 +452,11 @@ app.Application = class {
                     label: '&Export...',
                     accelerator: 'CmdOrCtrl+Shift+E',
                     click: async () => await this.execute('export', null)
+                },
+                {
+                    id: 'file.merge-onnx',
+                    label: 'Merge ONNX &Graph...',
+                    click: async () => await this.execute('merge-onnx', null)
                 },
                 { type: 'separator' },
                 { role: 'close' },

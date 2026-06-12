@@ -767,20 +767,52 @@ export const tryMergeOnnxModels = (upstreamProto, downstreamProto, options = {})
     }
 };
 
-export const formatMergeErrors = (errors) => {
-    const lines = ['Cannot merge models.', ''];
+export const formatMergeErrors = (errors, options = {}) => {
+    const lines = [];
+    if (!options.inline) {
+        lines.push('Cannot merge models.', '');
+    }
     const mappingIssues = (errors || []).filter((entry) => entry.upstream && entry.downstream);
-    const otherIssues = (errors || []).filter((entry) => !entry.upstream || !entry.downstream);
+    const downstreamIssues = (errors || []).filter((entry) => entry.downstream && !entry.upstream);
+    const otherIssues = (errors || []).filter((entry) => !entry.downstream);
     if (mappingIssues.length > 0) {
         lines.push('Mapping issues:');
         for (const issue of mappingIssues) {
             lines.push(`• ${issue.downstream} ← ${issue.upstream}: ${issue.message}`);
         }
-        lines.push('');
+        if (otherIssues.length > 0 || downstreamIssues.length > 0) {
+            lines.push('');
+        }
+    }
+    if (downstreamIssues.length > 0) {
+        lines.push('Input issues:');
+        for (const issue of downstreamIssues) {
+            lines.push(`• ${issue.downstream}: ${issue.message}`);
+        }
+        if (otherIssues.length > 0) {
+            lines.push('');
+        }
     }
     if (otherIssues.length > 0) {
         lines.push('Other issues:');
         for (const issue of otherIssues) {
+            lines.push(`• ${issue.message}`);
+        }
+    }
+    return lines.join('\n');
+};
+
+export const formatMergeWarnings = (warnings, options = {}) => {
+    if (!Array.isArray(warnings) || warnings.length === 0) {
+        return '';
+    }
+    const lines = options.inline ? ['Warnings:'] : ['Warnings:', ''];
+    for (const issue of warnings) {
+        if (issue.upstream && issue.downstream) {
+            lines.push(`• ${issue.downstream} ← ${issue.upstream}: ${issue.message}`);
+        } else if (issue.downstream) {
+            lines.push(`• ${issue.downstream}: ${issue.message}`);
+        } else {
             lines.push(`• ${issue.message}`);
         }
     }

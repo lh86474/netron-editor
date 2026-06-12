@@ -147,6 +147,10 @@ view.View = class {
                         enabled: () => this._canExportOnnx()
                     });
                     file.add({
+                        label: 'Merge ONNX &Graph...',
+                        execute: async () => await this.startMergeWorkspace()
+                    });
+                    file.add({
                         label: platform === 'darwin' ? '&Close Window' : '&Close',
                         accelerator: 'CmdOrCtrl+W',
                         execute: async () => await this._host.execute('close'),
@@ -173,6 +177,10 @@ view.View = class {
                         label: 'Export Modified Model as &ONNX...',
                         execute: async () => await this.exportOnnx(),
                         enabled: () => this._canExportOnnx()
+                    });
+                    file.add({
+                        label: 'Merge ONNX &Graph...',
+                        execute: async () => await this.startMergeWorkspace()
                     });
                 }
                 const edit = this._menu.group('&Edit');
@@ -304,6 +312,15 @@ view.View = class {
 
     _canMergeOnnx() {
         return this._mergeWorkspace.canMergeOnnx(this._model);
+    }
+
+    async startMergeWorkspace() {
+        const preset = this._canMergeOnnx() ? {
+            model: this._model,
+            target: this.activeTarget,
+            filename: `${this._suggestedExportBasename()}.onnx`
+        } : null;
+        await this._startMergeWorkspace({ presetModel: preset });
     }
 
     async _startMergeWorkspace(options = {}) {
@@ -6280,6 +6297,13 @@ view.ModelSidebar = class extends view.ObjectSidebar {
                 this.addArgument(argument.name, argument, 'attribute');
             }
         }
+        if (this._view._canMergeOnnx()) {
+            this.addSection('Actions');
+            const item = this.addProperty('merge', 'Merge ONNX Graph…');
+            item.action('\u2192', 'Open merge workspace with this model', () => {
+                this._view.startMergeWorkspace();
+            });
+        }
     }
 
     get metrics() {
@@ -6352,6 +6376,13 @@ view.TargetSidebar = class extends view.ObjectSidebar {
             for (const argument of metrics) {
                 this.addArgument(argument.name, argument, 'attribute');
             }
+        }
+        if (target.type === 'graph' && this._view._canMergeOnnx()) {
+            this.addSection('Actions');
+            const item = this.addProperty('merge', 'Merge ONNX Graph…');
+            item.action('\u2192', 'Open merge workspace with this model', () => {
+                this._view.startMergeWorkspace();
+            });
         }
     }
 

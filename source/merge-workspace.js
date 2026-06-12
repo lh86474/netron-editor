@@ -8,6 +8,7 @@ import {
     extractGraphOutputs,
     formatType,
     formatMergeErrors,
+    formatMergeWarnings,
     resolveValueType,
     areTypesCompatible,
     tryMergeOnnxModels
@@ -131,14 +132,14 @@ const resolveMainGraphTarget = (model) => {
     return modules[0];
 };
 
-const slotLabel = (slot) => slot === 'A' ? 'A' : 'B';
-
 export class MergeWorkspaceController {
 
     constructor(view) {
         this._view = view;
         this._session = null;
         this._previewPane = null;
+        this._upstreamSourcePane = null;
+        this._downstreamSourcePane = null;
         this._previewTimer = null;
         this._returnPage = 'welcome';
         this._bound = false;
@@ -149,7 +150,6 @@ export class MergeWorkspaceController {
             return;
         }
         this._bound = true;
-        const host = this._view._host;
         const browseA = this._element('merge-slot-a-browse');
         const browseB = this._element('merge-slot-b-browse');
         const dialogA = this._element('merge-slot-a-file-dialog');
@@ -159,6 +159,7 @@ export class MergeWorkspaceController {
         const openMerged = this._element('merge-open-button');
         const exportMerged = this._element('merge-export-button');
         const welcomeMerge = this._element('merge-onnx-button');
+        const showSourceGraphs = this._element('merge-show-source-graphs');
 
         if (welcomeMerge) {
             welcomeMerge.addEventListener('click', () => {
@@ -189,6 +190,11 @@ export class MergeWorkspaceController {
         if (exportMerged) {
             exportMerged.addEventListener('click', () => this.exportMerged());
         }
+        if (showSourceGraphs) {
+            showSourceGraphs.addEventListener('change', () => {
+                this._onShowSourceGraphsChanged(showSourceGraphs.checked);
+            });
+        }
     }
 
     async start(options = {}) {
@@ -197,7 +203,17 @@ export class MergeWorkspaceController {
             this._view._target.unregister();
         }
         this._session = createMergeSession();
+        this._previewPane = null;
+        this._upstreamSourcePane = null;
+        this._downstreamSourcePane = null;
         this._initPreviewPane();
+        this._initSourcePanes();
+        this._updateSourceGraphLayout(false);
+        const showSourceGraphs = this._element('merge-show-source-graphs');
+        if (showSourceGraphs) {
+            showSourceGraphs.checked = false;
+            showSourceGraphs.disabled = true;
+        }
         this._view.show('merge-workspace');
         this.refreshUI();
         const preset = options.presetModel;
@@ -218,6 +234,10 @@ export class MergeWorkspaceController {
             this._previewTimer = null;
         }
         this._clearPreviewPane();
+        this._clearSourcePanes();
+        this._previewPane = null;
+        this._upstreamSourcePane = null;
+        this._downstreamSourcePane = null;
         this._session = null;
         const page = this._returnPage === 'merge-workspace' ? 'welcome' : this._returnPage;
         this._view.show(page);
@@ -230,6 +250,70 @@ export class MergeWorkspaceController {
             return;
         }
         this._previewPane = new GraphPane(this._view, container, { id: 'merge-preview', readOnly: true });
+    }
+
+    _initSourcePanes() {
+        const upstreamContainer = this._element('merge-upstream-pane');
+        const downstreamContainer = this._element('merge-downstream-pane');
+        if (!upstreamContainer || !downstreamContainer) {
+            this._upstreamSourcePane = null;
+            this._downstreamSourcePane = null;
+            return;
+        }
+        this._upstreamSourcePane = new GraphPane(this._view, upstreamContainer, { id: 'merge-upstream', readOnly: true });
+        this._downstreamSourcePane = new GraphPane(this._view, downstreamContainer, { id: 'merge-downstream', readOnly: true });
+    }
+
+    _onShowSourceGraphsChanged(enabled) {
+        if (!this._session) {
+            return;
+        }
+        this._session.showSourceGraphs = enabled;
+        this._updateSourceGraphLayout(enabled);
+        if (enabled) {
+            this._renderSourcePanes().catch(async (error) => {
+                const message = error && error.message ? error.message : String(error);
+                await this._view._host.message(message, true, 'OK');
+            });
+        } else {
+            this._clearSourcePanes();
+        }
+    }
+
+    _updateSourceGraphLayout(enabled) {
+        const graphArea = this._element('merge-graph-area');
+        if (graphArea) {
+            graphArea.classList.toggle('show-source-graphs', Boolean(enabled));
+        }
+    }
+
+    async _renderSourcePanes() {
+        if (!this._session || !this._session.showSourceGraphs || !this._upstreamSourcePane || !this._downstreamSourcePane) {
+            return;
+        }
+        if (!this._session.bothSlotsLoaded() || !this._session.getUpstreamSlot()) {
+            this._clearSourcePanes();
+            return;
+        }
+        const upstream = this._session.getUpstream();
+        const downstream = this._session.getDownstream();
+        if (!upstream || !downstream || !upstream.target || !downstream.target) {
+            this._clearSourcePanes();
+            return;
+        }
+        await this._upstreamSourcePane.render(upstream.target, null, null);
+        await this._downstreamSourcePane.render(downstream.target, null, null);
+    }
+
+    _clearSourcePanes() {
+        for (const pane of [this._upstreamSourcePane, this._downstreamSourcePane]) {
+            if (pane && pane.graph) {
+                pane.graph.unregister();
+            }
+            if (pane) {
+                pane.render(null, null, null);
+            }
+        }
     }
 
     _element(id) {
@@ -281,6 +365,28 @@ export class MergeWorkspaceController {
         this._updateValidationSummary();
         this._refreshPreview();
         this._updateActionButtons();
+        this._updateSourceGraphToggle();
+        if (this._session.showSourceGraphs) {
+            this._renderSourcePanes().catch(async (error) => {
+                const message = error && error.message ? error.message : String(error);
+                await this._view._host.message(message, true, 'OK');
+            });
+        }
+    }
+
+    _updateSourceGraphToggle() {
+        const toggle = this._element('merge-show-source-graphs');
+        if (!toggle || !this._session) {
+            return;
+        }
+        const enabled = this._session.bothSlotsLoaded() && Boolean(this._session.getUpstreamSlot());
+        toggle.disabled = !enabled;
+        if (!enabled) {
+            toggle.checked = false;
+            this._session.showSourceGraphs = false;
+            this._updateSourceGraphLayout(false);
+            this._clearSourcePanes();
+        }
     }
 
     _updateSlotLabels() {
@@ -384,6 +490,7 @@ export class MergeWorkspaceController {
                 this._refreshPreview();
                 this._updateActionButtons();
                 this._refreshMappingRowStatus(row, input.name, select.value);
+                this._updateMappingRowHighlight(row, input.name);
             });
             selectCell.appendChild(select);
             row.appendChild(selectCell);
@@ -398,7 +505,88 @@ export class MergeWorkspaceController {
 
             body.appendChild(row);
             this._refreshMappingRowStatus(row, input.name, selected);
+            this._updateMappingRowHighlight(row, input.name);
         }
+    }
+
+    _collectMergeWarnings() {
+        const warnings = [];
+        const seen = new Set();
+        const add = (issue) => {
+            if (!issue) {
+                return;
+            }
+            const key = `${issue.code || ''}:${issue.message || ''}:${issue.downstream || ''}:${issue.upstream || ''}`;
+            if (seen.has(key)) {
+                return;
+            }
+            seen.add(key);
+            warnings.push(issue);
+        };
+        for (const issue of this._session.roleDetection.warnings || []) {
+            add(issue);
+        }
+        for (const issue of this._session.validation.warnings || []) {
+            add(issue);
+        }
+        return warnings;
+    }
+
+    _issuesForDownstreamInput(downstreamName, issues) {
+        return (issues || []).filter((issue) => issue.downstream === downstreamName);
+    }
+
+    _updateMappingRowHighlight(row, downstreamName) {
+        if (!row || !this._session) {
+            return;
+        }
+        const errors = this._issuesForDownstreamInput(downstreamName, this._session.validation.errors);
+        const warnings = this._issuesForDownstreamInput(downstreamName, this._session.validation.warnings);
+        row.classList.toggle('merge-mapping-row-error', errors.length > 0);
+        row.classList.toggle('merge-mapping-row-warning', errors.length === 0 && warnings.length > 0);
+    }
+
+    _updateValidationSummary() {
+        const summary = this._element('merge-validation-summary');
+        if (!summary || !this._session) {
+            return;
+        }
+        summary.classList.remove('merge-summary-ready', 'merge-summary-warning', 'merge-summary-error', 'merge-summary-pending');
+        const lines = [this._session.getRoleSummary()];
+        const validation = this._session.validation;
+        const warnings = this._collectMergeWarnings();
+
+        if (this._session.roleDetection.status === 'failed') {
+            summary.classList.add('merge-summary-error');
+            const errors = this._session.roleDetection.errors || [];
+            if (errors.length > 0) {
+                lines.push('');
+                lines.push(formatMergeErrors(errors, { inline: true }));
+            }
+        } else if (!this._session.bothSlotsLoaded() || this._session.roleDetection.status === 'pending') {
+            summary.classList.add('merge-summary-pending');
+        } else if (validation.ok) {
+            lines.push('');
+            lines.push('✓ Ready to merge');
+            if (warnings.length > 0) {
+                summary.classList.add('merge-summary-warning');
+                lines.push('');
+                lines.push(formatMergeWarnings(warnings, { inline: true }));
+            } else {
+                summary.classList.add('merge-summary-ready');
+            }
+        } else if (validation.errors.length > 0) {
+            summary.classList.add('merge-summary-error');
+            lines.push('');
+            lines.push(formatMergeErrors(validation.errors, { inline: true }));
+            if (warnings.length > 0) {
+                lines.push('');
+                lines.push(formatMergeWarnings(warnings, { inline: true }));
+            }
+        } else {
+            summary.classList.add('merge-summary-pending');
+        }
+        summary.textContent = lines.join('\n');
     }
 
     _refreshMappingRowStatus(row, downstreamName, upstreamName) {
@@ -411,8 +599,14 @@ export class MergeWorkspaceController {
         }
         if (!upstreamName) {
             upstreamTypeCell.textContent = '—';
-            statusCell.textContent = '—';
-            statusCell.className = 'merge-mapping-status';
+            const unmapped = this._issuesForDownstreamInput(downstreamName, this._session.validation.errors).length > 0;
+            if (unmapped) {
+                statusCell.textContent = '✗';
+                statusCell.className = 'merge-mapping-status merge-status-error';
+            } else {
+                statusCell.textContent = '—';
+                statusCell.className = 'merge-mapping-status';
+            }
             return;
         }
         const upstreamType = resolveValueType(upstream.proto.graph, upstreamName, { preferProducer: true });
@@ -426,29 +620,6 @@ export class MergeWorkspaceController {
             statusCell.textContent = '✗';
             statusCell.className = 'merge-mapping-status merge-status-error';
         }
-    }
-
-    _updateValidationSummary() {
-        const summary = this._element('merge-validation-summary');
-        if (!summary || !this._session) {
-            return;
-        }
-        const lines = [this._session.getRoleSummary()];
-        const validation = this._session.validation;
-        if (this._session.roleDetection.status === 'failed') {
-            const errors = this._session.roleDetection.errors;
-            if (errors.length > 0) {
-                lines.push(formatMergeErrors(errors));
-            }
-        } else if (validation.ok) {
-            lines.push('✓ Ready to merge');
-            if (validation.warnings.length > 0) {
-                lines.push(`${validation.warnings.length} warning(s)`);
-            }
-        } else if (this._session.bothSlotsLoaded() && validation.errors.length > 0) {
-            lines.push(formatMergeErrors(validation.errors));
-        }
-        summary.textContent = lines.join('\n');
     }
 
     _updateActionButtons() {
@@ -540,7 +711,7 @@ export class MergeWorkspaceController {
             return;
         }
         const bytes = onnx.ModelProto.encodeBytes(result.mergedProto);
-        const context = new BytesFileContext('merged.onnx', bytes);
+        const context = new BytesFileContext(this._view._host, 'merged.onnx', bytes);
         const filename = buildMergeFilename(upstream.filename, downstream.filename);
         this.teardown();
         await this._view.open(context);
