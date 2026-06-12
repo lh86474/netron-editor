@@ -403,40 +403,96 @@ export const buildAutomaticMapping = (upstreamProto, downstreamProto, options = 
     return { ok: errors.length === 0, mapping, errors, warnings };
 };
 
-const scoreAutomaticMapping = (result) => {
+const scoreMappingCandidate = (result, upstreamGraph) => {
     if (!result.ok) {
-        return -1;
+        return null;
     }
     let score = 0;
+    let exactNameMatches = 0;
     for (const entry of result.mapping) {
-        score += entry.upstream === entry.downstream ? 2 : 1;
+        if (entry.upstream === entry.downstream) {
+            exactNameMatches++;
+            score += 2;
+        } else {
+            score += 1;
+        }
     }
     score -= result.warnings.length;
-    return score;
+    const outputCount = extractGraphOutputs(upstreamGraph).length;
+    const inputCount = extractGraphInputs(upstreamGraph).length;
+    return {
+        score,
+        exactNameMatches,
+        warningCount: result.warnings.length,
+        ioFit: outputCount - inputCount,
+        mappingCount: result.mapping.length
+    };
 };
 
-export const buildAutomaticMappingBidirectional = (protoA, protoB, options = {}) => {
+const compareMappingCandidates = (left, right) => {
+    if (right.metrics.score !== left.metrics.score) {
+        return right.metrics.score - left.metrics.score;
+    }
+    if (right.metrics.exactNameMatches !== left.metrics.exactNameMatches) {
+        return right.metrics.exactNameMatches - left.metrics.exactNameMatches;
+    }
+    if (left.metrics.warningCount !== right.metrics.warningCount) {
+        return left.metrics.warningCount - right.metrics.warningCount;
+    }
+    if (right.metrics.ioFit !== left.metrics.ioFit) {
+        return right.metrics.ioFit - left.metrics.ioFit;
+    }
+    return 0;
+};
+
+const makeMappingCandidate = (upstreamProto, downstreamProto, mappingResult) => {
+    return {
+        upstreamProto,
+        downstreamProto,
+        mapping: mappingResult.mapping,
+        warnings: mappingResult.warnings,
+        metrics: scoreMappingCandidate(mappingResult, upstreamProto.graph)
+    };
+};
+
+const compareMappingCandidatesWithSlot = (left, right) => {
+    const compared = compareMappingCandidates(left, right);
+    if (compared !== 0) {
+        return compared;
+    }
+    if (left.upstreamSlot !== right.upstreamSlot) {
+        return left.upstreamSlot === 'A' ? -1 : 1;
+    }
+    return 0;
+};
+
+const computeRoleConfidence = (chosen, runnerUp, status) => {
+    if (status === 'unidirectional' || !runnerUp) {
+        return 'high';
+    }
+    const scoreGap = chosen.metrics.score - runnerUp.metrics.score;
+    const exactGap = chosen.metrics.exactNameMatches - runnerUp.metrics.exactNameMatches;
+    if (scoreGap >= 2 || exactGap >= 1) {
+        return 'high';
+    }
+    return 'low';
+};
+
+const buildAutomaticMappingCandidates = (protoA, protoB, options = {}) => {
     const forward = buildAutomaticMapping(protoA, protoB, options);
     const reverse = buildAutomaticMapping(protoB, protoA, options);
     const candidates = [];
     if (forward.ok) {
-        candidates.push({
-            upstreamProto: protoA,
-            downstreamProto: protoB,
-            mapping: forward.mapping,
-            warnings: forward.warnings,
-            score: scoreAutomaticMapping(forward)
-        });
+        candidates.push(makeMappingCandidate(protoA, protoB, forward));
     }
     if (reverse.ok) {
-        candidates.push({
-            upstreamProto: protoB,
-            downstreamProto: protoA,
-            mapping: reverse.mapping,
-            warnings: reverse.warnings,
-            score: scoreAutomaticMapping(reverse)
-        });
+        candidates.push(makeMappingCandidate(protoB, protoA, reverse));
     }
+    return { forward, reverse, candidates };
+};
+
+export const buildAutomaticMappingBidirectional = (protoA, protoB, options = {}) => {
+    const { forward, reverse, candidates } = buildAutomaticMappingCandidates(protoA, protoB, options);
     if (candidates.length === 1) {
         const chosen = candidates[0];
         return {
@@ -449,11 +505,9 @@ export const buildAutomaticMappingBidirectional = (protoA, protoB, options = {})
         };
     }
     if (candidates.length > 1) {
-        candidates.sort((left, right) => right.score - left.score);
-        const bestScore = candidates[0].score;
-        const tied = candidates.filter((candidate) => candidate.score === bestScore);
-        if (tied.length === 1) {
-            const chosen = tied[0];
+        candidates.sort(compareMappingCandidates);
+        if (compareMappingCandidates(candidates[0], candidates[1]) !== 0) {
+            const chosen = candidates[0];
             return {
                 ok: true,
                 mapping: chosen.mapping,
@@ -475,6 +529,63 @@ export const buildAutomaticMappingBidirectional = (protoA, protoB, options = {})
         mapping: [],
         errors: [...forward.errors, ...reverse.errors],
         warnings: [...forward.warnings, ...reverse.warnings]
+    };
+};
+
+const slotForUpstreamProto = (protoA, protoB, upstreamProto) => {
+    if (upstreamProto === protoA) {
+        return 'A';
+    }
+    if (upstreamProto === protoB) {
+        return 'B';
+    }
+    return null;
+};
+
+export const detectMergeRoles = (protoA, protoB, options = {}) => {
+    const emptyResult = {
+        ok: false,
+        status: 'failed',
+        upstreamProto: null,
+        downstreamProto: null,
+        upstreamSlot: null,
+        mapping: [],
+        errors: [],
+        warnings: [],
+        confidence: null
+    };
+    if (!protoA || !getGraph(protoA) || !protoB || !getGraph(protoB)) {
+        return {
+            ...emptyResult,
+            errors: [makeIssue('INVALID_MODEL', 'Both models must be loaded with a graph before roles can be detected.')]
+        };
+    }
+    const { forward, reverse, candidates } = buildAutomaticMappingCandidates(protoA, protoB, options);
+    if (candidates.length === 0) {
+        return {
+            ...emptyResult,
+            errors: [...forward.errors, ...reverse.errors],
+            warnings: [...forward.warnings, ...reverse.warnings]
+        };
+    }
+    const ranked = candidates.map((candidate) => ({
+        ...candidate,
+        upstreamSlot: slotForUpstreamProto(protoA, protoB, candidate.upstreamProto)
+    }));
+    ranked.sort(compareMappingCandidatesWithSlot);
+    const chosen = ranked[0];
+    const runnerUp = ranked.length > 1 ? ranked[1] : null;
+    const status = ranked.length === 1 ? 'unidirectional' : 'resolved';
+    return {
+        ok: true,
+        status,
+        upstreamProto: chosen.upstreamProto,
+        downstreamProto: chosen.downstreamProto,
+        upstreamSlot: chosen.upstreamSlot,
+        mapping: chosen.mapping,
+        errors: [],
+        warnings: chosen.warnings,
+        confidence: computeRoleConfidence(chosen, runnerUp, status)
     };
 };
 

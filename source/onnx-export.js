@@ -786,3 +786,9 @@ export const exportModifiedOnnx = (model, editSession) => {
     validateModel(cloned);
     return onnx.ModelProto.encodeBytes(cloned);
 };
+
+export const cloneModelProtoForMerge = cloneModelProto;
+export const normalizeGraphReferencesForMerge = normalizeGraphReferences;
+export const renameInGraphForMerge = renameInGraph;
+export const collectGraphNamesForMerge = collectGraphNames;
+export const validateGraphForMerge = validateGraph;
