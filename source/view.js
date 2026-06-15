@@ -1,6 +1,11 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError } from './model-editor.js';
+import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
+import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
+import { GraphPane } from './graph-pane.js';
+import { MergeWorkspaceController } from './merge-workspace.js';
 
 const view = {};
 const markdown = {};
@@ -17,19 +22,33 @@ view.View = class {
             attributes: false,
             names: false,
             direction: 'vertical',
-            mousewheel: 'scroll'
+            mousewheel: 'scroll',
+            syncScroll: false
         };
         this._options = { ...this._defaultOptions };
+        this._syncApplying = false;
         this._events = {};
         this._events.selectionchange = () => this._selectionChangeHandler();
         this._model = null;
+        this._editSession = null;
+        this._editSessionError = null;
+        this._deltaUnsubscribe = null;
+        // new leftPane and rightPane fields for the two graph panes
+        this._leftPane = null;
+        this._rightPane = null;
+        this._activePane = 'modified';
         this._path = [];
         this._selection = [];
+        // arrays to support multiple begin and end marker
+        this._rangeBegins = [];
+        this._rangeEnds = [];
+        this._exportBasenameOverride = null;
         this._sidebar = new view.Sidebar(this._host);
         this._find = null;
         this._modelFactoryService = new view.ModelFactoryService(this._host);
         this._modelFactoryService.import();
         this._worker = this._host.environment('serial') ? null : new view.Worker(this._host);
+        this._mergeWorkspace = new MergeWorkspaceController(this);
     }
 
     async start() {
@@ -37,6 +56,7 @@ view.View = class {
             const zip = await import('./zip.js');
             await zip.Archive.import();
             await this._host.view(this);
+            this._registerDebugEditorState();
             const options = this._host.get('options') || {};
             for (const [name, value] of Object.entries(options)) {
                 this._options[name] = value;
@@ -53,6 +73,12 @@ view.View = class {
             this._element('zoom-out-button').addEventListener('click', () => {
                 this.zoomOut();
             });
+            // sync scroll button
+            this._element('sync-scroll-button').addEventListener('click', () => {
+                this.toggle('syncScroll');
+            });
+            this._updateSyncScrollButton();
+            this._mergeWorkspace.bindEvents();
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget();
             });
@@ -116,6 +142,15 @@ view.View = class {
                         enabled: () => this.activeTarget
                     });
                     file.add({
+                        label: 'Export Modified Model as &ONNX...',
+                        execute: async () => await this.exportOnnx(),
+                        enabled: () => this._canExportOnnx()
+                    });
+                    file.add({
+                        label: 'Merge ONNX &Graph...',
+                        execute: async () => await this.startMergeWorkspace()
+                    });
+                    file.add({
                         label: platform === 'darwin' ? '&Close Window' : '&Close',
                         accelerator: 'CmdOrCtrl+W',
                         execute: async () => await this._host.execute('close'),
@@ -137,6 +172,15 @@ view.View = class {
                         accelerator: 'CmdOrCtrl+Alt+E',
                         execute: async () => await this.export(`${this._host.document.title}.svg`),
                         enabled: () => this.activeTarget
+                    });
+                    file.add({
+                        label: 'Export Modified Model as &ONNX...',
+                        execute: async () => await this.exportOnnx(),
+                        enabled: () => this._canExportOnnx()
+                    });
+                    file.add({
+                        label: 'Merge ONNX &Graph...',
+                        execute: async () => await this.startMergeWorkspace()
                     });
                 }
                 const edit = this._menu.group('&Edit');
@@ -234,6 +278,7 @@ view.View = class {
             this._select = new view.TargetSelector(this, navigator);
             this._select.on('change', (sender, target) => this._updateActiveTarget([target]));
             await this._host.start();
+            this._registerDebugEditorState();
         } catch (error) {
             this.error(error, null, null);
         }
@@ -262,6 +307,27 @@ view.View = class {
         if (this._menu) {
             this._menu.close();
         }
+        this._applyScreen(page);
+    }
+
+    _canMergeOnnx() {
+        return this._mergeWorkspace.canMergeOnnx(this._model);
+    }
+
+    async startMergeWorkspace() {
+        const preset = this._canMergeOnnx() ? {
+            model: this._model,
+            target: this.activeTarget,
+            filename: `${this._suggestedExportBasename()}.onnx`
+        } : null;
+        await this._startMergeWorkspace({ presetModel: preset });
+    }
+
+    async _startMergeWorkspace(options = {}) {
+        await this._mergeWorkspace.start(options);
+    }
+
+    _applyScreen(page) {
         this._host.document.body.classList.remove(...Array.from(this._host.document.body.classList).filter((_) => _ !== 'active'));
         this._host.document.body.classList.add(...page.split(' '));
         if (this._target && page === 'default') {
@@ -276,6 +342,20 @@ view.View = class {
             }
         }
         this._page = page;
+    }
+
+    _ensureDefaultScreen() {
+        if (!this._model && !this.activeTarget) {
+            return;
+        }
+        this._host.document.body.classList.remove('welcome', 'spinner', 'notification', 'alert', 'about');
+        if (!this._host.document.body.classList.contains('default')) {
+            this._host.document.body.classList.add('default');
+        }
+        if (this._target) {
+            this._target.register();
+        }
+        this._page = 'default';
     }
 
     progress(percent) {
@@ -314,6 +394,38 @@ view.View = class {
 
     set model(value) {
         this._model = value;
+    }
+
+    get editSession() {
+        return this._editSession;
+    }
+
+    debugEditorState() {
+        const session = this._editSession;
+        const graph = session ? session.modified.getGraph() : null;
+        return {
+            enabled: Boolean(session),
+            error: this._editSessionError ? this._editSessionError.message : null,
+            modelFormat: this._model ? this._model.format : null,
+            graphCount: session ? session.modified.model.modules.length : 0,
+            nodeCount: graph && Array.isArray(graph.nodes) ? graph.nodes.length : 0,
+            activePane: this._activePane,
+            panes: {
+                original: this._leftPane ? this._leftPane.getDebugState() : { nodeCount: 0, edgeCount: 0, zoom: 1, rendered: false },
+                modified: this._rightPane ? this._rightPane.getDebugState() : { nodeCount: 0, edgeCount: 0, zoom: 1, rendered: false }
+            },
+            delta: session ? session.delta.toJSON() : [],
+            aggregateStates: session ? session.delta.toAggregateJSON() : {},
+            editedNodeCount: session ? Object.values(session.delta.toAggregateJSON()).filter((state) => state === 'modified').length : 0
+        };
+    }
+
+    _registerDebugEditorState() {
+        const target = this._host && this._host.window ? this._host.window : globalThis;
+        const fn = () => this.debugEditorState();
+        target.debugEditorState = fn;
+        target._debugEditorState = fn;
+        target.__debugEditorState = fn;
     }
 
     get options() {
@@ -358,6 +470,16 @@ view.View = class {
                 break;
             case 'mousewheel':
                 this._options.mousewheel = this._options.mousewheel === 'scroll' ? 'zoom' : 'scroll';
+                break;
+            case 'syncScroll':
+                this._options.syncScroll = !this._options.syncScroll;
+                this._updateSyncScrollButton();
+                if (this._options.syncScroll) {
+                    const graph = this._activePaneGraph();
+                    if (graph) {
+                        this._propagateSync(graph);
+                    }
+                }
                 break;
             default:
                 throw new view.Error(`Unsupported toggle '${name}'.`);
@@ -420,18 +542,592 @@ view.View = class {
     }
 
     zoomIn() {
-        this._target.zoom *= 1.1;
+        const graph = this._activePaneGraph();
+        if (graph) {
+            graph.zoom *= 1.1;
+        }
     }
 
     zoomOut() {
-        this._target.zoom *= 0.9;
+        const graph = this._activePaneGraph();
+        if (graph) {
+            graph.zoom *= 0.9;
+        }
     }
 
     resetZoom() {
-        this._target.zoom = 1;
+        const graph = this._activePaneGraph();
+        if (graph) {
+            graph.zoom = 1;
+        }
     }
 
-    async refresh(anchor) {
+    _activePaneGraph() {
+        if (this._activePane === 'original' && this._leftPane && this._leftPane.graph) {
+            return this._leftPane.graph;
+        }
+        if (this._rightPane && this._rightPane.graph) {
+            return this._rightPane.graph;
+        }
+        return this._target;
+    }
+
+    _updateSyncScrollButton() {
+        const button = this._element('sync-scroll-button');
+        if (!button) {
+            return;
+        }
+        const active = Boolean(this._options.syncScroll);
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+
+    _syncEnabled() {
+        if (!this._options.syncScroll || this._syncApplying) {
+            return false;
+        }
+        if (!this._leftPane || !this._rightPane) {
+            return false;
+        }
+        return Boolean(this._leftPane.graph && this._rightPane.graph);
+    }
+
+    // actually sync the scroll here and zoom
+    _propagateSync(sourceGraph) {
+        if (!this._options.syncScroll || this._syncApplying) {
+            return;
+        }
+        let partnerGraph = null;
+        if (this._leftPane && this._leftPane.graph === sourceGraph) {
+            partnerGraph = this._rightPane ? this._rightPane.graph : null;
+        } else if (this._rightPane && this._rightPane.graph === sourceGraph) {
+            partnerGraph = this._leftPane ? this._leftPane.graph : null;
+        }
+        if (!partnerGraph || partnerGraph === sourceGraph) {
+            return;
+        }
+        const sourceContainer = sourceGraph._containerElement();
+        const partnerContainer = partnerGraph._containerElement();
+        if (!sourceContainer || !partnerContainer) {
+            return;
+        }
+        const srcLeft = sourceContainer.scrollLeft;
+        const srcTop = sourceContainer.scrollTop;
+        const srcZoom = sourceGraph.zoom;
+        this._syncApplying = true;
+        try {
+            if (partnerGraph.zoom !== srcZoom) {
+                partnerGraph.zoom = srcZoom;
+            }
+            if (Math.floor(partnerContainer.scrollLeft) !== Math.floor(srcLeft)) {
+                partnerContainer.scrollLeft = srcLeft;
+            }
+            if (Math.floor(partnerContainer.scrollTop) !== Math.floor(srcTop)) {
+                partnerContainer.scrollTop = srcTop;
+            }
+        } finally {
+            this._syncApplying = false;
+        }
+    }
+
+    _initGraphPanes() {
+        const leftContainer = this._element('target-original');
+        const rightContainer = this._element('target-modified');
+        if (!leftContainer || !rightContainer) {
+            this._leftPane = null;
+            this._rightPane = null;
+            return;
+        }
+        const deltaTracker = this._editSession ? this._editSession.delta : null;
+        this._leftPane = new GraphPane(this, leftContainer, { id: 'original', readOnly: true });
+        this._rightPane = new GraphPane(this, rightContainer, { id: 'modified', readOnly: false, deltaTracker });
+    }
+
+    _bindEditorSession() {
+        if (this._deltaUnsubscribe) {
+            this._deltaUnsubscribe();
+            this._deltaUnsubscribe = null;
+        }
+        if (this._editSession && this._rightPane) {
+            this._rightPane.deltaTracker = this._editSession.delta;
+            this._deltaUnsubscribe = this._editSession.delta.subscribe((changes) => {
+                this._handleEditorDelta(changes);
+            });
+        }
+    }
+
+    _resolveNodeEntity(node) {
+        if (!this._editSession || !node) {
+            return null;
+        }
+        return locateNodeEntity(this._editSession.modified.model, node);
+    }
+
+    _resolveValueEntity(value) {
+        if (!this._editSession || !value) {
+            return null;
+        }
+        return locateValueEntity(this._editSession.modified.model, value);
+    }
+
+    _bindNodeSidebarEvents(sidebar, node) {
+        sidebar.on('show-definition', async (/* sender, e */) => {
+            await this.showDefinition(node.type);
+        });
+        sidebar.on('focus', (sender, value) => {
+            this._target.focus([value]);
+        });
+        sidebar.on('blur', (sender, value) => {
+            this._target.blur([value]);
+        });
+        sidebar.on('select', (sender, value) => {
+            this._target.scrollTo(this._target.select([value], 'sidebar'));
+        });
+        sidebar.on('activate', (sender, value) => {
+            this._target.scrollTo(this._target.activate(value, 'sidebar'));
+        });
+    }
+
+    _refreshOpenNodeSidebar() {
+        if (!this._editSession || this._sidebar.identifier !== 'node') {
+            return;
+        }
+        const entry = this._sidebar.entry;
+        const current = entry ? entry.content : null;
+        if (!current || !current._node) {
+            return;
+        }
+        const sidebar = new view.EditableNodeSidebar(this, current._node, this._editSession);
+        this._bindNodeSidebarEvents(sidebar, current._node);
+        this._sidebar.open(sidebar, entry.title || 'Node Properties');
+    }
+
+    _refreshOpenConnectionSidebar() {
+        if (!this._editSession || this._sidebar.identifier !== 'connection') {
+            return;
+        }
+        const entry = this._sidebar.entry;
+        const current = entry ? entry.content : null;
+        if (!current || !current._value) {
+            return;
+        }
+        const sidebar = new view.EditableConnectionSidebar(this, current._value, current._from, current._to, this._editSession);
+        this._bindConnectionSidebarEvents(sidebar);
+        this._sidebar.open(sidebar, entry.title || 'Connection Properties');
+    }
+
+    _refreshOpenSidebars() {
+        this._refreshOpenNodeSidebar();
+        this._refreshOpenConnectionSidebar();
+    }
+
+    _resolveNodeFromChange(change) {
+        if (!change || !this._editSession) {
+            return null;
+        }
+        const match = /^graph:(\d+)\/node:(\d+)/.exec(change.entityId);
+        if (!match) {
+            return null;
+        }
+        const graph = this._editSession.modified.getGraph(Number(match[1]));
+        return graph.nodes[Number(match[2])] || null;
+    }
+
+    _editorChangeNeedsGraphRefresh(change) {
+        if (!change) {
+            return false;
+        }
+        if (change.entityType === 'node' && change.property === 'name') {
+            return true;
+        }
+        if (change.entityType === 'node' && change.changeType === 'add') {
+            return true;
+        }
+        if (change.entityType === 'attribute') {
+            return false;
+        }
+        if (change.entityType === 'value' && this.options.names) {
+            return true;
+        }
+        return false;
+    }
+
+    async _handleEditorDelta(changes) {
+        if (!this._editSession) {
+            return;
+        }
+        const last = changes.length > 0 ? changes[changes.length - 1] : null;
+        try {
+            if (last && last.entityType === 'attribute' && this.options.attributes) {
+                const modelNode = this._resolveNodeFromChange(last);
+                if (modelNode && this._target) {
+                    const heightChanged = await this._target.refreshNodeArgumentList(modelNode);
+                    if (heightChanged) {
+                        await this.refresh(null, { skipShow: true, skipAnimation: true });
+                    }
+                }
+            } else if (this._editorChangeNeedsGraphRefresh(last)) {
+                await this.refresh(null, { skipShow: true, skipAnimation: true });
+            }
+            this._refreshOpenSidebars();
+            this._ensureDefaultScreen();
+            if (this._target && this._target.refreshDeltaStyles) {
+                this._target.refreshDeltaStyles();
+            }
+        } catch (error) {
+            this.error(error, 'Error applying edit.', null);
+        }
+    }
+
+    async applyEditorPatch(patch) {
+        if (!this._editSession) {
+            return null;
+        }
+        const change = this._editSession.applyPatch(patch);
+        // eslint-disable-next-line no-console
+        console.log('[editor] Patch applied:', stringifyEditorJSON(patch));
+        // eslint-disable-next-line no-console
+        console.log('[editor] Delta updated:', stringifyEditorJSON(this._editSession.delta.toJSON()));
+        return change;
+    }
+
+    _canInsertNode() {
+        return this._editSession && this._model && canExportOnnx(this._model);
+    }
+
+    _closeGraphOverlays() {
+        if (this._graphContextMenu) {
+            this._graphContextMenu.close();
+            this._graphContextMenu = null;
+        }
+        if (this._operatorPicker) {
+            this._operatorPicker.close();
+            this._operatorPicker = null;
+        }
+    }
+
+    _showNodeContextMenu(nodeView, event) {
+        if (!this._canInsertNode() || this._target && this._target.readOnly) {
+            return;
+        }
+        this._closeGraphOverlays();
+        const x = event.clientX;
+        const y = event.clientY;
+        const entity = this._resolveNodeEntity(nodeView.value);
+        const isBegin = this._isRangeBegin(entity);
+        const isEnd = this._isRangeEnd(entity);
+        const hasMarkers = this._rangeBegins.length > 0 || this._rangeEnds.length > 0;
+        const canExtract = this._rangeBegins.length > 0 && this._rangeEnds.length > 0;
+        const extractLabel = canExtract
+            ? `Extract Subgraph (${this._rangeBegins.length} start${this._rangeBegins.length === 1 ? '' : 's'}, ${this._rangeEnds.length} end${this._rangeEnds.length === 1 ? '' : 's'})`
+            : 'Extract Subgraph';
+        const items = [
+            {
+                label: 'Insert Above\u2026',
+                action: () => this._openOperatorPicker(nodeView, 'above', x, y)
+            },
+            {
+                label: 'Insert Below\u2026',
+                action: () => this._openOperatorPicker(nodeView, 'below', x, y)
+            },
+            { separator: true },
+            {
+                label: isBegin ? 'Unmark Beginning' : 'Mark as Beginning',
+                action: () => this._markRangeBegin(nodeView)
+            },
+            {
+                label: isEnd ? 'Unmark End' : 'Mark as End',
+                action: () => this._markRangeEnd(nodeView)
+            },
+            {
+                label: 'Clear Range Markers',
+                action: () => this._clearRangeMarkers(),
+                enabled: hasMarkers
+            },
+            {
+                label: extractLabel,
+                action: () => this._extractAndReplaceGraph(),
+                enabled: canExtract
+            }
+        ];
+        this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, items);
+        this._graphContextMenu.open();
+    } 
+
+    // mark begin node for graph extraction
+    _markRangeBegin(nodeView) {
+        const entity = this._resolveNodeEntity(nodeView.value);
+        if (!entity) {
+            return;
+        }
+        if (this._isRangeBegin(entity)) {
+            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== entity.nodeId);
+        } else {
+            this._clearRangeMarkersOnOtherGraph(entity.graphIndex);
+            this._rangeBegins.push(entity);
+            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== entity.nodeId);
+        }
+        this._refreshRangeMarkerStyles();
+    }
+
+    // mark end node for graph extraction
+    _markRangeEnd(nodeView) {
+        const entity = this._resolveNodeEntity(nodeView.value);
+        if (!entity) {
+            return;
+        }
+        if (this._isRangeEnd(entity)) {
+            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== entity.nodeId);
+        } else {
+            this._clearRangeMarkersOnOtherGraph(entity.graphIndex);
+            this._rangeEnds.push(entity);
+            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== entity.nodeId);
+        }
+        this._refreshRangeMarkerStyles();
+    }
+
+    _clearRangeMarkers() {
+        this._rangeBegins = [];
+        this._rangeEnds = [];
+        this._refreshRangeMarkerStyles();
+    }
+
+    _refreshRangeMarkerStyles() {
+        const graph = this._activePaneGraph();
+        if (graph && graph.refreshRangeMarkerStyles) {
+            graph.refreshRangeMarkerStyles();
+        }
+    }
+
+    _isRangeBegin(entity) {
+        return entity && this._rangeBegins.some((entry) => entry.nodeId === entity.nodeId);
+    }
+
+    _isRangeEnd(entity) {
+        return entity && this._rangeEnds.some((entry) => entry.nodeId === entity.nodeId);
+    }
+
+    _clearRangeMarkersOnOtherGraph(graphIndex) {
+        this._rangeBegins = this._rangeBegins.filter((entry) => entry.graphIndex === graphIndex);
+        this._rangeEnds = this._rangeEnds.filter((entry) => entry.graphIndex === graphIndex);
+    }
+
+    _resolveMarkedNodes(entities, graph) {
+        const nodes = [];
+        for (const entity of entities) {
+            const node = graph.nodes[entity.nodeIndex];
+            if (!node) {
+                throw new SubgraphExtractError('Marked nodes are no longer available.');
+            }
+            nodes.push(node);
+        }
+        return nodes;
+    }
+
+    // extract and replace graph
+    async _extractAndReplaceGraph() {
+        if (!this._editSession || this._rangeBegins.length === 0 || this._rangeEnds.length === 0) {
+            return;
+        }
+        const graphIndex = this._rangeBegins[0].graphIndex;
+        if (this._rangeBegins.some((entry) => entry.graphIndex !== graphIndex) ||
+            this._rangeEnds.some((entry) => entry.graphIndex !== graphIndex)) {
+            await this._host.message('All marked nodes must be in the same graph.', true, 'OK');
+            return;
+        }
+        try {
+            const graph = this._editSession.modified.getGraph(graphIndex);
+            const beginNodes = this._resolveMarkedNodes(this._rangeBegins, graph);
+            const endNodes = this._resolveMarkedNodes(this._rangeEnds, graph);
+            const extracted = extractSubgraph(graph, beginNodes, endNodes);
+            this._editSession.replaceGraph(graphIndex, extracted);
+            if (this._model && this._model.proto) {
+                this._model.proto.graph = rebuildGraphProtoFromModified(extracted, this._model.proto);
+            }
+            const exportBase = stripExportExtension(this._host.document.title || 'model');
+            this._exportBasenameOverride = buildSubgraphExportBasename(
+                exportBase,
+                beginNodes.map((node) => node.name),
+                endNodes.map((node) => node.name)
+            );
+            this._host.document.title = `${this._exportBasenameOverride}.onnx`;
+            this._rangeBegins = [];
+            this._rangeEnds = [];
+            this._sidebar.close();
+            this._bindEditorSession();
+            await this._refreshModifiedPane();
+        } catch (error) {
+            const message = error instanceof SubgraphExtractError ? error.message : (error && error.message ? error.message : error.toString());
+            await this._host.message(message, true, 'OK');
+        }
+    }
+
+    _openOperatorPicker(nodeView, position, x, y) {
+        this._closeGraphOverlays();
+        this._operatorPicker = new view.OperatorPicker(this, nodeView, position, x, y);
+        this._operatorPicker.open();
+    }
+
+    async insertNodeAt(nodeView, position, opSchema) {
+        if (!this._canInsertNode()) {
+            return;
+        }
+        try {
+            const entity = this._resolveNodeEntity(nodeView.value);
+            if (!entity) {
+                throw new Error('Node entity not found.');
+            }
+            const graph = this._editSession.modified.getGraph(entity.graphIndex);
+            const uniqueName = genUniqueNodeName(`Inserted${opSchema.name}`, graph);
+            const nodeSpec = buildNodeFromMetadata(opSchema, uniqueName, graph);
+            await this.applyEditorPatch({
+                parentId: entity.nodeId,
+                entityType: 'node',
+                changeType: 'add',
+                property: 'insert',
+                position,
+                newValue: nodeSpec
+            });
+        } catch (error) {
+            this.error(error, 'Error inserting node.', null);
+        }
+    }
+
+    // refresh pane after edits
+    async _refreshModifiedPane() {
+        if (!this._rightPane || !this.activeTarget) {
+            return;
+        }
+        const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
+        const previous = this._rightPane.graph;
+        const zoom = previous ? previous.zoom : 1;
+        const container = this._rightPane.container;
+        const scrollLeft = container ? container.scrollLeft : 0;
+        const scrollTop = container ? container.scrollTop : 0;
+        if (previous && this._target === previous) {
+            previous.unregister();
+        }
+        await this._rightPane.render(this._resolveModifiedTarget(this.activeTarget), this.activeSignature, state);
+        if (this._rightPane.graph) {
+            this._rightPane.graph.zoom = zoom;
+            this._rightPane.graph.register();
+            this.target = this._rightPane.graph;
+            if (container) {
+                container.scrollLeft = scrollLeft;
+                container.scrollTop = scrollTop;
+            }
+        }
+    }
+
+    _resolveGraphIndex(target) {
+        if (!target || !this._editSession) {
+            return 0;
+        }
+        const modifiedModules = this._editSession.modified.model.modules || [];
+        for (let i = 0; i < modifiedModules.length; i++) {
+            if (modifiedModules[i] === target) {
+                return i;
+            }
+        }
+        const originalModules = this._editSession.original.modules || [];
+        for (let i = 0; i < originalModules.length; i++) {
+            if (originalModules[i] === target) {
+                return i;
+            }
+        }
+        const name = target.name || target.identifier;
+        if (name) {
+            for (let i = 0; i < modifiedModules.length; i++) {
+                const graph = modifiedModules[i];
+                if (graph.name === name || graph.identifier === name) {
+                    return i;
+                }
+            }
+        }
+        return 0;
+    }
+
+    _graphOptions(pane, target) {
+        return {
+            paneId: pane.id,
+            container: pane.container,
+            readOnly: pane.readOnly,
+            deltaTracker: pane.deltaTracker,
+            graphIndex: this._resolveGraphIndex(target)
+        };
+    }
+
+    _resolveModifiedTarget(target) {
+        const session = this._editSession;
+        if (!session || !target) {
+            return target;
+        }
+        const modules = session.original.modules || [];
+        for (let i = 0; i < modules.length; i++) {
+            if (modules[i] === target) {
+                return session.modified.getGraph(i);
+            }
+        }
+        const name = target.name || target.identifier;
+        if (name) {
+            const modifiedModules = session.modified.model.modules || [];
+            for (const graph of modifiedModules) {
+                if (graph.name === name || graph.identifier === name) {
+                    return graph;
+                }
+            }
+        }
+        return session.modified.getGraph(0);
+    }
+
+    // render the graph in the pane
+    async _renderGraphInPane(pane, target, signature, state) {
+        const container = pane.container;
+        const label = container.querySelector('.graph-pane-label');
+        while (container.lastChild) {
+            container.removeChild(container.lastChild);
+        }
+        if (label) {
+            container.appendChild(label);
+        }
+        let status = '';
+        if (target) {
+            const document = this._host.document;
+            const graph = target;
+            const groups = graph.groups || false;
+            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
+            if (state && state.blocks) {
+                viewGraph.blocks = state.blocks;
+            }
+            viewGraph.add(graph, signature);
+            viewGraph.addTunnels();
+            viewGraph.build(document);
+            await viewGraph.measure();
+            status = await viewGraph.layout(this._worker);
+            if (status === '') {
+                viewGraph.update();
+                viewGraph.updateTunnels();
+                viewGraph.restore(state);
+                viewGraph.refreshDeltaStyles();
+                viewGraph.refreshRangeMarkerStyles();
+                pane._setGraph(viewGraph);
+                pane._logRender();
+            } else {
+                pane._setGraph(null);
+            }
+        } else {
+            pane._setGraph(null);
+        }
+        return status;
+    }
+
+    async refresh(anchor, options = {}) {
+        if (options.skipShow) {
+            this._ensureDefaultScreen();
+        }
+        // because right is modify pane
+        const pane = this._rightPane;
+        const origin = this._target ? this._target._origin : null;
         const snapshot = new Map();
         if (this._target) {
             for (const [key, entry] of this._target.nodes) {
@@ -444,28 +1140,26 @@ view.View = class {
                 }
             }
         }
-        const document = this._host.document;
-        const container = document.getElementById('target');
+        const container = pane ? pane.container : null;
         const zoom = this._target ? this._target._zoom : 1;
         const blocks = this._target ? this._target.blocks : null;
         if (blocks && blocks.size > 0 && this._path.length > 0) {
             this._path[0].state = Object.assign(this._path[0].state || {}, { blocks });
         }
-        const origin = document.getElementById('origin');
         let previous = null;
-        if (origin && this.activeTarget) {
+        if (origin && this.activeTarget && pane) {
             previous = origin.getScreenCTM();
             const oldChildren = Array.from(origin.children);
-            const graph = this.activeTarget;
+            const graph = this._resolveModifiedTarget(this.activeTarget);
             const groups = graph.groups || false;
-            const viewGraph = new view.Graph(this, groups);
+            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
             const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
             if (state && state.blocks) {
                 viewGraph.blocks = state.blocks;
             }
             viewGraph.add(graph, this.activeSignature);
             viewGraph.addTunnels();
-            viewGraph.build(document, origin);
+            viewGraph.build(this._host.document, origin);
             await viewGraph.measure();
             const status = await viewGraph.layout(this._worker);
             if (status === '') {
@@ -477,10 +1171,18 @@ view.View = class {
                 viewGraph.update();
                 viewGraph.updateTunnels();
                 origin.setAttribute('transform', 'translate(0,0) scale(1)');
-                document.getElementById('background').setAttribute('width', 0);
-                document.getElementById('background').setAttribute('height', 0);
+                if (viewGraph._background) {
+                    viewGraph._background.setAttribute('width', 0);
+                    viewGraph._background.setAttribute('height', 0);
+                }
                 viewGraph.restore(state);
+                viewGraph.refreshDeltaStyles();
+                viewGraph.refreshRangeMarkerStyles();
+                pane._setGraph(viewGraph);
                 this.target = viewGraph;
+                if (options.skipShow) {
+                    this._ensureDefaultScreen();
+                }
             } else {
                 for (const child of Array.from(origin.children)) {
                     if (!oldChildren.includes(child)) {
@@ -491,7 +1193,9 @@ view.View = class {
         } else {
             await this.render(this.activeTarget, this.activeSignature);
         }
-        this.show(null);
+        if (!options.skipShow) {
+            this.show(null);
+        }
         if (this._target) {
             this._target.zoom = zoom;
             if (container && anchor) {
@@ -679,7 +1383,9 @@ view.View = class {
                 };
                 this._host.window.requestAnimationFrame(tick);
             };
-            animateTransition(snapshot);
+            if (!options.skipAnimation) {
+                animateTransition(snapshot);
+            }
         }
     }
 
@@ -725,9 +1431,20 @@ view.View = class {
 
     async open(context) {
         this._sidebar.close();
+        this._exportBasenameOverride = null;
         await this._timeout(2);
         try {
             const model = await this._modelFactoryService.open(context);
+            try {
+                this._editSession = ModelEditor.createSession(model);
+                this._editSessionError = null;
+            } catch (error) {
+                this._editSession = null;
+                this._editSessionError = error;
+            }
+            this._initGraphPanes();
+            this._bindEditorSession();
+            this._registerDebugEditorState();
             const format = [];
             if (model.format) {
                 format.push(model.format);
@@ -912,47 +1629,87 @@ view.View = class {
     }
 
     async render(target, signature) {
-        this.target = null;
-        const element = this._element('target');
-        while (element.lastChild) {
-            element.removeChild(element.lastChild);
+        if (this._leftPane && this._leftPane.graph) {
+            this._leftPane.graph.unregister();
         }
+        if (this._target) {
+            this._target.off('selectionchange', this._events.selectionchange);
+            this._target.unregister();
+        }
+        this._target = null;
+        this._initGraphPanes();
         let status = '';
-        if (target) {
-            const document = this._host.document;
-            const graph = target;
-            const groups = graph.groups || false;
-            const nodes = graph.nodes;
+        if (target && this._leftPane && this._rightPane) {
+            const nodes = target.nodes || [];
             this._host.event('graph_view', {
                 graph_node_count: nodes.length,
                 graph_skip: 0
             });
-            const viewGraph = new view.Graph(this, groups);
             const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
-            if (state && state.blocks) {
-                viewGraph.blocks = state.blocks;
-            }
-            viewGraph.add(graph, signature);
-            viewGraph.addTunnels();
-            viewGraph.build(document);
-            await viewGraph.measure();
-            status = await viewGraph.layout(this._worker);
+            const modifiedTarget = this._resolveModifiedTarget(target);
+            // doubles the status for the two panes
+            status = await this._rightPane.render(modifiedTarget, signature, state);
+            const leftStatus = await this._leftPane.render(target, signature, state);
             if (status === '') {
-                viewGraph.update();
-                viewGraph.updateTunnels();
-                viewGraph.restore(state);
-                this.target = viewGraph;
+                status = leftStatus;
+            }
+            if (status === '' && this._rightPane.graph) {
+                this.target = this._rightPane.graph;
+            }
+            if (this._leftPane.graph) {
+                this._leftPane.graph.register();
             }
         }
         return status;
     }
 
+    _canExportOnnx() {
+        return this._model && this._editSession && canExportOnnx(this._model);
+    }
+
+    _suggestedExportBasename() {
+        if (this._exportBasenameOverride) {
+            return this._exportBasenameOverride;
+        }
+        return stripExportExtension(this._host.document.title || 'model');
+    }
+
+    // save dialog, blob download
+    async exportOnnx(file) {
+        if (!this._canExportOnnx()) {
+            return;
+        }
+        try {
+            const defaultPath = this._suggestedExportBasename();
+            const target = file || await this._host.save('ONNX Model', 'onnx', defaultPath);
+            if (!target) {
+                return;
+            }
+            const filename = normalizeExportFilename(target, 'onnx');
+            if (!filename) {
+                return;
+            }
+            // export the modified model as ONNX
+            const bytes = exportModifiedOnnx(this._model, this._editSession);
+            const blob = new Blob([bytes], { type: 'application/octet-stream' });
+            await this._host.export(filename, blob);
+        } catch (error) {
+            const message = error instanceof OnnxExportError ? error.message : (error && error.message ? error.message : error.toString());
+            await this._host.message(message, true, 'OK');
+        }
+    }
+
+    // the normal export function, for png and svg
     async export(file) {
         const window = this.host.window;
         const lastIndex = file.lastIndexOf('.');
         const extension = lastIndex === -1 ? 'png' : file.substring(lastIndex + 1).toLowerCase();
+        if (extension === 'onnx') {
+            await this.exportOnnx(file);
+            return;
+        }
         if (this.activeTarget && (extension === 'png' || extension === 'svg')) {
-            const canvas = this._element('canvas');
+            const canvas = this._rightPane && this._rightPane.graph ? this._rightPane.graph._canvas : this._element('modified-canvas');
             const clone = canvas.cloneNode(true);
             const document = this._host.document;
             const applyStyleSheet = (element, name) => {
@@ -1144,22 +1901,10 @@ view.View = class {
                 if (this._menu) {
                     this._menu.close();
                 }
-                const sidebar = new view.NodeSidebar(this, node);
-                sidebar.on('show-definition', async (/* sender, e */) => {
-                    await this.showDefinition(node.type);
-                });
-                sidebar.on('focus', (sender, value) => {
-                    this._target.focus([value]);
-                });
-                sidebar.on('blur', (sender, value) => {
-                    this._target.blur([value]);
-                });
-                sidebar.on('select', (sender, value) => {
-                    this._target.scrollTo(this._target.select([value], 'sidebar'));
-                });
-                sidebar.on('activate', (sender, value) => {
-                    this._target.scrollTo(this._target.activate(value, 'sidebar'));
-                });
+                const sidebar = this._editSession ?
+                    new view.EditableNodeSidebar(this, node, this._editSession) :
+                    new view.NodeSidebar(this, node);
+                this._bindNodeSidebarEvents(sidebar, node);
                 this._sidebar.open(sidebar, 'Node Properties', source);
             } catch (error) {
                 this.error(error, 'Error showing node properties.', null);
@@ -1167,24 +1912,30 @@ view.View = class {
         }
     }
 
+    _bindConnectionSidebarEvents(sidebar) {
+        sidebar.on('focus', (sender, value) => {
+            this._target.focus([value]);
+        });
+        sidebar.on('blur', (sender, value) => {
+            this._target.blur([value]);
+        });
+        sidebar.on('select', (sender, value) => {
+            this._target.scrollTo(this._target.select([value], 'sidebar'));
+        });
+        sidebar.on('activate', (sender, value) => {
+            this._target.scrollTo(this._target.activate(value, 'sidebar'));
+        });
+    }
+
     showConnectionProperties(value, from, to, source) {
         try {
             if (this._menu) {
                 this._menu.close();
             }
-            const sidebar = new view.ConnectionSidebar(this, value, from, to);
-            sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
-            });
-            sidebar.on('blur', (sender, value) => {
-                this._target.blur([value]);
-            });
-            sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value], 'sidebar'));
-            });
-            sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value, 'sidebar'));
-            });
+            const sidebar = this._editSession ?
+                new view.EditableConnectionSidebar(this, value, from, to, this._editSession) :
+                new view.ConnectionSidebar(this, value, from, to);
+            this._bindConnectionSidebarEvents(sidebar);
             this._sidebar.open(sidebar, 'Connection Properties', source);
         } catch (error) {
             this.error(error, 'Error showing connection properties.', null);
@@ -1759,6 +2510,211 @@ view.Menu.Separator = class {
     }
 };
 
+view.GraphContextMenu = class {
+
+    constructor(view, host, x, y, items) {
+        this._view = view;
+        this._host = host;
+        this._document = host.document;
+        this._window = host.window;
+        this._x = x;
+        this._y = y;
+        this._items = items;
+        this._element = this._document.createElement('div');
+        this._element.className = 'graph-context-menu';
+        for (const item of items) {
+            if (item.separator) {
+                const separator = this._document.createElement('div');
+                separator.className = 'graph-context-menu-separator';
+                this._element.appendChild(separator);
+                continue;
+            }
+            const button = this._document.createElement('button');
+            button.className = 'graph-context-menu-item';
+            button.type = 'button';
+            button.textContent = item.label;
+            if (item.enabled === false) {
+                button.disabled = true;
+            }
+            button.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (button.disabled) {
+                    return;
+                }
+                this.close();
+                item.action();
+            });
+            this._element.appendChild(button);
+        }
+        this._onKeyDown = (e) => {
+            if (e.key === 'Escape') {
+                this.close();
+            }
+        };
+        this._onPointerDown = (e) => {
+            if (!this._element.contains(e.target)) {
+                this.close();
+            }
+        };
+    }
+
+    open() {
+        this._element.style.left = `${this._x}px`;
+        this._element.style.top = `${this._y}px`;
+        this._document.body.appendChild(this._element);
+        this._window.addEventListener('keydown', this._onKeyDown);
+        this._window.addEventListener('pointerdown', this._onPointerDown, true);
+    }
+
+    close() {
+        if (this._element.parentNode) {
+            this._element.parentNode.removeChild(this._element);
+        }
+        this._window.removeEventListener('keydown', this._onKeyDown);
+        this._window.removeEventListener('pointerdown', this._onPointerDown, true);
+        if (this._view._graphContextMenu === this) {
+            this._view._graphContextMenu = null;
+        }
+    }
+};
+
+// This is the operator picker popup that appears when you right click on a node
+view.OperatorPicker = class {
+
+    constructor(view, nodeView, position, x, y) {
+        this._view = view;
+        this._nodeView = nodeView;
+        this._position = position;
+        this._host = view._host;
+        this._document = this._host.document;
+        this._window = this._host.window;
+        this._x = x;
+        this._y = y;
+        this._ops = [];
+        this._filtered = [];
+        this._element = this._document.createElement('div');
+        this._element.className = 'operator-picker';
+        this._query = this._document.createElement('input');
+        this._query.className = 'operator-picker-query';
+        this._query.type = 'text';
+        this._query.placeholder = 'Search ONNX operators';
+        this._query.spellcheck = false;
+        this._list = this._document.createElement('div');
+        this._list.className = 'operator-picker-list';
+        this._element.appendChild(this._query);
+        this._element.appendChild(this._list);
+        this._query.addEventListener('input', () => this._updateList());
+        this._query.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                this.close();
+            } else if (e.key === 'Enter' && this._filtered.length > 0) {
+                this._select(this._filtered[0]);
+            }
+        });
+        this._onPointerDown = (e) => {
+            if (!this._element.contains(e.target)) {
+                this.close();
+            }
+        };
+    }
+
+    _getOpSetImports() {
+        const imports = new Map();
+        const model = this._view._model;
+        if (model && model.proto && model.proto.opset_import) {
+            for (const entry of model.proto.opset_import) {
+                imports.set(entry.domain || 'ai.onnx', Number(entry.version));
+            }
+        }
+        if (imports.size === 0 && Array.isArray(model && model.imports)) {
+            for (const entry of model.imports) {
+                const match = /^(.+?) v(\d+)$/.exec(entry);
+                if (match) {
+                    imports.set(match[1], Number(match[2]));
+                }
+            }
+        }
+        if (imports.size === 0) {
+            imports.set('ai.onnx', 13);
+        }
+        return imports;
+    }
+
+    _filterAvailableOps(allTypes) {
+        const imports = this._getOpSetImports();
+        const latest = new Map();
+        for (const type of allTypes) {
+            const module = type.module || 'ai.onnx';
+            const importVersion = imports.get(module);
+            if (importVersion === undefined || type.version > importVersion) {
+                continue;
+            }
+            const key = `${module}:${type.name}`;
+            const current = latest.get(key);
+            if (!current || type.version > current.version) {
+                latest.set(key, type);
+            }
+        }
+        return Array.from(latest.values()).sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    async _loadMetadata() {
+        const data = await this._host.asset('onnx-metadata.json');
+        const types = JSON.parse(data);
+        this._ops = this._filterAvailableOps(types);
+        this._filtered = this._ops.slice(0, 200);
+    }
+
+    _updateList() {
+        const term = this._query.value.trim().toLowerCase();
+        this._filtered = term ?
+            this._ops.filter((entry) => entry.name.toLowerCase().includes(term)).slice(0, 200) :
+            this._ops.slice(0, 200);
+        this._list.replaceChildren();
+        for (const entry of this._filtered) {
+            const button = this._document.createElement('button');
+            button.className = 'operator-picker-item';
+            button.type = 'button';
+            button.textContent = entry.name;
+            button.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._select(entry);
+            });
+            this._list.appendChild(button);
+        }
+    }
+
+    async _select(entry) {
+        this.close();
+        await this._view.insertNodeAt(this._nodeView, this._position, entry);
+    }
+
+    async open() {
+        this._element.style.left = `${this._x}px`;
+        this._element.style.top = `${this._y}px`;
+        this._document.body.appendChild(this._element);
+        this._window.addEventListener('pointerdown', this._onPointerDown, true);
+        try {
+            await this._loadMetadata();
+            this._updateList();
+            this._query.focus();
+        } catch (error) {
+            this.close();
+            this._view.error(error, 'Error loading operator metadata.', null);
+        }
+    }
+
+    close() {
+        if (this._element.parentNode) {
+            this._element.parentNode.removeChild(this._element);
+        }
+        this._window.removeEventListener('pointerdown', this._onPointerDown, true);
+        if (this._view._operatorPicker === this) {
+            this._view._operatorPicker = null;
+        }
+    }
+};
+
 view.Worker = class {
 
     constructor(host) {
@@ -1832,16 +2788,22 @@ view.Worker = class {
         if (this._timeout !== -1) {
             this._host.window.clearTimeout(this._timeout);
             this._timeout = -1;
-            this._host.message();
         }
     }
 };
 
 view.Graph = class extends grapher.Graph {
 
-    constructor(view, compound) {
+    constructor(view, compound, options = {}) {
         super(compound);
         this.view = view;
+        this._paneId = options.paneId || '';
+        this._container = options.container || null;
+        this.readOnly = Boolean(options.readOnly);
+        this.deltaTracker = options.deltaTracker || null;
+        this.graphIndex = options.graphIndex !== undefined ? options.graphIndex : 0;
+        this._valueEntityIds = new Map();
+        this.markerPrefix = this._paneId ? `${this._paneId}-` : '';
         this.counter = 0;
         this._nodeKey = 0;
         this._values = new Map();
@@ -1851,6 +2813,34 @@ view.Graph = class extends grapher.Graph {
         this.blocks = new Set();
         this._zoom = 1;
         this._listeners = {};
+        this._canvas = null;
+        this._origin = null;
+        this._background = null;
+    }
+
+    _containerElement() {
+        return this._container;
+    }
+
+    _injectPaneStyles(canvas) {
+        if (!this.markerPrefix) {
+            return;
+        }
+        const prefix = this.markerPrefix;
+        const style = this.host.document.createElementNS('http://www.w3.org/2000/svg', 'style');
+        style.textContent = `
+.edge-path { stroke: #000; stroke-width: 1px; fill: none; marker-end: url(#${prefix}arrowhead); }
+.edge-path-control-dependency { stroke-dasharray: 2, 2; }
+.select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
+.edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
+.edited > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
+.edge-path-tunnel { stroke-dasharray: 5, 3; marker-end: url(#${prefix}arrowhead-tunnel); opacity: 0.5; }
+#${prefix}arrowhead { fill: #000; }
+#${prefix}arrowhead-hover { fill: rgba(220, 0, 0, 0.9); }
+#${prefix}arrowhead-select { fill: rgba(220, 0, 0, 0.9); }
+#${prefix}arrowhead-tunnel { fill: #000; }
+`;
+        canvas.insertBefore(style, canvas.firstChild);
     }
 
     on(event, callback) {
@@ -1895,6 +2885,9 @@ view.Graph = class extends grapher.Graph {
     createNode(node) {
         const obj = new view.Node(this, node);
         obj.name = (this._nodeKey++).toString();
+        const nodes = this.target && this.target.nodes ? this.target.nodes : [];
+        const nodeIndex = nodes.indexOf(node);
+        obj._entityId = nodeIndex >= 0 ? `graph:${this.graphIndex}/node:${nodeIndex}` : null;
         this._table.set(node, obj);
         return obj;
     }
@@ -1928,10 +2921,34 @@ view.Graph = class extends grapher.Graph {
             this._table.set(value, obj);
         } else {
             const obj = new view.Value(this, value);
+            obj._entityId = this._valueEntityIds.get(value) || null;
             this._values.set(key, obj);
             this._table.set(value, obj);
         }
-        return this._values.get(key);
+        const obj = this._values.get(key);
+        if (obj && !obj._entityId) {
+            obj._entityId = this._valueEntityIds.get(value) || null;
+        }
+        return obj;
+    }
+
+    refreshDeltaStyles() {
+        if (!this.deltaTracker) {
+            return;
+        }
+        for (const obj of this._table.values()) {
+            if (obj && typeof obj.applyDeltaStyle === 'function') {
+                obj.applyDeltaStyle();
+            }
+        }
+    }
+
+    refreshRangeMarkerStyles() {
+        for (const obj of this._table.values()) {
+            if (obj && typeof obj.applyRangeMarkerStyle === 'function') {
+                obj.applyRangeMarkerStyle();
+            }
+        }
     }
 
     createArgument(value) {
@@ -1944,6 +2961,14 @@ view.Graph = class extends grapher.Graph {
             return this._tensors.get(value);
         }
         return null;
+    }
+
+    async refreshNodeArgumentList(modelNode) {
+        const viewNode = this._table.get(modelNode);
+        if (!viewNode || typeof viewNode.rebuildArgumentList !== 'function') {
+            return false;
+        }
+        return viewNode.rebuildArgumentList();
     }
 
     find(value) {
@@ -1967,6 +2992,12 @@ view.Graph = class extends grapher.Graph {
 
     add(graph, signature) {
         this.target = graph;
+        this._valueEntityIds = new Map();
+        if (this.deltaTracker) {
+            for (const [value, id] of enumerateGraphValues(graph, this.graphIndex)) {
+                this._valueEntityIds.set(value, id);
+            }
+        }
         this.identifier = this.model.identifier;
         this.identifier += graph && graph.name ? `.${graph.name.replace(/\/|\\/g, '.')}` : '';
         const clusters = new Set();
@@ -2172,7 +3203,7 @@ view.Graph = class extends grapher.Graph {
         const document = this._document;
         const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
         const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-        marker.setAttribute('id', 'arrowhead-tunnel');
+        marker.setAttribute('id', `${this.markerPrefix}arrowhead-tunnel`);
         marker.setAttribute('viewBox', '0 0 10 10');
         marker.setAttribute('refX', 9);
         marker.setAttribute('refY', 5);
@@ -2305,19 +3336,20 @@ view.Graph = class extends grapher.Graph {
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             path.setAttribute('class', 'edge-path edge-path-tunnel');
             path.setAttribute('d', pathData);
-            path.setAttribute('marker-end', 'url(#arrowhead-tunnel)');
+            path.setAttribute('marker-end', `url(#${this.markerPrefix}arrowhead-tunnel)`);
             this._tunnelGroup.appendChild(path);
         }
     }
 
     build(document, origin) {
         if (!origin) {
-            const element = document.getElementById('target');
-            while (element.lastChild) {
-                element.removeChild(element.lastChild);
+            const element = this._containerElement();
+            if (!element) {
+                throw new view.Error('Graph container is not set.');
             }
+            const canvasId = this._paneId ? `${this._paneId}-canvas` : 'canvas';
             const canvas = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-            canvas.setAttribute('id', 'canvas');
+            canvas.setAttribute('id', canvasId);
             canvas.setAttribute('class', 'canvas');
             canvas.setAttribute('preserveAspectRatio', 'xMidYMid meet');
             canvas.setAttribute('width', '100%');
@@ -2326,13 +3358,25 @@ view.Graph = class extends grapher.Graph {
             // Workaround for Safari background drag/zoom issue:
             // https://stackoverflow.com/questions/40887193/d3-js-zoom-is-not-working-with-mousewheel-in-safari
             const background = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-            background.setAttribute('id', 'background');
+            background.setAttribute('id', this._paneId ? `${this._paneId}-background` : 'background');
             background.setAttribute('fill', 'none');
             background.setAttribute('pointer-events', 'all');
             canvas.appendChild(background);
             origin = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-            origin.setAttribute('id', 'origin');
+            origin.setAttribute('id', this._paneId ? `${this._paneId}-origin` : 'origin');
             canvas.appendChild(origin);
+            this._canvas = canvas;
+            this._origin = origin;
+            this._background = background;
+            this._injectPaneStyles(canvas);
+        } else {
+            this._origin = origin;
+            const canvas = origin.parentElement;
+            if (canvas && canvas.localName === 'svg') {
+                this._canvas = canvas;
+                const backgroundId = this._paneId ? `${this._paneId}-background` : 'background';
+                this._background = document.getElementById(backgroundId);
+            }
         }
         for (const value of this._values.values()) {
             value.build();
@@ -2401,6 +3445,11 @@ view.Graph = class extends grapher.Graph {
     }
 
     activate(value, source) {
+        if (this.readOnly) {
+            // eslint-disable-next-line no-console
+            console.log('[editor] activate blocked: readOnly');
+            return [];
+        }
         if (this._table.has(value)) {
             this.select(null, source);
             const element = this._table.get(value);
@@ -2429,10 +3478,13 @@ view.Graph = class extends grapher.Graph {
     }
 
     restore(state) {
-        const document = this.host.document;
-        const canvas = document.getElementById('canvas');
-        const origin = document.getElementById('origin');
-        const background = document.getElementById('background');
+        const canvas = this._canvas;
+        const origin = this._origin;
+        const background = this._background;
+        const container = this._containerElement();
+        if (!canvas || !origin || !background || !container) {
+            return;
+        }
         const elements = Array.from(canvas.getElementsByClassName('graph-input') || []);
         if (elements.length === 0) {
             const nodeElements = Array.from(canvas.getElementsByClassName('graph-node') || []);
@@ -2456,7 +3508,6 @@ view.Graph = class extends grapher.Graph {
         canvas.setAttribute('height', height);
         this._zoom = state ? state.zoom : 1;
         this._updateZoom(this._zoom);
-        const container = document.getElementById('target');
         const context = state ? this.select([state.context]) : [];
         if (context.length > 0) {
             this.scrollTo(context, 'instant');
@@ -2498,12 +3549,20 @@ view.Graph = class extends grapher.Graph {
             this._events.gesturestart = (e) => this._gestureStartHandler(e);
             this._events.pointerdown = (e) => this._pointerDownHandler(e);
             this._events.touchstart = (e) => this._touchStartHandler(e);
-            const document = this.host.document;
-            const element = document.getElementById('target');
+            this._events.focuspane = () => {
+                if (this._paneId === 'original' || this._paneId === 'modified') {
+                    this.view._activePane = this._paneId;
+                }
+            };
+            const element = this._containerElement();
+            if (!element) {
+                return;
+            }
             element.focus();
             element.addEventListener('scroll', this._events.scroll);
             element.addEventListener('wheel', this._events.wheel, { passive: false });
             element.addEventListener('pointerdown', this._events.pointerdown);
+            element.addEventListener('pointerdown', this._events.focuspane, true);
             if (this.host.environment('agent') === 'safari') {
                 element.addEventListener('gesturestart', this._events.gesturestart, false);
             } else {
@@ -2514,13 +3573,15 @@ view.Graph = class extends grapher.Graph {
 
     unregister() {
         if (this._events) {
-            const document = this.host.document;
-            const element = document.getElementById('target');
-            element.removeEventListener('scroll', this._events.scroll);
-            element.removeEventListener('wheel', this._events.wheel);
-            element.removeEventListener('pointerdown', this._events.pointerdown);
-            element.removeEventListener('gesturestart', this._events.gesturestart);
-            element.removeEventListener('touchstart', this._events.touchstart);
+            const element = this._containerElement();
+            if (element) {
+                element.removeEventListener('scroll', this._events.scroll);
+                element.removeEventListener('wheel', this._events.wheel);
+                element.removeEventListener('pointerdown', this._events.pointerdown);
+                element.removeEventListener('pointerdown', this._events.focuspane, true);
+                element.removeEventListener('gesturestart', this._events.gesturestart);
+                element.removeEventListener('touchstart', this._events.touchstart);
+            }
             delete this._events;
         }
     }
@@ -2534,9 +3595,11 @@ view.Graph = class extends grapher.Graph {
     }
 
     _updateZoom(zoom, e) {
-        const document = this.host.document;
-        const container = document.getElementById('target');
-        const canvas = document.getElementById('canvas');
+        const container = this._containerElement();
+        const canvas = this._canvas;
+        if (!container || !canvas) {
+            return;
+        }
         const limit = this.view.options.direction === 'vertical' ?
             container.clientHeight / this._height :
             container.clientWidth / this._width;
@@ -2555,6 +3618,9 @@ view.Graph = class extends grapher.Graph {
         container.scrollLeft = this._scrollLeft;
         container.scrollTop = this._scrollTop;
         this._zoom = zoom;
+        if (this.view._syncEnabled()) {
+            this.view._propagateSync(this);
+        }
     }
 
     _pointerDownHandler(e) {
@@ -2566,7 +3632,7 @@ view.Graph = class extends grapher.Graph {
             return;
         }
         const document = this.host.document;
-        const container = document.getElementById('target');
+        const container = this._containerElement();
         e.target.setPointerCapture(e.pointerId);
         this._mousePosition = {
             left: container.scrollLeft,
@@ -2585,8 +3651,6 @@ view.Graph = class extends grapher.Graph {
                 const dy = e.clientY - this._mousePosition.y;
                 this._mousePosition.moved = dx * dx + dy * dy > 0;
                 if (this._mousePosition.moved) {
-                    const document = this.host.document;
-                    const container = document.getElementById('target');
                     container.scrollTop = this._mousePosition.top - dy;
                     container.scrollLeft = this._mousePosition.left - dx;
                 }
@@ -2637,8 +3701,7 @@ view.Graph = class extends grapher.Graph {
                 }
             }
         };
-        const document = this.host.document;
-        const container = document.getElementById('target');
+        const container = this._containerElement();
         const touchEndHandler = () => {
             container.removeEventListener('touchmove', touchMoveHandler, { passive: true });
             container.removeEventListener('touchcancel', touchEndHandler, { passive: true });
@@ -2654,8 +3717,7 @@ view.Graph = class extends grapher.Graph {
     _gestureStartHandler(e) {
         e.preventDefault();
         this._gestureZoom = this._zoom;
-        const document = this.host.document;
-        const container = document.getElementById('target');
+        const container = this._containerElement();
         const gestureChangeHandler = (e) => {
             e.preventDefault();
             this._updateZoom(this._gestureZoom * e.scale, e);
@@ -2680,6 +3742,9 @@ view.Graph = class extends grapher.Graph {
         if (this._scrollTop && e.target.scrollTop !== Math.floor(this._scrollTop)) {
             delete this._scrollTop;
         }
+        if (this.view._syncEnabled()) {
+            this.view._propagateSync(this);
+        }
     }
 
     _wheelHandler(e) {
@@ -2700,8 +3765,7 @@ view.Graph = class extends grapher.Graph {
 
     scrollTo(selection, behavior) {
         if (selection && selection.length > 0) {
-            const document = this.host.document;
-            const container = document.getElementById('target');
+            const container = this._containerElement();
             const rect = container.getBoundingClientRect();
             // Exclude scrollbars
             const cw = container.clientWidth;
@@ -2808,6 +3872,13 @@ view.Node = class extends grapher.Node {
                 }
             }
         }
+        if (type !== 'graph' && type !== 'function') {
+            this.onContextMenu = (event) => {
+                if (!this.context.readOnly && this.context.view && this.context.view._canInsertNode()) {
+                    this.context.view._showNodeContextMenu(this, event);
+                }
+            };
+        }
     }
 
     get class() {
@@ -2820,6 +3891,35 @@ view.Node = class extends grapher.Node {
 
     get outputs() {
         return this.value.outputs;
+    }
+
+    // apply delta style to the node, the edit thing
+    applyDeltaStyle() {
+        if (!this.element || !this._entityId || !this.context.deltaTracker) {
+            return;
+        }
+        const state = this.context.deltaTracker.getAggregateState(this._entityId);
+        // change css
+        this.element.classList.toggle('edited', state === 'modified' || state === 'added');
+    }
+
+    // apply range marker style for graph extraction
+    applyRangeMarkerStyle() {
+        if (!this.element || !this._entityId || !this.context.view) {
+            return;
+        }
+        const view = this.context.view;
+        const isBegin = view._rangeBegins.some((entry) => entry.nodeId === this._entityId);
+        const isEnd = view._rangeEnds.some((entry) => entry.nodeId === this._entityId);
+        // change css
+        this.element.classList.toggle('range-begin', Boolean(isBegin));
+        this.element.classList.toggle('range-end', Boolean(isEnd));
+    }
+
+    update() {
+        super.update();
+        this.applyDeltaStyle();
+        this.applyRangeMarkerStyle();
     }
 
     _add(value, type) {
@@ -2888,9 +3988,25 @@ view.Node = class extends grapher.Node {
             if (!current) {
                 current = this.list();
                 current.on('click', () => this.context.activate(node, 'target'));
+                this._argumentList = current;
             }
             return current;
         };
+        this._populateArgumentList(node, list);
+        if (Array.isArray(node.chain) && node.chain.length > 0) {
+            for (const innerNode of node.chain) {
+                this.context.createNode(innerNode);
+                this._add(innerNode);
+            }
+        }
+        if (node.inner) {
+            this.context.createNode(node.inner);
+            this._add(node.inner);
+        }
+    }
+
+    _populateArgumentList(node, list) {
+        const options = this.context.options;
         let hiddenTensors = false;
         const objects = [];
         const attribute = (argument) => {
@@ -2905,17 +4021,16 @@ view.Node = class extends grapher.Node {
             }
             return item;
         };
-        const isObject = (node) => {
-            if (node.name || node.identifier || node.description ||
-                (Array.isArray(node.inputs) && node.inputs.length > 0) ||
-                (Array.isArray(node.outputs) && node.outputs.length > 0) ||
-                (Array.isArray(node.attributes) && node.attributes.length > 0) ||
-                (Array.isArray(node.blocks) && node.blocks.length > 0) ||
-                (Array.isArray(node.chain) && node.chain.length > 0) ||
-                (node.type && Array.isArray(node.type.nodes) && node.type.nodes.length > 0)) {
+        const isObject = (target) => {
+            if (target.name || target.identifier || target.description ||
+                (Array.isArray(target.inputs) && target.inputs.length > 0) ||
+                (Array.isArray(target.outputs) && target.outputs.length > 0) ||
+                (Array.isArray(target.attributes) && target.attributes.length > 0) ||
+                (Array.isArray(target.blocks) && target.blocks.length > 0) ||
+                (Array.isArray(target.chain) && target.chain.length > 0) ||
+                (target.type && Array.isArray(target.type.nodes) && target.type.nodes.length > 0)) {
                 return true;
             }
-
             return false;
         };
         const inputs = node.inputs;
@@ -2999,19 +4114,46 @@ view.Node = class extends grapher.Node {
                 list().add(item);
             }
         }
-        if (Array.isArray(node.chain) && node.chain.length > 0) {
-            for (const innerNode of node.chain) {
-                this.context.createNode(innerNode);
-                this._add(innerNode);
-            }
+    }
+
+    async rebuildArgumentList() {
+        const block = this._argumentList;
+        if (!block || !block.element) {
+            return false;
         }
-        if (node.inner) {
-            this.context.createNode(node.inner);
-            this._add(node.inner);
+        const previousHeight = this.height;
+        const document = this.context.host.document;
+        block._items = [];
+        while (block.element.firstChild) {
+            block.element.removeChild(block.element.firstChild);
         }
+        block._document = document;
+        block.background = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        block.element.appendChild(block.background);
+        if (!block.first) {
+            block.line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            block.line.setAttribute('class', 'node');
+            block.element.appendChild(block.line);
+        }
+        this._populateArgumentList(this.value, () => block);
+        for (const item of block._items) {
+            item.build(document, block.element);
+        }
+        await block.measure();
+        await this.measure();
+        const heightChanged = this.height !== previousHeight;
+        await block.layout();
+        await this.layout();
+        this.update();
+        return heightChanged;
     }
 
     activate(source) {
+        if (this.context.readOnly) {
+            // eslint-disable-next-line no-console
+            console.log('[editor] activate blocked: readOnly');
+            return;
+        }
         this.context.view.showNodeProperties(this.value, source);
     }
 
@@ -3225,6 +4367,25 @@ view.Value = class {
                 this._edges.push(edge);
             }
         }
+        this.applyDeltaStyle();
+    }
+
+    applyDeltaStyle() {
+        if (!this._entityId || !this.context.deltaTracker || !Array.isArray(this._edges)) {
+            return;
+        }
+        const edited = this.context.deltaTracker.getState(this._entityId) !== 'unchanged';
+        for (const edge of this._edges) {
+            if (!edge.element) {
+                continue;
+            }
+            const classes = (edge.class || '').split(/\s+/).filter((name) => name && name !== 'edge-path-edited');
+            if (edited) {
+                classes.push('edge-path-edited');
+            }
+            edge.class = classes.join(' ');
+            edge.element.setAttribute('class', edge.class ? `edge-path ${edge.class}` : 'edge-path');
+        }
     }
 
     select() {
@@ -3246,6 +4407,11 @@ view.Value = class {
     }
 
     activate(source) {
+        if (this.context.readOnly) {
+            // eslint-disable-next-line no-console
+            console.log('[editor] activate blocked: readOnly');
+            return;
+        }
         if (this.value && this.from && Array.isArray(this.to) && !this.value.initializer) {
             const from = this.from.value;
             const to = this.to.map((node) => node.value);
@@ -3379,6 +4545,10 @@ view.Sidebar = class {
         return '';
     }
 
+    get entry() {
+        return this._stack.length > 0 ? this._stack[this._stack.length - 1] : null;
+    }
+
     _render(content) {
         try {
             content.render();
@@ -3392,7 +4562,7 @@ view.Sidebar = class {
     _update(stack) {
         const sidebar = this._element('sidebar');
         const element = this._element('sidebar-content');
-        const container = this._element('target');
+        const container = this._element('diff-container') || this._element('target');
         const closeButton = this._element('sidebar-closebutton');
         closeButton.removeEventListener('click', this._closeSidebarHandler);
         this._host.document.removeEventListener('keydown', this._closeSidebarKeyDownHandler);
@@ -3421,7 +4591,9 @@ view.Sidebar = class {
             sidebar.style.right = 0;
             sidebar.style.opacity = 1;
             this._host.document.addEventListener('keydown', this._closeSidebarKeyDownHandler);
-            container.style.width = 'max(40vw, calc(100vw - 42em))';
+            if (container) {
+                container.style.width = 'max(40vw, calc(100vw - 42em))';
+            }
             const content = entry.content;
             if (content && content.activate) {
                 content.activate();
@@ -3431,8 +4603,10 @@ view.Sidebar = class {
             sidebar.style.opacity = 0;
             const clone = element.cloneNode(true);
             element.parentNode.replaceChild(clone, element);
-            container.style.width = '100%';
-            container.focus();
+            if (container) {
+                container.style.width = '100%';
+                container.focus();
+            }
         }
     }
 };
@@ -3661,6 +4835,66 @@ view.ObjectSidebar = class extends view.Control {
     }
 };
 
+// base for inline editing of properties and attributes
+view.EditableObjectSidebar = class extends view.ObjectSidebar {
+
+    addEditableProperty(name, value, onCommit, options = {}) {
+        const item = new view.EditableTextView(this._view, value, { ...options, onCommit });
+        this.addEntry(name, item);
+        return item;
+    }
+
+    addEditableAttribute(attribute, entityId, onCommit, options = {}) {
+        const item = new view.EditableAttributeView(this._view, attribute, entityId, onCommit, options);
+        this.addEntry(attribute.name, item);
+        return item;
+    }
+
+    addAttributeControls(parentId, options) {
+        const row = this.createElement('div', 'sidebar-editable-add-row');
+        const nameInput = this.createElement('input');
+        nameInput.setAttribute('type', 'text');
+        nameInput.setAttribute('class', 'sidebar-editable-input');
+        nameInput.setAttribute('placeholder', options.namePlaceholder || 'attribute name');
+        const valueInput = this.createElement('input');
+        valueInput.setAttribute('type', 'text');
+        valueInput.setAttribute('class', 'sidebar-editable-input');
+        valueInput.setAttribute('placeholder', options.valuePlaceholder || 'value (e.g. 1,2,3)');
+        const button = this.createElement('button');
+        button.setAttribute('class', 'sidebar-add-button');
+        button.setAttribute('type', 'button');
+        button.textContent = options.buttonLabel || '+ Add Attribute';
+        button.addEventListener('click', (e) => {
+            e.preventDefault();
+            const name = nameInput.value.trim();
+            if (!name) {
+                return;
+            }
+            const validationError = options.validateName(name);
+            if (validationError) {
+                this.error(new Error(validationError), true);
+                return;
+            }
+            const attributeType = options.resolveType(name);
+            const parsed = options.parseValue(valueInput.value, attributeType);
+            this._view.applyEditorPatch({
+                parentId,
+                entityType: 'attribute',
+                changeType: 'add',
+                property: `attributes.${name}`,
+                attributeType,
+                newValue: parsed
+            });
+            nameInput.value = '';
+            valueInput.value = '';
+        });
+        row.appendChild(nameInput);
+        row.appendChild(valueInput);
+        row.appendChild(button);
+        this.element.appendChild(row);
+    }
+};
+
 view.NodeSidebar = class extends view.ObjectSidebar {
 
     constructor(context, node) {
@@ -3774,6 +5008,140 @@ view.NodeSidebar = class extends view.ObjectSidebar {
     }
 };
 
+// edit node name, type, attributes
+view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
+
+    constructor(context, node, editSession) {
+        super(context);
+        this._node = node;
+        this._editSession = editSession;
+        this._entity = context._resolveNodeEntity(node);
+    }
+
+    get identifier() {
+        return 'node';
+    }
+
+    render() {
+        const node = this._node;
+        const nodeId = this._entity ? this._entity.nodeId : null;
+        if (node.type) {
+            const type = node.type;
+            const item = this.addProperty('type', node.type.identifier || node.type.name);
+            if (type && (type.description || type.inputs || type.outputs || type.attributes)) {
+                let icon = '?';
+                let tooltip = 'Show Definition';
+                if (type.type === 'weights') {
+                    icon = '\u25CF';
+                    tooltip = 'Show Weights';
+                } else if (Array.isArray(type.nodes)) {
+                    icon = '\u0192';
+                }
+                item.action(icon, tooltip, () => {
+                    this.emit('show-definition', null);
+                });
+            }
+            const module = node.type.module;
+            const version = node.type.version;
+            const status = node.type.status;
+            if (module || version || status) {
+                const list = [module, version ? `v${version}` : '', status];
+                const value = list.filter((value) => value).join(' ');
+                this.addProperty('module', value, 'nowrap');
+            }
+        }
+        if (node.name && nodeId) {
+            this.addEditableProperty('name', node.name, (value) => {
+                this._view.applyEditorPatch({
+                    entityId: nodeId,
+                    entityType: 'node',
+                    changeType: 'modify',
+                    property: 'name',
+                    newValue: value
+                });
+            }, { style: 'nowrap' });
+        } else if (node.name) {
+            this.addProperty('name', node.name, 'nowrap');
+        }
+        if (node.identifier) {
+            this.addProperty('identifier', node.identifier, 'nowrap');
+        }
+        if (node.description) {
+            this.addProperty('description', node.description);
+        }
+        if (node.device) {
+            this.addProperty('device', node.device);
+        }
+        const attributes = node.attributes;
+        if (Array.isArray(attributes) && attributes.length > 0) {
+            this.addSection('Attributes');
+            for (let index = 0; index < attributes.length; index++) {
+                const attribute = attributes[index];
+                if (nodeId) {
+                    const attributeId = `${nodeId}/attr:${index}`;
+                    this.addEditableAttribute(attribute, attributeId, (patch) => {
+                        this._view.applyEditorPatch(patch);
+                    }, {
+                        onDelete: () => {
+                            this._view.applyEditorPatch({
+                                entityId: attributeId,
+                                entityType: 'attribute',
+                                changeType: 'delete',
+                                property: `attributes.${attribute.name}`
+                            });
+                        }
+                    });
+                } else {
+                    this.addArgument(attribute.name, attribute, 'attribute');
+                }
+            }
+        }
+        if (nodeId) {
+            this.addAttributeControls(nodeId, {
+                buttonLabel: '+ Add Attribute',
+                validateName: (name) => AttributeSchemaResolver.validateName(this._node, name),
+                resolveType: (name) => AttributeSchemaResolver.resolveType(this._node.type, name),
+                parseValue: (text, type) => AttributeSchemaResolver.parseValue(text, type)
+            });
+        }
+        const inputs = node.inputs;
+        if (Array.isArray(inputs) && inputs.length > 0) {
+            this.addSection('Inputs');
+            for (const input of inputs) {
+                this.addArgument(input.name, input);
+            }
+        }
+        const outputs = node.outputs;
+        if (Array.isArray(outputs) && outputs.length > 0) {
+            this.addSection('Outputs');
+            for (const output of outputs) {
+                this.addArgument(output.name, output);
+            }
+        }
+        const blocks = node.blocks;
+        if (Array.isArray(blocks) && blocks.length > 0) {
+            this.addSection('Blocks');
+            for (const block of blocks) {
+                this.addArgument(block.name, block);
+            }
+        }
+    }
+
+    activate() {
+        this.emit('select', this._node);
+    }
+
+    deactivate() {
+        this.emit('select', null);
+        if (this._focused) {
+            for (const value of this._focused) {
+                this.emit('blur', value);
+            }
+            this._focused.clear();
+        }
+    }
+};
+
 view.NameValueView = class extends view.Control {
 
     constructor(context, name, value) {
@@ -3859,6 +5227,147 @@ view.TextView = class extends view.Control {
         action.addEventListener('click', () => callback());
         action.innerHTML = text;
         this.element.insertBefore(action, this.element.childNodes[0]);
+    }
+
+    render() {
+        return [this.element];
+    }
+
+    toggle() {
+    }
+};
+
+// edit text properties
+view.EditableTextView = class extends view.Control {
+
+    constructor(context, value, options = {}) {
+        super(context);
+        this._onCommit = options.onCommit;
+        this._parse = options.parse;
+        this._committedValue = value;
+        this.element = this.createElement('div', 'sidebar-item-value');
+        const line = this.createElement('div', 'sidebar-item-value-line');
+        if (options.style === 'nowrap') {
+            line.style.whiteSpace = 'nowrap';
+        }
+        const input = this.createElement('input');
+        input.setAttribute('type', 'text');
+        input.setAttribute('class', 'sidebar-editable-input');
+        input.value = view.EditableAttributeView.formatValue(value);
+        const commit = () => {
+            const parsed = this._parse ? this._parse(input.value) : input.value;
+            if (!view.EditableAttributeView.valuesEqual(parsed, this._committedValue) && this._onCommit) {
+                this._committedValue = parsed;
+                this._onCommit(parsed);
+            }
+        };
+        input.addEventListener('blur', commit);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                input.blur();
+            }
+        });
+        line.appendChild(input);
+        this.element.appendChild(line);
+    }
+
+    render() {
+        return [this.element];
+    }
+
+    toggle() {
+    }
+};
+
+view.EditableAttributeView = class extends view.Control {
+
+    static formatValue(value) {
+        if (Array.isArray(value)) {
+            return value.map((item) => view.EditableAttributeView.formatValue(item)).join(', ');
+        }
+        if (value === null || value === undefined) {
+            return '';
+        }
+        return String(value);
+    }
+
+    static scalarEqual(a, b) {
+        if (a === b) {
+            return true;
+        }
+        if (typeof a === 'bigint' || typeof b === 'bigint') {
+            return String(a) === String(b);
+        }
+        return false;
+    }
+
+    static parseValue(text, type) {
+        return AttributeSchemaResolver.parseValue(text, type);
+    }
+
+    static valuesEqual(a, b) {
+        if (Array.isArray(a) && Array.isArray(b)) {
+            if (a.length !== b.length) {
+                return false;
+            }
+            for (let i = 0; i < a.length; i++) {
+                if (!view.EditableAttributeView.scalarEqual(a[i], b[i])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return view.EditableAttributeView.scalarEqual(a, b);
+    }
+
+    constructor(context, attribute, entityId, onCommit, options = {}) {
+        super(context);
+        this._attribute = attribute;
+        this._entityId = entityId;
+        this._onCommit = onCommit;
+        this._committedValue = attribute.value;
+        this.element = this.createElement('div', 'sidebar-item-value');
+        const line = this.createElement('div', 'sidebar-editable-attribute-row sidebar-item-value-line');
+        const input = this.createElement('input');
+        input.setAttribute('type', 'text');
+        input.setAttribute('class', 'sidebar-editable-input');
+        input.setAttribute('placeholder', attribute.type || 'value');
+        input.value = view.EditableAttributeView.formatValue(attribute.value);
+        const commit = () => {
+            const parsed = view.EditableAttributeView.parseValue(input.value, attribute.type);
+            if (!view.EditableAttributeView.valuesEqual(parsed, this._committedValue)) {
+                this._committedValue = parsed;
+                this._onCommit({
+                    entityId: this._entityId,
+                    entityType: 'attribute',
+                    changeType: 'modify',
+                    property: `attributes.${attribute.name}`,
+                    newValue: parsed
+                });
+            }
+        };
+        input.addEventListener('blur', commit);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                input.blur();
+            }
+        });
+        line.appendChild(input);
+        if (options.onDelete) {
+            const deleteButton = this.createElement('button');
+            deleteButton.setAttribute('class', 'sidebar-delete-button');
+            deleteButton.setAttribute('type', 'button');
+            deleteButton.setAttribute('title', 'Delete attribute');
+            deleteButton.textContent = '\u00D7';
+            deleteButton.addEventListener('click', (e) => {
+                e.preventDefault();
+                options.onDelete();
+            });
+            line.appendChild(deleteButton);
+        }
+        this.element.appendChild(line);
     }
 
     render() {
@@ -4406,6 +5915,145 @@ view.NodeListView = class extends view.Control {
     }
 };
 
+// edit conection and value properties
+view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
+
+    constructor(context, value, from, to, editSession) {
+        super(context);
+        this._value = value;
+        this._from = from;
+        this._to = to;
+        this._editSession = editSession;
+        this._entity = context._resolveValueEntity(value);
+    }
+
+    get identifier() {
+        return 'connection';
+    }
+
+    render() {
+        const value = this._value;
+        const from = this._from;
+        const to = this._to;
+        const valueId = this._entity ? this._entity.valueId : null;
+        const [name] = value.name.split('\n');
+        if (valueId) {
+            this.addEditableProperty('name', name, (newName) => {
+                this._view.applyEditorPatch({
+                    entityId: valueId,
+                    entityType: 'value',
+                    changeType: 'modify',
+                    property: 'name',
+                    newValue: newName
+                });
+            }, { style: 'nowrap' });
+            this.addEditableProperty('type', value.type !== undefined ? String(value.type) : '', (newType) => {
+                this._view.applyEditorPatch({
+                    entityId: valueId,
+                    entityType: 'value',
+                    changeType: 'modify',
+                    property: 'type',
+                    newValue: newType
+                });
+            }, { style: 'nowrap' });
+            this.addEditableProperty('description', value.description !== undefined ? value.description : '', (newDescription) => {
+                this._view.applyEditorPatch({
+                    entityId: valueId,
+                    entityType: 'value',
+                    changeType: 'modify',
+                    property: 'description',
+                    newValue: newDescription
+                });
+            });
+            const attributes = value.attributes || [];
+            for (let index = 0; index < attributes.length; index++) {
+                const attribute = attributes[index];
+                const attributeId = `${valueId}/attr:${index}`;
+                this.addEditableAttribute(attribute, attributeId, (patch) => {
+                    this._view.applyEditorPatch(patch);
+                }, {
+                    onDelete: () => {
+                        this._view.applyEditorPatch({
+                            entityId: attributeId,
+                            entityType: 'attribute',
+                            changeType: 'delete',
+                            property: `attributes.${attribute.name}`
+                        });
+                    }
+                });
+            }
+            this.addAttributeControls(valueId, {
+                buttonLabel: '+ Add Property',
+                namePlaceholder: 'property name',
+                validateName: (name) => AttributeSchemaResolver.validateValuePropertyName(value, name),
+                resolveType: () => 'string',
+                parseValue: (text, type) => AttributeSchemaResolver.parseValue(text, type)
+            });
+        } else {
+            this.addProperty('name', name);
+            if (value.type) {
+                const item = new view.ValueView(this._view, value);
+                this.addEntry('type', item);
+                item.toggle();
+            }
+        }
+        if (from) {
+            this.addSection('Inputs');
+            this.addNodeList('from', [from]);
+        }
+        if (Array.isArray(to) && to.length > 0) {
+            this.addSection('Outputs');
+            this.addNodeList('to', to);
+        }
+        const metadata = this._view.model.attachment.metadata.value(value);
+        if (Array.isArray(metadata) && metadata.length > 0) {
+            this.addSection('Metadata');
+            for (const argument of metadata) {
+                this.addArgument(argument.name, argument, 'attribute');
+            }
+        }
+        const metrics = this._view.model.attachment.metrics.value(value);
+        if (Array.isArray(metrics) && metrics.length > 0) {
+            this.addSection('Metrics');
+            for (const argument of metrics) {
+                this.addArgument(argument.name, argument, 'attribute');
+            }
+        }
+    }
+
+    addNodeList(name, list) {
+        const entry = new view.NodeListView(this._view, list);
+        entry.on('focus', (sender, value) => {
+            this.emit('focus', value);
+            this._focused = this._focused || new Set();
+            this._focused.add(value);
+        });
+        // edit conection and value properties
+        entry.on('blur', (sender, value) => {
+            this.emit('blur', value);
+            this._focused = this._focused || new Set();
+            this._focused.delete(value);
+        });
+        entry.on('select', (sender, value) => this.emit('select', value));
+        entry.on('activate', (sender, value) => this.emit('activate', value));
+        this.addEntry(name, entry);
+    }
+
+    activate() {
+        this.emit('select', this._value);
+    }
+
+    deactivate() {
+        this.emit('select', null);
+        if (this._focused) {
+            for (const value of this._focused) {
+                this.emit('blur', value);
+            }
+            this._focused.clear();
+        }
+    }
+};
+
 view.ConnectionSidebar = class extends view.ObjectSidebar {
 
     constructor(context, value, from, to) {
@@ -4429,6 +6077,13 @@ view.ConnectionSidebar = class extends view.ObjectSidebar {
             const item = new view.ValueView(this._view, value);
             this.addEntry('type', item);
             item.toggle();
+        }
+        if (value.description) {
+            this.addProperty('description', value.description);
+        }
+        const attributes = value.attributes || [];
+        for (const attribute of attributes) {
+            this.addArgument(attribute.name, attribute, 'attribute');
         }
         if (from) {
             this.addSection('Inputs');
@@ -4642,6 +6297,13 @@ view.ModelSidebar = class extends view.ObjectSidebar {
                 this.addArgument(argument.name, argument, 'attribute');
             }
         }
+        if (this._view._canMergeOnnx()) {
+            this.addSection('Actions');
+            const item = this.addProperty('merge', 'Merge ONNX Graph…');
+            item.action('\u2192', 'Open merge workspace with this model', () => {
+                this._view.startMergeWorkspace();
+            });
+        }
     }
 
     get metrics() {
@@ -4714,6 +6376,13 @@ view.TargetSidebar = class extends view.ObjectSidebar {
             for (const argument of metrics) {
                 this.addArgument(argument.name, argument, 'attribute');
             }
+        }
+        if (target.type === 'graph' && this._view._canMergeOnnx()) {
+            this.addSection('Actions');
+            const item = this.addProperty('merge', 'Merge ONNX Graph…');
+            item.action('\u2192', 'Open merge workspace with this model', () => {
+                this._view.startMergeWorkspace();
+            });
         }
     }
 

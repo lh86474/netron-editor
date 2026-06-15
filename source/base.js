@@ -1,6 +1,14 @@
 
+/*
+ * This file contains the base functionality for the application
+ * low-level utilities that the app depends on. 
+ * Tensor decoding for the UI, supported file extensions
+ * Analytics
+ * Binary readers for ML dtypes
+ */
 const base = {};
 
+// Complex number class
 base.Complex = class Complex {
 
     constructor(real, imaginary) {
@@ -17,6 +25,7 @@ base.Complex = class Complex {
 
 /* eslint-disable no-extend-native */
 
+// Safe conversion for protobuf int64 fields
 BigInt.prototype.toNumber = function() {
     if (this > Number.MAX_SAFE_INTEGER || this < Number.MIN_SAFE_INTEGER) {
         throw new Error(`64-bit value 0x${this.toString(16)} exceeds safe integer.`);
@@ -46,6 +55,7 @@ if (!DataView.prototype.getFloat16) {
     };
 }
 
+// Set float16 value in DataView
 if (!DataView.prototype.setFloat16) {
     DataView.prototype.setFloat16 = function(byteOffset, value, littleEndian) {
         DataView.__float16_float[0] = value;
@@ -369,6 +379,8 @@ DataView.prototype.setComplexFloat64 = DataView.prototype.setComplexFloat64 || f
 
 /* eslint-enable no-extend-native */
 
+// classes for parsing file bytes
+// buffer over Uint8Array
 base.BinaryStream = class {
 
     constructor(buffer) {
@@ -426,6 +438,7 @@ base.BinaryStream = class {
     }
 };
 
+// Factory to open streams
 base.BinaryReader = class {
 
     static open(data, littleEndian) {
@@ -436,6 +449,7 @@ base.BinaryReader = class {
     }
 };
 
+// higher-level typed readers
 base.BufferReader = class {
 
     constructor(data, littleEndian) {
@@ -682,6 +696,7 @@ base.StreamReader = class {
     }
 };
 
+// When I click a weight in sidebar: decode and display it
 base.Tensor = class {
 
     constructor(tensor) {
@@ -1249,7 +1264,7 @@ base.Tensor = class {
         }
     }
 };
-
+// Google Analytics client
 base.Telemetry = class {
 
     constructor(window) {

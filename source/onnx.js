@@ -1,5 +1,6 @@
 
 import * as protobuf from './protobuf.js';
+import './onnx-encode.js';
 
 const onnx = {};
 
@@ -48,6 +49,16 @@ onnx.Model = class {
 
     constructor(metadata, target) {
         const model = target.model;
+        // Check if the model is a valid ONNX model
+        // Now deep clones via encode/decode
+        if (target.name === 'onnx.proto' && target.encoding === 'binary' && target.type === 'model' && !target.offset && onnx.proto && onnx.proto.ModelProto && onnx.proto.ModelProto.encodeBytes) {
+            const bytes = onnx.proto.ModelProto.encodeBytes(model);
+            this._proto = onnx.proto.ModelProto.decode(protobuf.BinaryReader.open(bytes));
+        } else {
+            this._proto = model;
+        }
+        // Only exportable for ONNX files. 
+        this._exportable = target.name === 'onnx.proto' && target.encoding === 'binary' && target.type === 'model' && !target.offset;
         this._modules = [];
         this._format = target.format;
         this._producer = model.producer_name && model.producer_name.length > 0 ? model.producer_name + (model.producer_version && model.producer_version.length > 0 ? ` ${model.producer_version}` : '') : null;
@@ -119,6 +130,15 @@ onnx.Model = class {
 
     get format() {
         return this._format;
+    }
+
+    // New getters
+    get proto() {
+        return this._proto;
+    }
+
+    get exportable() {
+        return this._exportable;
     }
 
     get version() {
@@ -263,6 +283,7 @@ onnx.Value = class {
         this._initializer = initializer;
         this._description = description;
         this._quantization = annotation ? { type: 'annotation', value: annotation } : null;
+        this._metadata = [];
     }
 
     get name() {
@@ -275,6 +296,14 @@ onnx.Value = class {
 
     get description() {
         return this._description;
+    }
+
+    get metadata() {
+        return this._metadata;
+    }
+
+    set metadata(value) {
+        this._metadata = Array.isArray(value) ? value : [];
     }
 
     get quantization() {
@@ -1173,6 +1202,8 @@ onnx.Context.Graph = class extends onnx.Context {
                 const tensor = this.tensor(value.name);
                 tensor.type = this.createType(value.type);
                 tensor.description = value.doc_string;
+                const metadata_props = value.metadata_props || [];
+                tensor.metadata = metadata_props.map((metadata) => new onnx.Argument(metadata.key, metadata.value));
             }
         }
         for (const node of graph.node) {
@@ -1250,7 +1281,11 @@ onnx.Context.Graph = class extends onnx.Context {
         if (!this._values.has(name)) {
             const tensor = this.tensor(name);
             const type = tensor.initializer ? tensor.initializer.type : tensor.type || null;
-            this._values.set(name, new onnx.Value(name, type, tensor.initializer, tensor.annotation, tensor.description));
+            const value = new onnx.Value(name, type, tensor.initializer, tensor.annotation, tensor.description);
+            if (Array.isArray(tensor.metadata)) {
+                value.metadata = tensor.metadata;
+            }
+            this._values.set(name, value);
         }
         return this._values.get(name);
     }
@@ -1461,6 +1496,8 @@ onnx.AttributeType = {
     TYPE_PROTOS: 14
 };
 
+// all types of readers start here
+// protoreader is for parsing ONNX model files
 onnx.ProtoReader = class {
 
     static async open(context) {
@@ -1763,6 +1800,7 @@ onnx.ProtoReader = class {
     }
 };
 
+// ort reader is for parsing ONNX Runtime models
 onnx.OrtReader = class {
 
     static async open(context) {
@@ -1927,6 +1965,7 @@ onnx.OrtReader = class {
     }
 };
 
+// json reader is for parsing ONNX JSON models
 onnx.JsonReader = class {
 
     static async open(context) {
@@ -2039,6 +2078,7 @@ onnx.JsonReader = class {
     }
 };
 
+// text reader is for parsing ONNX Text models
 onnx.TextReader = class {
 
     static async open(context) {
@@ -2773,6 +2813,7 @@ onnx.TextReader = class {
     }
 };
 
+// pickle reader is for parsing ONNX Pickle models
 onnx.PickleReader = class {
 
     static async open(context) {

@@ -12,6 +12,17 @@ grapher.Graph = class {
         this._children = new Map();
         this._children.set('\x00', new Map());
         this._parent = new Map();
+        this._markerPrefix = '';
+    }
+
+    // added this to make sure that the IDs between the two split screens are different
+    // markerPrefix is used to prefix the IDs of the nodes and edges in the graph
+    get markerPrefix() {
+        return this._markerPrefix;
+    }
+    // values too since their IDs would clash as well
+    set markerPrefix(value) {
+        this._markerPrefix = value || '';
     }
 
     setNode(node) {
@@ -107,7 +118,8 @@ grapher.Graph = class {
         origin = origin || document.getElementById('origin');
         const createGroup = (name) => {
             const element = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-            element.setAttribute('id', name);
+            const id = this._markerPrefix ? `${this._markerPrefix}${name}` : name;
+            element.setAttribute('id', id);
             element.setAttribute('class', name);
             return element;
         };
@@ -160,9 +172,10 @@ grapher.Graph = class {
                 e.stopPropagation();
             }
         });
-        edgePathGroupDefs.appendChild(marker("arrowhead"));
-        edgePathGroupDefs.appendChild(marker("arrowhead-select"));
-        edgePathGroupDefs.appendChild(marker("arrowhead-hover"));
+        const markerId = (name) => this._markerPrefix ? `${this._markerPrefix}${name}` : name;
+        edgePathGroupDefs.appendChild(marker(markerId('arrowhead')));
+        edgePathGroupDefs.appendChild(marker(markerId('arrowhead-select')));
+        edgePathGroupDefs.appendChild(marker(markerId('arrowhead-hover')));
         for (const nodeId of this.nodes.keys()) {
             const entry = this.node(nodeId);
             const node = entry.label;
@@ -398,7 +411,22 @@ grapher.Node = class {
             block.last = i === this.blocks.length - 1;
             block.build(document, this.element);
         }
+        // to support right-click on a node to insert above / below
+        // this is a context-menu hook
+        // makes sure to override the browser's default right-click behavior
+        // sometimes, might need to disable cache developer tools to see the new context menu as old grapher.js may cache in the browser
         this.element.appendChild(this.border);
+        if (this.onContextMenu) {
+            // the trigger of the contextmenu
+            this.element.addEventListener('contextmenu', (e) => {
+                // blocks the browser's default behavior
+                e.preventDefault();
+                // no bubbling up the DOM tree
+                e.stopPropagation();
+                // executing the actual hook. 
+                this.onContextMenu(e);
+            });
+        }
     }
 
     async measure() {
@@ -584,11 +612,24 @@ grapher.Node.Header.Entry = class {
         }
         this.text.textContent = this.content || '\u00A0';
     }
-
+    // There was a bug that was fixed in measure
+    // When node headers were rebuilt during editing, getBBox() on header text gave wrong sizes
+    // x / y were hardcoded as 0, which is wrong
     measure() {
         const yPadding = 4;
         const xPadding = this.padding || 7;
+        const x = this.text.getAttribute('x');
+        const y = this.text.getAttribute('y');
+        this.text.removeAttribute('x');
+        this.text.removeAttribute('y');
         const boundingBox = this.text.getBBox();
+        if (x !== null) {
+            this.text.setAttribute('x', x);
+        }
+        if (y !== null) {
+            this.text.setAttribute('y', y);
+        }
+        // Here, we compute the width and height of the header entry
         this.width = boundingBox.width + xPadding + xPadding;
         this.height = boundingBox.height + yPadding + yPadding;
         this.tx = xPadding;

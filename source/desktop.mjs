@@ -10,9 +10,12 @@ import * as os from 'os';
 import * as path from 'path';
 import * as url from 'url';
 import * as view from './view.js';
+import { normalizeExportFilename } from './export-filename.js';
 
 const desktop = {};
-
+// Environment host for an Electron-based desktop application
+// desk.host implements an interface that he application's core logic (view.js) uses to interact
+// with the desktop environment
 desktop.Host = class {
 
     constructor() {
@@ -24,6 +27,7 @@ desktop.Host = class {
             this.exception(error, true);
             this.message(error.message);
         });
+        // eval required for security purposes. Environment details from Electron's main process
         this._global.eval = () => {
             throw new Error('eval.eval() not supported.');
         };
@@ -42,6 +46,7 @@ desktop.Host = class {
                 fs.writeFileSync(file, JSON.stringify(__coverage__));
             }
         });
+        // ask user for consent regarding cookies and telemetry
         this._environment = electron.ipcRenderer.sendSync('get-environment', {});
         this._environment.menu = this._environment.titlebar && this._environment.platform !== 'darwin';
         this._files = [];
@@ -128,6 +133,7 @@ desktop.Host = class {
                 this.set('consent', Date.now());
             }
         };
+        // Used to track usage and error reporting
         const telemetry = async () => {
             if (this._environment.packaged) {
                 const measurement_id = '848W2NVWVH';
@@ -177,6 +183,9 @@ desktop.Host = class {
         });
         electron.ipcRenderer.on('export', (sender, data) => {
             this._view.export(data.file);
+        });
+        electron.ipcRenderer.on('export-onnx', (sender, data) => {
+            this._view.exportOnnx(data.file);
         });
         electron.ipcRenderer.on('cut', () => {
             this.document.execCommand('cut');
@@ -228,8 +237,11 @@ desktop.Host = class {
         });
         electron.ipcRenderer.on('window-state', (sender, data) => {
             if (this._environment.titlebar) {
-                this._element('target').style.marginTop = '32px';
-                this._element('target').style.height = 'calc(100% - 32px)';
+                const graphContainer = this._element('diff-container') || this._element('target');
+                if (graphContainer) {
+                    graphContainer.style.marginTop = '32px';
+                    graphContainer.style.height = 'calc(100% - 32px)';
+                }
                 this._element('sidebar-title').style.marginTop = '24px';
                 this._element('sidebar-closebutton').style.marginTop = '24px';
                 this._element('titlebar').classList.add('titlebar-visible');
@@ -296,15 +308,18 @@ desktop.Host = class {
                     resolve(data.filePath);
                 }
             });
+            const suggested = normalizeExportFilename(defaultPath, extension) || `${defaultPath}.${extension}`;
             electron.ipcRenderer.send('show-save-dialog', {
-                title: 'Export Tensor',
-                defaultPath,
+                title: `Export ${name}`,
+                defaultPath: suggested,
                 buttonLabel: 'Export',
                 filters: [{ name, extensions: [extension] }]
             });
         });
     }
 
+    // This supports the export functionality of the function
+    // Note that this is not a general purpose export function, but rather a specific implementation
     async export(file, blob) {
         const window = this.window;
         const reader = new window.FileReader();
@@ -346,6 +361,7 @@ desktop.Host = class {
         return this.fetch(file, 'utf-8', null);
     }
 
+    // fetch functionality, which is used to read files from the desktop environment
     async fetch(file, encoding, basename) {
         return new Promise((resolve, reject) => {
             const dirname = path.dirname(url.fileURLToPath(import.meta.url));
@@ -356,6 +372,8 @@ desktop.Host = class {
                 reject(new Error(`The path '${pathname}' is invalid.`));
                 return;
             }
+            // fs for file system: Node.js module
+            // path for read files from hard drive
             fs.stat(pathname, (err, stat) => {
                 if (err && err.code === 'ENOENT') {
                     reject(new Error(`The file '${file}' does not exist.`));
@@ -363,6 +381,7 @@ desktop.Host = class {
                     reject(err);
                 } else if (!stat.isFile()) {
                     reject(new Error(`The path '${file}' is not a file.`));
+                // Check the file size. Handle small sizes by reading the file into memory
                 } else if (stat && stat.size < 0x40000000) {
                     fs.readFile(pathname, encoding, (err, data) => {
                         if (err) {
@@ -373,6 +392,7 @@ desktop.Host = class {
                     });
                 } else if (encoding) {
                     reject(new Error(`The file '${file}' size (${stat.size.toString()}) for encoding '${encoding}' is greater than 2 GB.`));
+                // This is if the file is too large to read into memory. Prevent freezing / crashing
                 } else {
                     const stream = new node.FileStream(pathname, 0, stat.size, stat.mtimeMs);
                     resolve(stream);
@@ -633,6 +653,8 @@ desktop.Host = class {
     }
 };
 
+// encapsulate the data of a specific file or folder the user has opened
+// file stream, identifier
 desktop.Context = class {
 
     constructor(host, folder, identifier, stream, entries) {
@@ -672,7 +694,33 @@ desktop.Context = class {
     }
 };
 
+const getEditorDebugState = () => {
+    if (window.__view__ && typeof window.__view__.debugEditorState === 'function') {
+        return window.__view__.debugEditorState();
+    }
+    return {
+        enabled: false,
+        error: window.__view__ ? 'debugEditorState unavailable' : 'view not ready',
+        modelFormat: null,
+        graphCount: 0,
+        nodeCount: 0,
+        activePane: 'modified',
+        panes: {
+            original: { nodeCount: 0, edgeCount: 0, zoom: 1, rendered: false },
+            modified: { nodeCount: 0, edgeCount: 0, zoom: 1, rendered: false }
+        },
+        delta: [],
+        aggregateStates: {}
+    };
+};
+
 if (typeof window !== 'undefined') {
+    electron.contextBridge.exposeInMainWorld('netronDebug', {
+        editorState: () => getEditorDebugState()
+    });
+    electron.contextBridge.exposeInMainWorld('debugEditorState', () => getEditorDebugState());
+    electron.contextBridge.exposeInMainWorld('_debugEditorState', () => getEditorDebugState());
+    electron.contextBridge.exposeInMainWorld('__debugEditorState', () => getEditorDebugState());
     window.addEventListener('load', () => {
         const value = new desktop.Host();
         window.__view__ = new view.View(value);

@@ -5,6 +5,10 @@ const dagre = {};
 // https://github.com/dagrejs/dagre
 // https://github.com/dagrejs/graphlib
 
+// Core logic for laying out directed graphs using Dagre library
+// Also includes dagre.Graph class def, which represents a grpah data structure
+// dagre.layout takes an array of nodes, edges, layout, and a state object. 
+// modifies it to calculate positions and dimensions
 dagre.layout = (nodes, edges, layout, state) => {
 
     let uniqueIdCounter = 0;

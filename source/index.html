@@ -19,13 +19,65 @@
 html { touch-action: none; overflow: hidden; width: 100%; height: 100%; -ms-text-size-adjust: 100%; -webkit-text-size-adjust: 100%; text-rendering: optimizeLegibility; -webkit-text-rendering: optimizeLegibility; -moz-text-rendering: optimizeLegibility; -ms-text-rendering: optimizeLegibility; -o-text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-font-smoothing: antialiased; -ms-font-smoothing: antialiased; -o-font-smoothing: antialiased; }
 body { touch-action: none; overflow: hidden; width: 100%; height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 12px; text-rendering: geometricPrecision; }
 button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; }
+:root { --chrome-height: 32px; --chrome-inset: 8px; --chrome-width: 32px; }
 .center { position: absolute; margin: auto; top: 0; right: 0; bottom: 0; left: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .select { user-select: text; -webkit-user-select: text; -moz-user-select: text; }
+.diff-container { display: flex; height: 100%; width: 100%; }
+.graph-pane { display: flex; flex: 1; height: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; position: relative; }
+.graph-pane-label { position: absolute; top: 0px; height: var(--chrome-height); display: flex; align-items: center; left: var(--chrome-inset); z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
+.graph-pane-original { border-right: 1px solid #ccc; }
+.graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
+.graph-pane-readonly { cursor: default; }
+.pane-divider { width: 0; flex-shrink: 0; }
+.merge-container { display: none; flex-direction: column; height: 100%; width: 100%; overflow: hidden; }
+.merge-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #ccc; flex-shrink: 0; }
+.merge-title { font-size: 14px; font-weight: 600; margin-left: 36px; position: relative; top: -5.5px;}
+.merge-toolbar { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #ccc; flex-shrink: 0; }
+.merge-slot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.merge-slot-name { min-width: 140px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #555; }
+.merge-role-badge { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; background: #eee; color: #888; }
+.merge-role-badge.merge-role-active { background: #dfe8ff; color: #204080; }
+.merge-role-badge.merge-role-downstream { background: #e8f5e9; color: #1b5e20; }
+.merge-action-button { font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid #888; background: #f5f5f5; cursor: pointer; }
+.merge-action-button:hover { background: #ececec; }
+.merge-action-button:disabled { opacity: 0.45; cursor: default; }
+.merge-mapping-strip { flex-shrink: 0; border-bottom: 1px solid #ccc; padding: 8px 12px; max-height: 220px; overflow: auto; }
+.merge-mapping-strip h2 { margin: 0 0 8px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #666; }
+.merge-mapping-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.merge-mapping-table th, .merge-mapping-table td { padding: 4px 8px; border-bottom: 1px solid #e0e0e0; text-align: left; vertical-align: middle; }
+.merge-mapping-table th { color: #666; font-weight: 600; }
+.merge-mapping-select { min-width: 160px; max-width: 240px; font-size: 12px; padding: 2px 4px; }
+.merge-validation-summary { margin-top: 8px; font-size: 12px; white-space: pre-wrap; color: #444; }
+.merge-validation-summary.merge-summary-ready { color: #1b5e20; }
+.merge-validation-summary.merge-summary-warning { color: #7a5b00; }
+.merge-validation-summary.merge-summary-error { color: #b00020; }
+.merge-validation-summary.merge-summary-pending { color: #666; }
+.merge-mapping-table tr.merge-mapping-row-error { background: #fdecea; }
+.merge-mapping-table tr.merge-mapping-row-warning { background: #fff8e1; }
+.merge-status-ok { color: #1b5e20; font-weight: 700; }
+.merge-status-warning { color: #9a6700; font-weight: 700; }
+.merge-status-error { color: #b00020; font-weight: 700; }
+.merge-graph-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.merge-source-row { display: none; flex: 1; min-height: 0; flex-direction: row; overflow: hidden; }
+.merge-graph-area.show-source-graphs .merge-source-row { display: flex; }
+.merge-source-pane { flex: 1; min-width: 0; min-height: 0; overflow: auto; position: relative; border-bottom: 1px solid #ccc; }
+.merge-upstream-pane { border-right: 1px solid #ccc; }
+.merge-preview-pane { display: flex; flex: 1; min-height: 0; overflow: auto; position: relative; }
+.merge-graph-area.show-source-graphs .merge-preview-pane { flex: 1.2; min-height: 35%; }
+.merge-source-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; user-select: none; }
+.merge-source-toggle input { margin: 0; }
+.merge-footer { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 12px; border-top: 1px solid #ccc; flex-shrink: 0; }
+.merge-workspace .diff-container { display: none !important; opacity: 0; }
+.merge-workspace .toolbar { display: none; }
+.merge-workspace .logo { display: none; }
+.merge-workspace .merge-container { display: flex; opacity: 1; }
+.merge-workspace .merge-graph-area .graph-pane { display: flex; opacity: 1; }
 .target { display: flex; height: 100%; width: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; }
 .canvas { margin: auto; flex-shrink: 0; text-rendering: geometricPrecision; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .open-file-dialog { display: none; }
 .default { background-color: #ffffff; }
 .default .logo { display: none; }
+.default .diff-container { display: flex; opacity: 1; }
 .default .target { display: flex; opacity: 1; }
 .default .toolbar { display: flex; }
 .toolbar { display: flex; align-items: center; position: absolute; bottom: 10px; left: 10px; padding: 0; margin: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
@@ -49,12 +101,21 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .toolbar-icon .fill { fill: #808080; }
 .toolbar-icon:hover .stroke { stroke: #000000; }
 .toolbar-icon:hover .fill { fill: #000000; }
+.toolbar-button.active .toolbar-icon .stroke { stroke: #000000; }
+.toolbar-button.active .toolbar-icon .fill { fill: #000000; }
 .message { display: none; opacity: 0; position: absolute; top: 0; left: 0; width: 100%; height: 100%; flex-direction: column; justify-content: flex-start; }
 .message-text { display: inline; text-align: center; width: 562px; font-size: 13px; line-height: 20px; margin-top: 50vh; padding-top: 56px; padding-bottom: 20px; margin-left: auto; margin-right: auto; user-select: text; -webkit-user-select: text; -moz-user-select: text; }
 .welcome .message-text a { text-decoration: none; color: #666666; }
 .welcome .message-text a:visited { color: inherit; }
 .welcome .message-text a:hover { color: #242424; text-decoration: underline; }
 .message-button { display: inline; text-align: center; width: 125px; margin-left: auto; margin-right: auto; }
+.save-dialog { display: none; position: fixed; inset: 0; z-index: 1002; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.35); }
+.save-dialog-panel { background-color: #ececec; border: 1px solid #cccccc; border-radius: 8px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2); padding: 16px 20px; min-width: 320px; max-width: 90vw; }
+.save-dialog-title { font-size: 13px; font-weight: bold; margin-bottom: 10px; text-align: center; }
+.save-dialog-input { display: block; width: 100%; box-sizing: border-box; font-size: 13px; padding: 6px 8px; border: 1px solid #cccccc; border-radius: 4px; margin-bottom: 12px; }
+.save-dialog-buttons { display: flex; gap: 8px; justify-content: center; }
+.save-dialog-buttons .logo-button { width: auto; min-width: 90px; height: auto; padding: 6px 14px; font-size: 12px; }
+.save-dialog-open .toolbar { display: none; }
 .logo-text { top: -57px; width: 582px; transition: 0.1s; }
 .logo-name { top: -170px; width: 582px; transition: 0.1s; }
 .logo-icon { left: 248px; top: -18px; width: 106px; height: 106px; transition: 0.1s; }
@@ -68,16 +129,19 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .logo-button:focus { outline: 0; }
 .logo-message { display: none; height: 0px; }
 .logo-github { display: none; }
+.merge-onnx-button { top:245px; left: 0px; width: 10.5em; }
 .open-file-button { top: 170px; left: 0px; width: 10.5em; }
 .progress { top: 120px; height: 2px; width: 400px; }
 .progress-bar { height: 100%; width: 0%; background-color: #444444; }
 .notification .logo-name { display: none; }
 .notification .open-file-button { display: none; }
+.notification .merge-onnx-button { display: none; }
 .notification .progress { display: none; }
 .welcome body { background-color: #ececec; }
 .welcome { background-color: #ececec; color: #242424; }
 .welcome .message-text { display: none; opacity: 0; }
 .welcome .message-button { display: none; opacity: 0; }
+.welcome .diff-container { display: none; opacity: 0; }
 .welcome .target { display: none; opacity: 0; }
 .welcome .menu { background-color: #ffffff; }
 .welcome.spinner .logo-spinner { display: block; -webkit-animation: orbit 0.5s infinite linear; animation: orbit 0.5s infinite linear; cursor: wait; }
@@ -88,6 +152,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .notification .message-text { display: inline; opacity: 1; }
 .notification .message-button { display: inline; opacity: 1; }
 .alert { background-color: #ececec; color: #242424; }
+.alert .diff-container { display: none; opacity: 0; }
 .alert .target { display: none; opacity: 0; }
 .alert .toolbar { display: none; opacity: 0; }
 .alert .menu { display: none; opacity: 0; }
@@ -108,6 +173,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .about .notification { display: none; }
 .about .progress { display: none; }
 .about .menu-button { display: none; }
+.about .merge-onnx-button { display: none; }
 .titlebar { color: #aaaaaa; display: none; height: 32px; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; -webkit-app-region: drag; }
 .titlebar-visible { display: block; }
 .titlebar-content { display: block; padding: 0 142px; height: 100%; text-align: center; font-size: 14px; line-height: 32px; transition: all .1s ease-in-out; user-select: none; }
@@ -120,7 +186,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .titlebar-button { display: flex; justify-content: center; align-items: center; width: 46px; height: 32px; user-select: none; -webkit-app-region: no-drag; }
 .titlebar-button:hover { color: #000000; background-color: rgba(0, 0, 0, 0.15); }
 .titlebar-button-close:hover { color: #ffffff; background-color: #b43029; }
-.menu-button { display: flex; justify-content: center; align-items: center; color: #aaaaaa; font-size: 20px; height: 32px; width: 32px; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; -webkit-app-region: no-drag; -webkit-app-region: no-drag; user-select: none; }
+.menu-button { display: flex; justify-content: center; align-items: center; color: #aaaaaa; font-size: 20px; height: 32px; width: 32px; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; -webkit-app-region: no-drag; -webkit-app-region: no-drag; user-select: none; transform: translateY(-2px); }
 .menu-button:hover { color: #000000; }
 .menu { display: block; position: absolute; left: -17em; width: 17em; top: 0; height: 100%; z-index: 2; background-color: #ececec; border-right: 1px solid rgba(255, 255, 255, 0.5); padding-top: 40px; padding-bottom: 2px; margin-left: 0; margin-top: 0; overflow: hidden; transition: 0.1s; }
 .menu .menu-group { margin-bottom: 12px; }
@@ -131,19 +197,56 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .menu .menu-group .menu-command .menu-label { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .menu .menu-group .menu-command .menu-shortcut { display: block; float: right; margin-left: 25px; color: #888888; }
 .menu .menu-group .menu-separator { border-top: 1px; border-bottom: 0; border-style: solid; border-color: #e5e5e5; margin-left: 12px; margin-right: 12px; }
+.graph-context-menu { position: fixed; z-index: 1000; min-width: 160px; background-color: #ececec; border: 1px solid #cccccc; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); padding: 4px 0; }
+.graph-context-menu-item { display: block; border: none; border-radius: 0; background-color: transparent; color: #000000; width: 100%; text-align: left; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+.graph-context-menu-item:hover, .graph-context-menu-item:focus { color: #ffffff; background-color: #2e6bd2; outline: none; }
+.graph-context-menu-item:disabled { color: #888888; cursor: default; }
+.graph-context-menu-item:disabled:hover, .graph-context-menu-item:disabled:focus { color: #888888; background-color: transparent; }
+.graph-context-menu-separator { border-top: 1px solid #cccccc; margin: 4px 0; }
+.operator-picker { position: fixed; z-index: 1001; width: 280px; background-color: #ececec; border: 1px solid #cccccc; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); padding: 8px; }
+.operator-picker-query { display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px; border: 1px solid #cccccc; margin-bottom: 6px; }
+.operator-picker-list { max-height: 300px; overflow-y: auto; }
+.operator-picker-item { display: block; border: none; border-radius: 0; background-color: transparent; color: #000000; width: 100%; text-align: left; padding: 4px 8px; font-size: 12px; cursor: pointer; }
+.operator-picker-item:hover, .operator-picker-item:focus { color: #ffffff; background-color: #2e6bd2; outline: none; }
 .about .titlebar-visible { opacity: 0; }
 @-webkit-keyframes orbit { 0% { -webkit-transform: rotate(0deg); transform: rotate(0deg); } 100% { -webkit-transform: rotate(360deg); transform: rotate(360deg); } }
 @keyframes orbit { 0% { -webkit-transform: rotate(0deg); transform: rotate(0deg); }  100% { -webkit-transform: rotate(360deg); transform: rotate(360deg); } }
 .welcome.spinner .logo-spinner-stroke { stroke: #ececec; }
 .welcome.spinner .logo-name { display: none; }
 .welcome.spinner .open-file-button { display: none; }
+.welcome.spinner .diff-container { display: flex; opacity: 0; }
 .welcome.spinner .target { display: flex; opacity: 0; }
+.welcome.spinner .merge-onnx-button { display: none; } 
 .welcome .notification .logo-name { display: none; }
 .welcome .toolbar { display: none; }
 @media (prefers-color-scheme: dark) {
-:root { color-scheme: dark; }
 .default { background-color: #404040; }
+.diff-container { background-color: #404040; }
+.graph-pane { background-color: #404040; }
 .target { background-color: #404040; }
+.graph-pane-original { border-right-color: #555; }
+.merge-container { background-color: #404040; color: #e0e0e0; }
+.merge-header, .merge-toolbar, .merge-mapping-strip, .merge-footer { border-color: #555; }
+.merge-slot-name { color: #bbb; }
+.merge-role-badge { background: #333; color: #888; }
+.merge-role-badge.merge-role-active { background: #2a3f66; color: #b8cff5; }
+.merge-role-badge.merge-role-downstream { background: #264028; color: #b9e4bc; }
+.merge-action-button { border-color: #666; background: #333; color: #eee; }
+.merge-action-button:hover { background: #444; }
+.merge-mapping-table th, .merge-mapping-table td { border-color: #555; }
+.merge-mapping-table th { color: #aaa; }
+.merge-mapping-select { background: #2d2d2d; color: #eee; border: 1px solid #555; }
+.merge-validation-summary { color: #ccc; }
+.merge-validation-summary.merge-summary-ready { color: #b9e4bc; }
+.merge-validation-summary.merge-summary-warning { color: #e6c76a; }
+.merge-validation-summary.merge-summary-error { color: #f5a8a8; }
+.merge-validation-summary.merge-summary-pending { color: #aaa; }
+.merge-mapping-table tr.merge-mapping-row-error { background: #4a2a2a; }
+.merge-mapping-table tr.merge-mapping-row-warning { background: #4a4020; }
+.merge-preview-pane { background-color: #404040; }
+.merge-source-pane { background-color: #404040; border-bottom-color: #555; }
+.merge-upstream-pane { border-right-color: #555; }
+.merge-source-toggle { color: #ccc; }
 .welcome { background-color: #1e1e1e; color: #888888; }
 .alert { background-color: #1e1e1e; color: #888888; }
 .logo-stroke { stroke: #888888; }
@@ -166,6 +269,8 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .toolbar-icon .fill { fill: #aaaaaa; }
 .toolbar-icon:hover .stroke { stroke: #dfdfdf; }
 .toolbar-icon:hover .fill { fill: #dfdfdf; }
+.toolbar-button.active .toolbar-icon .stroke { stroke: #dfdfdf; }
+.toolbar-button.active .toolbar-icon .fill { fill: #dfdfdf; }
 .toolbar-path-back-button { background: #aaaaaa; border-color: #aaaaaa; color: #333333; }
 .toolbar-path-back-button:hover { background: #dfdfdf; border-color: #dfdfdf; }
 .toolbar-path-name-button { background: #aaaaaa ; border-color: #aaaaaa; color: #404040; }
@@ -188,6 +293,18 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .menu .menu-group .menu-command:disabled { color: #888888; }
 .menu .menu-group .menu-command .shortcut { color: #888888; }
 .menu .menu-group .menu-separator { border-color: #363636; }
+.graph-context-menu { background-color: #2d2d2d; border-color: #444444; }
+.graph-context-menu-item { color: #ffffff; }
+.graph-context-menu-item:hover, .graph-context-menu-item:focus { color: #ffffff; background-color: #2e6bd2; }
+.graph-context-menu-item:disabled { color: #666666; }
+.graph-context-menu-item:disabled:hover, .graph-context-menu-item:disabled:focus { color: #666666; background-color: transparent; }
+.graph-context-menu-separator { border-color: #444444; }
+.save-dialog-panel { background-color: #2d2d2d; border-color: #444444; color: #ffffff; }
+.save-dialog-input { background-color: #1e1e1e; color: #ffffff; border-color: #444444; }
+.operator-picker { background-color: #2d2d2d; border-color: #444444; }
+.operator-picker-query { background-color: #1e1e1e; color: #ffffff; border-color: #444444; }
+.operator-picker-item { color: #ffffff; }
+.operator-picker-item:hover, .operator-picker-item:focus { color: #ffffff; background-color: #2e6bd2; }
 }
 @media all and (max-width: 640px) {
 .logo { width: 240px; }
@@ -201,6 +318,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .about .logo { width: 100%; padding-left: 0; padding-right: 0; }
 .about .logo-message { top: 175px; font-size: 12px; }
 .about .logo-github { top: 370px; }
+.merge-onnx-button { top: 280px; }
 }
 .sidebar { display: flex; flex-direction: column; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 12px; height: 100%; right: -100%; position: fixed; transition: 0.1s; top: 0; background-color: #ececec; color: #242424; overflow: hidden; border-left: 1px solid rgba(255, 255, 255, 0.5); opacity: 0; }
 .sidebar-title { font-weight: bold; font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase; height: 20px; margin: 0; padding: 20px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
@@ -213,6 +331,15 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .sidebar-item { margin-bottom: 0px; display: block; }
 .sidebar-item-name { float: left; font-size: 11px; min-width: 95px; max-width: 95px; padding-right: 5px; padding-top: 7px; display: block; }
 .sidebar-item-name input { color: #777; font-family: inherit; font-size: inherit; color: inherit; background-color: inherit; width: 100%; text-align: right; margin: 0; padding: 0; border: 0; outline: none; text-overflow: ellipsis; }
+.sidebar-editable-input { font-family: inherit; font-size: 11px; color: inherit; background-color: #fff; width: 100%; margin: 0; padding: 2px 4px; border: 1px solid #ccc; border-radius: 2px; outline: none; box-sizing: border-box; }
+.sidebar-editable-add-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; margin-bottom: 12px; }
+.sidebar-editable-add-row .sidebar-editable-input { flex: 1 1 120px; }
+.sidebar-add-button { font-family: inherit; font-size: 11px; padding: 4px 10px; border: 1px solid #ccc; border-radius: 3px; background: #f4f4f4; cursor: pointer; }
+.sidebar-add-button:hover { background: #e8e8e8; }
+.sidebar-editable-attribute-row { display: flex; gap: 4px; align-items: center; }
+.sidebar-editable-attribute-row .sidebar-editable-input { flex: 1 1 auto; }
+.sidebar-delete-button { font-family: inherit; font-size: 14px; line-height: 1; padding: 2px 6px; border: 1px solid #ccc; border-radius: 3px; background: #f4f4f4; cursor: pointer; color: #a33; }
+.sidebar-delete-button:hover { background: #fde8e8; }
 .sidebar-item-value-list { margin: 0; margin-left: 105px; overflow: hidden; display: block; padding: 0; }
 .sidebar-item-value { font-size: 11px; background-color: #fcfcfc; border-radius: 2px; border: 1px solid #fcfcfc; margin-top: 3px; margin-bottom: 3px; overflow: auto; }
 .sidebar-item-value-content { background-color: #f8f8f8; border: 1px solid #f8f8f8; }
@@ -252,7 +379,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .sidebar-find-toggle input[type="checkbox"] { display: none; }
 .sidebar-find-toggle input[type="checkbox"]:not(:checked) + svg { fill: #ccc; stroke: #ccc; }
 .sidebar-find-toggle input[type="checkbox"]:checked + svg { fill: #555; stroke: #555; }
-.sidebar-find-toggle-icon { stroke: #555; fill: #555; width: 16px; height: 16px; }
+.sidebar-find-toggle-icon { stroke: #555; fill: #555; width: 16px; height: 16px; bottom: 2px; }
 .sidebar-find-content { flex-grow: 1; padding: 0px 20px 20px 20px; overflow-y: auto; list-style-type: none; margin: 0; outline: 0; }
 .sidebar-find-content li *:first-child { margin-right: 2px; }
 .sidebar-find-content li { color: #666; font-size: 13px; height: 22px; line-height: 22px; padding: 0 12px 0 12px; outline: 0; white-space: nowrap; border-radius: 3px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
@@ -277,6 +404,11 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
     .sidebar { background-color: #2d2d2d; color: #dfdfdf; border-left: 1px solid rgba(0, 0, 0, 0); }
     .sidebar-closebutton { padding: 8px 8px 8px 32px; text-decoration: none; font-size: 25px; color: #777777; opacity: 1.0; display: block; transition: 0.2s; position: absolute; top: 0; right: 15px; margin-left: 50px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
     .sidebar-closebutton:hover { color: #ffffff; }
+    .sidebar-editable-input { background-color: #2d2d2d; border-color: #555; color: #dfdfdf; }
+    .sidebar-add-button { background: #383838; border-color: #555; color: #dfdfdf; }
+    .sidebar-add-button:hover { background: #444; }
+    .sidebar-delete-button { background: #383838; border-color: #555; color: #f88; }
+    .sidebar-delete-button:hover { background: #4a3030; }
     .sidebar-item-value { background-color: #383838; border-color: #383838; }
     .sidebar-item-value-content { background-color: #3e3e3e; border-color: #3e3e3e; }
     .sidebar-item-value-line-border { border-color: rgba(0, 0, 0, 0.09); }
@@ -309,7 +441,74 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 </style>
 </head>
 <body class="welcome spinner">
-<div id="target" class="target" tabindex="0">
+<div id="diff-container" class="diff-container">
+    <div id="target-original" class="graph-pane graph-pane-original graph-pane-readonly target" tabindex="0">
+        <div class="graph-pane-label">Original</div>
+    </div>
+    <div id="pane-divider" class="pane-divider"></div>
+    <div id="target-modified" class="graph-pane graph-pane-modified target" tabindex="0">
+        <div class="graph-pane-label">Modified</div>
+    </div>
+</div>
+<div id="merge-container" class="merge-container">
+    <div class="merge-header">
+        <div class="merge-title">Merge ONNX Graphs</div>
+        <button id="merge-cancel-button" class="merge-action-button" type="button">Cancel</button>
+    </div>
+    <div class="merge-toolbar">
+        <div class="merge-slot">
+            <span>Model A:</span>
+            <span id="merge-slot-a-name" class="merge-slot-name">No model loaded</span>
+            <button id="merge-slot-a-browse" class="merge-action-button" type="button">Browse…</button>
+            <span id="merge-slot-a-role" class="merge-role-badge"></span>
+        </div>
+        <div class="merge-slot">
+            <span>Model B:</span>
+            <span id="merge-slot-b-name" class="merge-slot-name">No model loaded</span>
+            <button id="merge-slot-b-browse" class="merge-action-button" type="button">Browse…</button>
+            <span id="merge-slot-b-role" class="merge-role-badge"></span>
+        </div>
+        <button id="merge-swap-roles-button" class="merge-action-button" type="button" disabled>Swap roles</button>
+        <label id="merge-show-source-graphs-label" class="merge-source-toggle">
+            <input type="checkbox" id="merge-show-source-graphs" disabled>
+            Show source graphs
+        </label>
+    </div>
+    <div class="merge-mapping-strip">
+        <h2>Connection mapping</h2>
+        <table class="merge-mapping-table">
+            <thead>
+                <tr>
+                    <th>Downstream input</th>
+                    <th>Type</th>
+                    <th>Upstream output</th>
+                    <th>Upstream type</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="merge-mapping-body"></tbody>
+        </table>
+        <div id="merge-validation-summary" class="merge-validation-summary">Load both models to detect merge direction.</div>
+    </div>
+    <div id="merge-graph-area" class="merge-graph-area">
+        <div id="merge-source-row" class="merge-source-row">
+            <div id="merge-upstream-pane" class="graph-pane merge-source-pane merge-upstream-pane graph-pane-readonly" tabindex="0">
+                <div class="graph-pane-label">Upstream</div>
+            </div>
+            <div id="merge-downstream-pane" class="graph-pane merge-source-pane merge-downstream-pane graph-pane-readonly" tabindex="0">
+                <div class="graph-pane-label">Downstream</div>
+            </div>
+        </div>
+        <div id="merge-preview-pane" class="graph-pane merge-preview-pane graph-pane-readonly" tabindex="0">
+            <div class="graph-pane-label">Merged preview</div>
+        </div>
+    </div>
+    <div class="merge-footer">
+        <button id="merge-export-button" class="merge-action-button" type="button" disabled>Export merged…</button>
+        <button id="merge-open-button" class="merge-action-button" type="button" disabled>Open merged</button>
+    </div>
+    <input type="file" id="merge-slot-a-file-dialog" class="open-file-dialog" accept=".onnx">
+    <input type="file" id="merge-slot-b-file-dialog" class="open-file-dialog" accept=".onnx">
 </div>
 <div id="sidebar" class="sidebar">
     <h1 id="sidebar-title" class="sidebar-title"></h1>
@@ -359,6 +558,20 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
             <circle class="stroke" cx="50" cy="50" r="35" stroke-width="4"></circle>
             <line class="stroke" x1="38" y1="50" x2="62" y2="50" stroke-width="4" stroke-linecap="round"></line>
             <line class="stroke" x1="78" y1="78" x2="82" y2="82" stroke-width="8" stroke-linecap="square"></line>
+        </svg>
+    </button>
+    <button id="sync-scroll-button" class="toolbar-button" title="Sync Scroll" aria-pressed="false">
+        <svg class="toolbar-icon" viewbox="0 0 100 100">
+            <rect class="border" x="12" y="28" width="20" height="44" rx="4" ry="4" stroke-width="6"></rect>
+            <rect class="border" x="68" y="28" width="20" height="44" rx="4" ry="4" stroke-width="6"></rect>
+            <line class="border" x1="36" y1="50" x2="60" y2="50" stroke-width="6" stroke-linecap="round" stroke="#fff"></line>
+            <polyline class="border" points="36,50 44,44 44,56" stroke-width="6" stroke-linejoin="round" fill="none" stroke="#fff"></polyline>
+            <polyline class="border" points="60,50 52,44 52,56" stroke-width="6" stroke-linejoin="round" fill="none" stroke="#fff"></polyline>
+            <rect class="stroke" x="12" y="28" width="20" height="44" rx="4" ry="4" stroke-width="3" fill="none"></rect>
+            <rect class="stroke" x="68" y="28" width="20" height="44" rx="4" ry="4" stroke-width="3" fill="none"></rect>
+            <line class="stroke" x1="36" y1="50" x2="60" y2="50" stroke-width="3" stroke-linecap="round"></line>
+            <polyline class="stroke" points="36,50 44,44 44,56" stroke-width="3" stroke-linejoin="round" fill="none"></polyline>
+            <polyline class="stroke" points="60,50 52,44 52,56" stroke-width="3" stroke-linejoin="round" fill="none"></polyline>
         </svg>
     </button>
     <button id="sidebar-model-button" class="toolbar-button" title="Model Properties">
@@ -551,6 +764,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
         </svg>
     </a>
     <button id="open-file-button" class="center logo-button open-file-button" tabindex="0">Open Model&hellip;</button>
+    <button id="merge-onnx-button" class="center logo-button merge-onnx-button" tabindex="0">Merge Two ONNX Graphs&hellip;</button>
     <div class="center progress">
         <div id="progress-bar" class="progress-bar"></div>
     </div>
@@ -563,6 +777,16 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 <div id="message" class="message">
     <div id="message-text" class="message-text"></div>
     <button id="message-button" class="logo-button message-button" tabindex="0">OK</button>
+</div>
+<div id="save-dialog" class="save-dialog">
+    <div class="save-dialog-panel">
+        <div id="save-dialog-title" class="save-dialog-title"></div>
+        <input id="save-dialog-input" class="save-dialog-input" type="text" spellcheck="false">
+        <div class="save-dialog-buttons">
+            <button id="save-dialog-cancel" class="logo-button" type="button">Cancel</button>
+            <button id="save-dialog-confirm" class="logo-button" type="button">Export</button>
+        </div>
+    </div>
 </div>
 <div id="titlebar" class="titlebar">
     <svg style="position: absolute; width: 0px; height: 0px; overflow: hidden;" aria-hidden="true">

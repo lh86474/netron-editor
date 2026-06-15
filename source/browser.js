@@ -1,8 +1,12 @@
-
+/*
+ * Browser-side host for a web app
+ */
 import * as base from './base.js';
+import { normalizeExportFilename } from './export-filename.js';
 
 const browser = {};
-
+// Disables window.eval() to prevent cross-scripting (XSS) attacks
+// Determine app version, deployment date, platform, scrape <meta>
 browser.Host = class {
 
     constructor() {
@@ -10,6 +14,7 @@ browser.Host = class {
         this._navigator = window.navigator;
         this._document = window.document;
         this._telemetry = new base.Telemetry(this._window);
+        this._saveFileHandle = null;
         this._window.eval = () => {
             throw new Error('window.eval() not supported.');
         };
@@ -144,6 +149,7 @@ browser.Host = class {
         await capabilities();
     }
 
+    // route the app to the appropriate view based on the URL
     async start() {
         if (this._meta.file) {
             const [url] = this._meta.file;
@@ -234,10 +240,101 @@ browser.Host = class {
     }
 
     async save(name, extension, defaultPath) {
-        return `${defaultPath}.${extension}`;
+        const suggestedName = normalizeExportFilename(defaultPath, extension) || `${defaultPath}.${extension}`;
+        const window = this.window;
+        this._saveFileHandle = null;
+        if (typeof window.showSaveFilePicker === 'function') {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName,
+                    types: [{
+                        description: name,
+                        accept: { 'application/octet-stream': [`.${extension}`] }
+                    }]
+                });
+                this._saveFileHandle = handle;
+                return handle.name;
+            } catch (error) {
+                if (error && error.name === 'AbortError') {
+                    return null;
+                }
+            }
+        }
+        return this._promptSaveFilename(name, extension, defaultPath);
+    } 
+
+    async _promptSaveFilename(name, extension, defaultPath) {
+        const document = this.document;
+        const window = this.window;
+        const dialog = this._element('save-dialog');
+        const title = this._element('save-dialog-title');
+        const input = this._element('save-dialog-input');
+        const confirm = this._element('save-dialog-confirm');
+        const cancel = this._element('save-dialog-cancel');
+        if (!dialog || !title || !input || !confirm || !cancel) {
+            const fallback = window.prompt(`Export ${name}`, defaultPath);
+            if (fallback === null) {
+                return null;
+            }
+            return normalizeExportFilename(fallback, extension);
+        }
+        return new Promise((resolve) => {
+            const previousClass = document.body.getAttribute('class');
+            const cleanup = () => {
+                confirm.onclick = null;
+                cancel.onclick = null;
+                input.onkeydown = null;
+                document.body.setAttribute('class', previousClass || 'default');
+                dialog.style.display = 'none';
+            };
+            title.textContent = `Export ${name}`;
+            input.value = defaultPath;
+            dialog.style.display = 'flex';
+            document.body.setAttribute('class', 'save-dialog-open');
+            const finish = (value) => {
+                cleanup();
+                resolve(value);
+            };
+            confirm.onclick = () => {
+                finish(normalizeExportFilename(input.value, extension));
+            };
+            cancel.onclick = () => {
+                finish(null);
+            };
+            input.onkeydown = (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    finish(normalizeExportFilename(input.value, extension));
+                } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    finish(null);
+                }
+            };
+            window.setTimeout(() => {
+                input.focus();
+                input.select();
+            }, 0);
+        });
     }
 
-    async export(file, blob) {
+   async export(file, blob) {
+        const handle = this._saveFileHandle;
+        this._saveFileHandle = null;
+        if (handle && typeof handle.createWritable === 'function') {
+            try {
+                const writable = await handle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+                return;
+            } catch (error) {
+                await this.message(
+                    error && error.message ? error.message : 'Failed to write export file.',
+                    true,
+                    'OK'
+                );
+                return;
+            }
+        }
         const window = this.window;
         const document = this.document;
         const element = document.createElement('a');
@@ -248,7 +345,7 @@ browser.Host = class {
         element.click();
         document.body.removeChild(element);
         window.URL.revokeObjectURL(url);
-    }
+    } 
 
     async execute(name /*, value */) {
         switch (name) {
@@ -461,6 +558,7 @@ browser.Host = class {
         return await this._openContext(context);
     }
 
+    // Wrap HTML5 filereader API to open files from the user's system
     async _open(file, files) {
         this._view.show('welcome spinner');
         const context = new browser.BrowserFileContext(this, file, files);
@@ -674,6 +772,7 @@ browser.BrowserFileContext = class {
                             const slice = blob.slice(position, Math.min(position + size, blob.size));
                             reader.readAsArrayBuffer(slice);
                         } else {
+                            // implement chunking
                             const stream = new browser.FileStream(chunks, size, 0, position);
                             resolve(stream);
                         }
@@ -829,6 +928,7 @@ browser.FileStream = class {
     }
 };
 
+// Handle remote files fetched over the network
 browser.Context = class {
 
     constructor(host, url, identifier, name, stream) {
