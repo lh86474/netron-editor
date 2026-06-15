@@ -1,13 +1,21 @@
-
+/*
+ * This file is between model-merge.js and merge-workspace.js, it's used to manage the merge session
+ * it has the following classes:
+ * 1. MergeSession
+ * 2. createMergeSession
+ * Author: Luray He
+ */
 import { detectMergeRoles, validateMerge } from './model-merge.js';
 
+// cloneMapping is used to clone the mapping
+// Shallow copy of the mapping
 const cloneMapping = (mapping) => {
     return Array.isArray(mapping) ? mapping.map((entry) => ({
         upstream: entry.upstream,
         downstream: entry.downstream
     })) : [];
 };
-
+// emptyValidation is used to create an empty validation
 const emptyValidation = () => ({
     ok: false,
     errors: [],
@@ -23,6 +31,8 @@ const emptyRoleDetection = () => ({
     warnings: []
 });
 
+// The merge session 
+// the merge session manages the logic behind the merge workspace
 export class MergeSession {
 
     constructor(options = {}) {
@@ -40,7 +50,7 @@ export class MergeSession {
     getSlot(slot) {
         return slot === 'A' ? this.slotA : slot === 'B' ? this.slotB : null;
     }
-
+    // the slot model is used to set the model for a given slot
     setSlotModel(slot, entry) {
         if (slot !== 'A' && slot !== 'B') {
             throw new Error(`Invalid merge slot '${slot}'.`);
@@ -97,6 +107,11 @@ export class MergeSession {
         return slot ? this.getSlot(slot) : null;
     }
 
+    // Runs when the slots change
+    // if only slot is loaded, we are pending for a role
+    // if the user swapped the roles, we revalidate the current mapping under flipped roles
+    // auto-detection. We call detectMergeRoles to detect the roles
+    // If we fail, status: 'failed' no upstream
     resolveRoles() {
         if (!this.bothSlotsLoaded()) {
             this.roleDetection = emptyRoleDetection();

@@ -1,3 +1,12 @@
+/*
+ * This file contains the MergeWorkspaceController class, which controls the UI for th emerge feature
+ * Four main sections
+ * LocalFileContext is used to load the model from the file
+ * BytesFileContext is used to load the model from the bytes
+ * resolveMainGraphTarget is used to resolve the main graph target
+ * MergeWorkspaceController is used to control the UI for the merge feature
+ * Author: Luray He
+ */ 
 
 import * as base from './base.js';
 import { GraphPane } from './graph-pane.js';
@@ -17,6 +26,7 @@ import { buildMergeFilename } from './export-filename.js';
 import { onnx } from './onnx-proto.js';
 import './onnx-encode.js';
 
+// this wraps a browser File object
 class LocalFileContext {
 
     constructor(host, file, blobs) {
@@ -41,6 +51,7 @@ class LocalFileContext {
     }
 
     async fetch(file, encoding) {
+        // called blob here because it is a browser File object
         const blob = this._blobs[file];
         if (!blob) {
             throw new Error(`File not found '${file}'.`);
@@ -52,6 +63,7 @@ class LocalFileContext {
                 if (encoding) {
                     resolve(e.target.result);
                 } else {
+                    // because BinaryStream is a class that wraps a Uint8Array
                     resolve(new base.BinaryStream(new Uint8Array(e.target.result)));
                 }
             };
@@ -78,6 +90,7 @@ class LocalFileContext {
     }
 }
 
+// in memory merged models
 class BytesFileContext {
 
     constructor(host, identifier, bytes) {
@@ -131,7 +144,7 @@ const resolveMainGraphTarget = (model) => {
     }
     return modules[0];
 };
-
+// MergeWorkspaceController is used to control the UI for the merge feature
 export class MergeWorkspaceController {
 
     constructor(view) {
@@ -145,11 +158,13 @@ export class MergeWorkspaceController {
         this._bound = false;
     }
 
+    // wire DOM IDs from index.html
     bindEvents() {
         if (this._bound) {
             return;
         }
         this._bound = true;
+        // get the elements from the DOM
         const browseA = this._element('merge-slot-a-browse');
         const browseB = this._element('merge-slot-b-browse');
         const dialogA = this._element('merge-slot-a-file-dialog');
@@ -161,6 +176,7 @@ export class MergeWorkspaceController {
         const welcomeMerge = this._element('merge-onnx-button');
         const showSourceGraphs = this._element('merge-show-source-graphs');
 
+        // wire the events to the UI
         if (welcomeMerge) {
             welcomeMerge.addEventListener('click', () => {
                 this.start({ presetModel: null });
@@ -197,6 +213,7 @@ export class MergeWorkspaceController {
         }
     }
 
+    // this is an entry point from the browser.js or desktop.mjs
     async start(options = {}) {
         this._returnPage = this._view._page || (this._view.model ? 'default' : 'welcome');
         if (this._view._target) {
@@ -228,6 +245,7 @@ export class MergeWorkspaceController {
         }
     }
 
+    // we exit the merge workspace
     teardown() {
         if (this._previewTimer) {
             clearTimeout(this._previewTimer);
@@ -320,6 +338,7 @@ export class MergeWorkspaceController {
         return this._view._element(id);
     }
 
+    // load the model from the file
     async _loadModelFromFile(file) {
         if (!file || !this._view.accept(file.name, file.size)) {
             throw new MergeError('Only supported ONNX model files can be merged.');
@@ -338,6 +357,7 @@ export class MergeWorkspaceController {
         };
     }
 
+    // read the first selected file, clears input
     async _onSlotFileSelected(slot, event) {
         const input = event.target;
         const file = input && input.files && input.files.length > 0 ? input.files[0] : null;
@@ -347,6 +367,7 @@ export class MergeWorkspaceController {
         }
         try {
             const entry = await this._loadModelFromFile(file);
+            // trigger the auto role dtection
             this._session.setSlotModel(slot, entry);
             this.refreshUI();
         } catch (error) {
@@ -355,6 +376,8 @@ export class MergeWorkspaceController {
         }
     }
 
+    // called after almost every user action
+    // update the UI, rebuilds the mapping table
     refreshUI() {
         if (!this._session) {
             return;

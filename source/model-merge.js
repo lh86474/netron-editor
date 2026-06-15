@@ -1,3 +1,13 @@
+/*
+ * This file contains the logic for merging two ONNX models
+ * It has four main sections
+ * 1. Graph inspection (getting information from the graphs) 10 - 164
+ * 2. Validation 161-276, 601-642, this is where we throw the errors
+ * 3. Automatic Mapping 314 - 609, where we try to match the outputs to the inputs without user intervention
+ * 4. Merge 644 - 830. We handle name collisions, connections, and the actual merge of the graphs
+ * Author: Luray He
+*/
+
 import { onnx } from './onnx-proto.js';
 import {
     cloneModelProtoForMerge as cloneModelProto,
@@ -8,7 +18,8 @@ import {
 } from './onnx-export.js';
 
 const DEFAULT_DOWNSTREAM_PREFIX = 'downstream_';
-
+// Since onnx.proto works with logical identifiers to represent data types, we have to map the numbers back to a string
+// There are probably more data types that I'll have to worry about in the future, but this works for now.
 const elemTypeNames = new Map([
     [0, 'undefined'],
     [1, 'float32'],
@@ -26,7 +37,7 @@ const elemTypeNames = new Map([
     [13, 'uint64'],
     [16, 'bfloat16']
 ]);
-
+// class for error. There are potentially multiple errors, hence the array.
 export class MergeError extends Error {
 
     constructor(message, errors = []) {
@@ -35,7 +46,7 @@ export class MergeError extends Error {
         this.errors = errors;
     }
 }
-
+// Helper methods for the later functions
 const referenceName = (value) => {
     if (typeof value === 'string') {
         return value;
@@ -52,7 +63,6 @@ const getGraph = (model) => {
     }
     return model.graph;
 };
-
 const cloneGraph = (graph) => {
     const model = new onnx.ModelProto();
     model.graph = graph;
@@ -67,14 +77,14 @@ export const extractGraphOutputs = (graph) => {
 export const extractGraphInputs = (graph) => {
     return Array.isArray(graph && graph.input) ? graph.input.slice() : [];
 };
-
+// find the type
 const tensorTypeOf = (type) => {
     if (!type || !type.tensor_type) {
         return null;
     }
     return type.tensor_type;
 };
-
+// find the format
 const formatDimension = (dimension) => {
     if (!dimension) {
         return '?';
@@ -87,7 +97,7 @@ const formatDimension = (dimension) => {
     }
     return '?';
 };
-
+// find the formatType
 export const formatType = (type) => {
     const tensor = tensorTypeOf(type);
     if (!tensor) {
@@ -97,7 +107,7 @@ export const formatType = (type) => {
     const dims = tensor.shape && Array.isArray(tensor.shape.dim) ? tensor.shape.dim.map(formatDimension).join(',') : '';
     return dims ? `${elemName} [${dims}]` : elemName;
 };
-
+// find the value info
 const findValueInfo = (graph, name) => {
     for (const list of [graph.input, graph.output, graph.value_info]) {
         for (const value of list || []) {
@@ -108,12 +118,16 @@ const findValueInfo = (graph, name) => {
     }
     return null;
 };
-
+// we infer the type by looking at the graph and the name
 const inferTypeFromGraph = (graph, name, preferProducer) => {
     const existing = findValueInfo(graph, name);
     if (existing && existing.type) {
         return existing.type;
     }
+    // preferproducer is the upstream graph
+    // I will have to fix this as the user can't choose what is upstream and what is downstream,
+    // netron will automatically decide the upstream and the downstream graph, though the user
+    // will have the choice to flip the roles of the graphs if it is possible to do so 
     if (preferProducer) {
         for (const node of graph.node || []) {
             for (const outputName of node.output || []) {
@@ -122,6 +136,7 @@ const inferTypeFromGraph = (graph, name, preferProducer) => {
                 }
             }
         }
+    // downstream
     } else {
         for (const node of graph.node || []) {
             for (const inputName of node.input || []) {
@@ -133,7 +148,7 @@ const inferTypeFromGraph = (graph, name, preferProducer) => {
     }
     return null;
 };
-
+// find the tensor type from input output and value_info lists 
 export const resolveValueType = (graph, name, options = {}) => {
     if (!graph || !name) {
         return null;
@@ -147,8 +162,10 @@ export const resolveValueType = (graph, name, options = {}) => {
     }
     return inferTypeFromGraph(graph, name, false);
 };
-
+// This is the first of the validation methods. We check for dimension compatibility
 const compareDimensions = (left, right, allowSymbolicDims) => {
+    // we have left and right because we are comparing the dimensions of the two tensors
+    // left and right is weird naming, but it means first vs second operand in argument order
     const leftHasValue = left && left.dim_value !== undefined && left.dim_value !== null;
     const rightHasValue = right && right.dim_value !== undefined && right.dim_value !== null;
     const leftHasParam = left && left.dim_param;
@@ -212,7 +229,7 @@ export const validateMapping = (upstreamGraph, downstreamGraph, mapping, options
     const downstreamInputs = extractGraphInputs(downstreamGraph).map((value) => value.name);
     const downstreamInputSet = new Set(downstreamInputs);
     const usedUpstream = new Set();
-
+    // check of there are even any outputs or inputs in the graphs
     if (upstreamOutputs.size === 0) {
         issues.push(makeIssue('NO_UPSTREAM_OUTPUTS', 'Upstream graph has no outputs.'));
     }
@@ -302,6 +319,8 @@ const listCompatibleUpstreamOutputs = (upstreamGraph, downstreamGraph, downstrea
     return { candidates, missingType: false };
 };
 // We pick one upstream output per downstream input. We have to match the name
+// This is the second of the validation methods. We check for name compatibility
+// If there are multiple exact matches of names, we have ambiguous_auto_mapping
 const chooseAutomaticCandidate = (downstreamName, candidates) => {
     if (candidates.length === 0) {
         return {
@@ -339,7 +358,9 @@ const chooseAutomaticCandidate = (downstreamName, candidates) => {
         )
     };
 };
-
+// We assume that the caller knows which graph is upstream and which is downstream
+// loop downstream inputs and we buildthe mapping
+// Rerun validateMapping for collision warnings
 export const buildAutomaticMapping = (upstreamProto, downstreamProto, options = {}) => {
     const errors = [];
     const warnings = [];
@@ -403,12 +424,14 @@ export const buildAutomaticMapping = (upstreamProto, downstreamProto, options = 
     return { ok: errors.length === 0, mapping, errors, warnings };
 };
 
+// ranks a successful auto-mapping
 const scoreMappingCandidate = (result, upstreamGraph) => {
     if (!result.ok) {
         return null;
     }
     let score = 0;
     let exactNameMatches = 0;
+    // we add to score if the name is the same, otherwise we add 1
     for (const entry of result.mapping) {
         if (entry.upstream === entry.downstream) {
             exactNameMatches++;
@@ -429,6 +452,7 @@ const scoreMappingCandidate = (result, upstreamGraph) => {
     };
 };
 
+// the metrics are used to rank the candidates
 const compareMappingCandidates = (left, right) => {
     if (right.metrics.score !== left.metrics.score) {
         return right.metrics.score - left.metrics.score;
@@ -444,7 +468,7 @@ const compareMappingCandidates = (left, right) => {
     }
     return 0;
 };
-
+// makeMappingCandidate is used to create a candidate for the mapping
 const makeMappingCandidate = (upstreamProto, downstreamProto, mappingResult) => {
     return {
         upstreamProto,
@@ -454,7 +478,7 @@ const makeMappingCandidate = (upstreamProto, downstreamProto, mappingResult) => 
         metrics: scoreMappingCandidate(mappingResult, upstreamProto.graph)
     };
 };
-
+// compareMappingCandidatesWithSlot is used to compare the candidates with the slot
 const compareMappingCandidatesWithSlot = (left, right) => {
     const compared = compareMappingCandidates(left, right);
     if (compared !== 0) {
@@ -465,7 +489,7 @@ const compareMappingCandidatesWithSlot = (left, right) => {
     }
     return 0;
 };
-
+// if only one direction works, the score gap is greater than 2 or the exact name matches is greater than 1, we have high confidence
 const computeRoleConfidence = (chosen, runnerUp, status) => {
     if (status === 'unidirectional' || !runnerUp) {
         return 'high';
@@ -477,20 +501,24 @@ const computeRoleConfidence = (chosen, runnerUp, status) => {
     }
     return 'low';
 };
-
+// we collect the candidates from both directions
 const buildAutomaticMappingCandidates = (protoA, protoB, options = {}) => {
     const forward = buildAutomaticMapping(protoA, protoB, options);
     const reverse = buildAutomaticMapping(protoB, protoA, options);
     const candidates = [];
+    // forward.ok is true if the forward mapping is valid
     if (forward.ok) {
         candidates.push(makeMappingCandidate(protoA, protoB, forward));
     }
+    // reverse.ok is true if the reverse mapping is valid
     if (reverse.ok) {
         candidates.push(makeMappingCandidate(protoB, protoA, reverse));
     }
     return { forward, reverse, candidates };
 };
-
+// tries both directions, and if only one direction works, we will use that
+// if both directions work with merge, we pick the one with the higher score
+// If tied, we have ambiguous_merge_role
 export const buildAutomaticMappingBidirectional = (protoA, protoB, options = {}) => {
     const { forward, reverse, candidates } = buildAutomaticMappingCandidates(protoA, protoB, options);
     if (candidates.length === 1) {
@@ -541,7 +569,8 @@ const slotForUpstreamProto = (protoA, protoB, upstreamProto) => {
     }
     return null;
 };
-
+// this is what the UI uses
+// detectMergeRoles is used to detect the roles of the graphs
 export const detectMergeRoles = (protoA, protoB, options = {}) => {
     const emptyResult = {
         ok: false,
@@ -554,6 +583,7 @@ export const detectMergeRoles = (protoA, protoB, options = {}) => {
         warnings: [],
         confidence: null
     };
+    // makes sure the graphs are loaded
     if (!protoA || !getGraph(protoA) || !protoB || !getGraph(protoB)) {
         return {
             ...emptyResult,
@@ -640,7 +670,9 @@ const collectAllGraphNames = (graph) => {
     }
     return names;
 };
-
+// prefixDownstreamGraph is used to prefix the downstream graph names
+// rename to downstream_{name}
+// we use renameInGraph
 export const prefixDownstreamGraph = (downstreamGraph, prefix, reservedNames) => {
     const renameMap = new Map();
     for (const name of collectAllGraphNames(downstreamGraph)) {
@@ -671,6 +703,7 @@ export const removeMappedDownstreamInputs = (downstreamGraph, mapping) => {
     downstreamGraph.input = (downstreamGraph.input || []).filter((value) => !mappedUpstreamNames.has(value.name));
 };
 
+// dedupeValueInfo is used to deduplicate the value info
 const dedupeValueInfo = (values, preferFirst = true) => {
     const map = new Map();
     for (const value of values) {
@@ -684,6 +717,7 @@ const dedupeValueInfo = (values, preferFirst = true) => {
     return Array.from(map.values());
 };
 
+// mergeGraphProtos is used to merge the graphs by concatenating the nodes, inputs, outputs, initializers, sparse initializers, and value info
 export const mergeGraphProtos = (upstreamGraph, downstreamGraph) => {
     const merged = new onnx.GraphProto();
     merged.name = upstreamGraph.name || downstreamGraph.name || '';
@@ -723,6 +757,8 @@ export const mergeOpsetImports = (upstreamProto, downstreamProto) => {
     return Array.from(merged.values());
 };
 
+// mergeModelProtos is used to merge the models by concatenating the graphs, opset imports, producer name, domain, model version, doc string, and metadata props
+// different from the mergeGraphProtos, we have to merge the models by concatenating the graphs, opset imports, producer name, domain, model version, doc string, and metadata props
 export const mergeModelProtos = (upstreamProto, downstreamProto, options = {}) => {
     const mapping = options.mapping || [];
     const prefix = options.downstreamPrefix || DEFAULT_DOWNSTREAM_PREFIX;
