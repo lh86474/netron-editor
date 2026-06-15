@@ -31,7 +31,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .pane-divider { width: 0; flex-shrink: 0; }
 .merge-container { display: none; flex-direction: column; height: 100%; width: 100%; overflow: hidden; }
 .merge-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #ccc; flex-shrink: 0; }
-.merge-title { font-size: 14px; font-weight: 600; }
+.merge-title { font-size: 14px; font-weight: 600; margin-left: 36px; position: relative; top: -5.5px;}
 .merge-toolbar { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #ccc; flex-shrink: 0; }
 .merge-slot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .merge-slot-name { min-width: 140px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #555; }
@@ -129,11 +129,13 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .logo-button:focus { outline: 0; }
 .logo-message { display: none; height: 0px; }
 .logo-github { display: none; }
+.merge-onnx-button { top:245px; left: 0px; width: 10.5em; }
 .open-file-button { top: 170px; left: 0px; width: 10.5em; }
 .progress { top: 120px; height: 2px; width: 400px; }
 .progress-bar { height: 100%; width: 0%; background-color: #444444; }
 .notification .logo-name { display: none; }
 .notification .open-file-button { display: none; }
+.notification .merge-onnx-button { display: none; }
 .notification .progress { display: none; }
 .welcome body { background-color: #ececec; }
 .welcome { background-color: #ececec; color: #242424; }
@@ -171,6 +173,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .about .notification { display: none; }
 .about .progress { display: none; }
 .about .menu-button { display: none; }
+.about .merge-onnx-button { display: none; }
 .titlebar { color: #aaaaaa; display: none; height: 32px; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; -webkit-app-region: drag; }
 .titlebar-visible { display: block; }
 .titlebar-content { display: block; padding: 0 142px; height: 100%; text-align: center; font-size: 14px; line-height: 32px; transition: all .1s ease-in-out; user-select: none; }
@@ -213,6 +216,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .welcome.spinner .open-file-button { display: none; }
 .welcome.spinner .diff-container { display: flex; opacity: 0; }
 .welcome.spinner .target { display: flex; opacity: 0; }
+.welcome.spinner .merge-onnx-button { display: none; } 
 .welcome .notification .logo-name { display: none; }
 .welcome .toolbar { display: none; }
 @media (prefers-color-scheme: dark) {
@@ -314,6 +318,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .about .logo { width: 100%; padding-left: 0; padding-right: 0; }
 .about .logo-message { top: 175px; font-size: 12px; }
 .about .logo-github { top: 370px; }
+.merge-onnx-button { top: 280px; }
 }
 .sidebar { display: flex; flex-direction: column; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 12px; height: 100%; right: -100%; position: fixed; transition: 0.1s; top: 0; background-color: #ececec; color: #242424; overflow: hidden; border-left: 1px solid rgba(255, 255, 255, 0.5); opacity: 0; }
 .sidebar-title { font-weight: bold; font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase; height: 20px; margin: 0; padding: 20px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
@@ -759,7 +764,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
         </svg>
     </a>
     <button id="open-file-button" class="center logo-button open-file-button" tabindex="0">Open Model&hellip;</button>
-    <button id="merge-onnx-button" class="center logo-button open-file-button" tabindex="0" style="top: 220px;">Merge Two ONNX Graphs&hellip;</button>
+    <button id="merge-onnx-button" class="center logo-button merge-onnx-button" tabindex="0">Merge Two ONNX Graphs&hellip;</button>
     <div class="center progress">
         <div id="progress-bar" class="progress-bar"></div>
     </div>
