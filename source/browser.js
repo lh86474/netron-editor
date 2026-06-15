@@ -14,6 +14,7 @@ browser.Host = class {
         this._navigator = window.navigator;
         this._document = window.document;
         this._telemetry = new base.Telemetry(this._window);
+        this._saveFileHandle = null;
         this._window.eval = () => {
             throw new Error('window.eval() not supported.');
         };
@@ -241,6 +242,7 @@ browser.Host = class {
     async save(name, extension, defaultPath) {
         const suggestedName = normalizeExportFilename(defaultPath, extension) || `${defaultPath}.${extension}`;
         const window = this.window;
+        this._saveFileHandle = null;
         if (typeof window.showSaveFilePicker === 'function') {
             try {
                 const handle = await window.showSaveFilePicker({
@@ -250,6 +252,7 @@ browser.Host = class {
                         accept: { 'application/octet-stream': [`.${extension}`] }
                     }]
                 });
+                this._saveFileHandle = handle;
                 return handle.name;
             } catch (error) {
                 if (error && error.name === 'AbortError') {
@@ -258,7 +261,7 @@ browser.Host = class {
             }
         }
         return this._promptSaveFilename(name, extension, defaultPath);
-    }
+    } 
 
     async _promptSaveFilename(name, extension, defaultPath) {
         const document = this.document;
@@ -314,7 +317,24 @@ browser.Host = class {
         });
     }
 
-    async export(file, blob) {
+   async export(file, blob) {
+        const handle = this._saveFileHandle;
+        this._saveFileHandle = null;
+        if (handle && typeof handle.createWritable === 'function') {
+            try {
+                const writable = await handle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+                return;
+            } catch (error) {
+                await this.message(
+                    error && error.message ? error.message : 'Failed to write export file.',
+                    true,
+                    'OK'
+                );
+                return;
+            }
+        }
         const window = this.window;
         const document = this.document;
         const element = document.createElement('a');
@@ -325,7 +345,7 @@ browser.Host = class {
         element.click();
         document.body.removeChild(element);
         window.URL.revokeObjectURL(url);
-    }
+    } 
 
     async execute(name /*, value */) {
         switch (name) {
