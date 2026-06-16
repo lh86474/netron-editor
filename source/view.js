@@ -806,23 +806,22 @@ view.View = class {
         return false;
     }
 
-    async _handleEditorDelta(changes) {
+    async _handleEditorDelta(change) {
         // add guard here
         if (this._applyingHistory) return;
         if (!this._editSession) {
             return;
         }
-        const last = changes.length > 0 ? changes[changes.length - 1] : null;
         try {
-            if (last && last.entityType === 'attribute' && this.options.attributes) {
-                const modelNode = this._resolveNodeFromChange(last);
+            if (change && change.entityType === 'attribute' && this.options.attributes) {
+                const modelNode = this._resolveNodeFromChange(change);
                 if (modelNode && this._target) {
                     const rebuildResult = await this._target.refreshNodeArgumentList(modelNode);
                     if (rebuildResult === null || rebuildResult === true) {
-                        await this.refresh(null, { skipShow: true, skipAnimation: true });
+                        await this.refresh(null, { skipShow: true, skipAnimation: true});
                     }
                 }
-            } else if (this._editorChangeNeedsGraphRefresh(last)) {
+            } else if (this._editorChangeNeedsGraphRefresh(change)) {
                 await this.refresh(null, { skipShow: true, skipAnimation: true });
                 if (last.entityType === 'node' && last.changeType === 'delete') {
                     const match = /^graph:(\d+)/.exec(last.entityId);
@@ -842,7 +841,7 @@ view.View = class {
             }
         } catch (error) {
             this.error(error, 'Error applying edit.', null);
-        }
+        } 
     }
 
     _canUndoEdit() {
@@ -920,6 +919,8 @@ view.View = class {
         // eslint-disable-next-line no-console
         console.log('[editor] Delta updated:', stringifyEditorJSON(this._editSession.delta.toJSON()));
         this._updateUndoRedoButtons();
+        // we have to handle the delta here because we need to refresh the graph for all types of edits, not just deltas
+        await this._handleEditorDelta(change);
         return change;
     }
 
