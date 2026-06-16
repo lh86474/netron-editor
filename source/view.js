@@ -2805,7 +2805,17 @@ view.Graph = class extends grapher.Graph {
 .edge-path-control-dependency { stroke-dasharray: 2, 2; }
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
 .edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
-.edited > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
+.node-border-outer { fill: none; stroke: none; pointer-events: none; }
+.edited:not(.range-begin):not(.range-end) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
+.range-begin:not(.edited) > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
+.range-end:not(.edited) > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
+.range-begin.range-end:not(.edited) > .node.node-border { stroke: rgba(120, 0, 160, 0.95); stroke-width: 2px; }
+.edited.range-begin:not(.range-end) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
+.edited.range-begin:not(.range-end) > .node.node-border-outer { stroke: rgba(0, 140, 0, 0.95); stroke-width: 6px; }
+.edited.range-end:not(.range-begin) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
+.edited.range-end:not(.range-begin) > .node.node-border-outer { stroke: rgba(0, 80, 200, 0.95); stroke-width: 6px; }
+.edited.range-begin.range-end > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
+.edited.range-begin.range-end > .node.node-border-outer { stroke: rgba(120, 0, 160, 0.95); stroke-width: 6px; }
 .edge-path-tunnel { stroke-dasharray: 5, 3; marker-end: url(#${prefix}arrowhead-tunnel); opacity: 0.5; }
 #${prefix}arrowhead { fill: #000; }
 #${prefix}arrowhead-hover { fill: rgba(220, 0, 0, 0.9); }

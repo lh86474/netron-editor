@@ -403,6 +403,8 @@ grapher.Node = class {
         this.element.setAttribute('class', this.class ? `node ${this.class}` : 'node');
         this.element.style.opacity = 0;
         parent.appendChild(this.element);
+        this.borderOuter = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        this.borderOuter.setAttribute('class', 'node node-border-outer');
         this.border = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         this.border.setAttribute('class', 'node node-border');
         for (let i = 0; i < this.blocks.length; i++) {
@@ -415,6 +417,7 @@ grapher.Node = class {
         // this is a context-menu hook
         // makes sure to override the browser's default right-click behavior
         // sometimes, might need to disable cache developer tools to see the new context menu as old grapher.js may cache in the browser
+        this.element.appendChild(this.borderOuter);
         this.element.appendChild(this.border);
         if (this.onContextMenu) {
             // the trigger of the contextmenu
@@ -458,7 +461,9 @@ grapher.Node = class {
         for (const block of this.blocks) {
             block.update();
         }
-        this.border.setAttribute('d', grapher.Node.roundedRect(0, 0, this.width, this.height, true, true, true, true));
+        const borderPath = grapher.Node.roundedRect(0, 0, this.width, this.height, true, true, true, true);
+        this.borderOuter.setAttribute('d', borderPath);
+        this.border.setAttribute('d', borderPath);
         this.element.setAttribute('transform', `translate(${this.x - (this.width / 2)},${this.y - (this.height / 2)})`);
         this.element.style.removeProperty('opacity');
     }
