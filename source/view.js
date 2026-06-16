@@ -823,8 +823,8 @@ view.View = class {
                 }
             } else if (this._editorChangeNeedsGraphRefresh(change)) {
                 await this.refresh(null, { skipShow: true, skipAnimation: true });
-                if (last.entityType === 'node' && last.changeType === 'delete') {
-                    const match = /^graph:(\d+)/.exec(last.entityId);
+                if (change && change.entityType === 'node' && change.changeType === 'delete') {
+                    const match = /^graph:(\d+)/.exec(change.entityId);
                     const graphIndex = match ? Number(match[1]) : 0;
                     this._setDanglingNodeNames(findDanglingNodes(this._editSession.modified.getGraph(graphIndex)));
                 } else {
