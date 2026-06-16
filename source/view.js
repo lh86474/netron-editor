@@ -1047,13 +1047,14 @@ view.View = class {
         return 0;
     }
 
-    _graphOptions(pane, target) {
+    _graphOptions(pane, target, model) {
         return {
             paneId: pane.id,
             container: pane.container,
             readOnly: pane.readOnly,
             deltaTracker: pane.deltaTracker,
-            graphIndex: this._resolveGraphIndex(target)
+            graphIndex: this._resolveGraphIndex(target),
+            model: model || null
         };
     }
 
@@ -1081,7 +1082,7 @@ view.View = class {
     }
 
     // render the graph in the pane
-    async _renderGraphInPane(pane, target, signature, state) {
+    async _renderGraphInPane(pane, target, signature, state, model) {
         const container = pane.container;
         const label = container.querySelector('.graph-pane-label');
         while (container.lastChild) {
@@ -1095,7 +1096,7 @@ view.View = class {
             const document = this._host.document;
             const graph = target;
             const groups = graph.groups || false;
-            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
+            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph, model));
             if (state && state.blocks) {
                 viewGraph.blocks = state.blocks;
             }
@@ -2802,6 +2803,7 @@ view.Graph = class extends grapher.Graph {
         this.readOnly = Boolean(options.readOnly);
         this.deltaTracker = options.deltaTracker || null;
         this.graphIndex = options.graphIndex !== undefined ? options.graphIndex : 0;
+        this._renderModel = options.model || null;
         this._valueEntityIds = new Map();
         this.markerPrefix = this._paneId ? `${this._paneId}-` : '';
         this.counter = 0;
@@ -2863,7 +2865,7 @@ view.Graph = class extends grapher.Graph {
     }
 
     get model() {
-        return this.view.model;
+        return this._renderModel || this.view.model;
     }
 
     get host() {
@@ -2998,7 +3000,7 @@ view.Graph = class extends grapher.Graph {
                 this._valueEntityIds.set(value, id);
             }
         }
-        this.identifier = this.model.identifier;
+        this.identifier = this.model && this.model.identifier ? this.model.identifier : 'model';
         this.identifier += graph && graph.name ? `.${graph.name.replace(/\/|\\/g, '.')}` : '';
         const clusters = new Set();
         const clusterParentMap = new Map();

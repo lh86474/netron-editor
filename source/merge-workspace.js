@@ -319,8 +319,8 @@ export class MergeWorkspaceController {
             this._clearSourcePanes();
             return;
         }
-        await this._upstreamSourcePane.render(upstream.target, null, null);
-        await this._downstreamSourcePane.render(downstream.target, null, null);
+        await this._upstreamSourcePane.render(upstream.target, null, null, upstream.model);
+        await this._downstreamSourcePane.render(downstream.target, null, null, downstream.model);
     }
 
     _clearSourcePanes() {
@@ -698,7 +698,7 @@ export class MergeWorkspaceController {
         const context = new BytesFileContext(this._view._host, 'merged.onnx', bytes);
         const model = await this._view._modelFactoryService.open(context);
         const target = resolveMainGraphTarget(model);
-        await this._previewPane.render(target, null, null);
+        await this._previewPane.render(target, null, null, model);
         this._session.mergedPreview = {
             proto: result.mergedProto,
             model,
@@ -737,6 +737,7 @@ export class MergeWorkspaceController {
         const context = new BytesFileContext(this._view._host, 'merged.onnx', bytes);
         const filename = buildMergeFilename(upstream.filename, downstream.filename);
         this.teardown();
+        this._view.show('welcome spinner');
         await this._view.open(context);
         this._view._host.document.title = filename;
     }

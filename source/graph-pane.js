@@ -41,8 +41,9 @@ export class GraphPane {
         return this._graph;
     }
 
-    async render(target, signature, state) {
-        const status = await this._view._renderGraphInPane(this, target, signature, state);
+    // accepts optional model for merge/source panes when view.model is unset
+    async render(target, signature, state, model) {
+        const status = await this._view._renderGraphInPane(this, target, signature, state, model);
         return status;
     }
 
