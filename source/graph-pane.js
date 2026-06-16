@@ -41,6 +41,7 @@ export class GraphPane {
         return this._graph;
     }
 
+    // accepts extra model and forward it to _renderGraphInPane
     async render(target, signature, state, model) {
         const status = await this._view._renderGraphInPane(this, target, signature, state, model);
         return status;
