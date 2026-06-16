@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, canDeleteNode, NodeDeleteError } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
 import { GraphPane } from './graph-pane.js';
@@ -743,6 +743,9 @@ view.View = class {
         if (change.entityType === 'node' && change.changeType === 'add') {
             return true;
         }
+        if (change.entityType === 'node' && change.changeType === 'delete') {
+            return true;
+        }
         if (change.entityType === 'attribute') {
             return false;
         }
@@ -814,6 +817,9 @@ view.View = class {
         const x = event.clientX;
         const y = event.clientY;
         const entity = this._resolveNodeEntity(nodeView.value);
+        const graph = entity ? this._editSession.modified.getGraph(entity.graphIndex) : null;
+        const node = graph && entity ? graph.nodes[entity.nodeIndex] : null;
+        const deleteCheck = node ? canDeleteNode(graph, node) : { ok: false };
         const isBegin = this._isRangeBegin(entity);
         const isEnd = this._isRangeEnd(entity);
         const hasMarkers = this._rangeBegins.length > 0 || this._rangeEnds.length > 0;
@@ -829,6 +835,11 @@ view.View = class {
             {
                 label: 'Insert Below\u2026',
                 action: () => this._openOperatorPicker(nodeView, 'below', x, y)
+            },
+            {
+                label: 'Delete Node\u2026',
+                action: () => this._deleteNodeAt(nodeView),
+                enabled: deleteCheck.ok
             },
             { separator: true },
             {
@@ -990,6 +1001,38 @@ view.View = class {
             });
         } catch (error) {
             this.error(error, 'Error inserting node.', null);
+        }
+    }
+
+    async _deleteNodeAt(nodeView) {
+        if (!this._canInsertNode()) {
+            return;
+        }
+        try {
+            const entity = this._resolveNodeEntity(nodeView.value);
+            if (!entity) {
+                throw new Error('Node entity not found.');
+            }
+            const graph = this._editSession.modified.getGraph(entity.graphIndex);
+            const node = graph.nodes[entity.nodeIndex];
+            const check = canDeleteNode(graph, node);
+            if (!check.ok) {
+                await this._host.message(check.reason, true, 'OK');
+                return;
+            }
+            this._closeGraphOverlays();
+            if (this._sidebar.identifier === 'node') {
+                this._sidebar.close();
+            }
+            await this.applyEditorPatch({
+                entityId: entity.nodeId,
+                entityType: 'node',
+                changeType: 'delete',
+                property: 'remove'
+            });
+        } catch (error) {
+            const message = error instanceof NodeDeleteError ? error.message : null;
+            this.error(error, message || 'Error deleting node.', null);
         }
     }
 

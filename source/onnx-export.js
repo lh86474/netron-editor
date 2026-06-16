@@ -641,15 +641,19 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
     };
 };
 
-// This support any new nodes and insertions into the graph
-const applyNodeInsertions = (graph, originalProto, editSession) => {
+// This supports node insertions and deletions by rebuilding graph.node from the modified graph.
+const applyStructuralNodeChanges = (graph, originalProto, editSession) => {
     const changes = editSession.delta.getChanges();
-    // pipeline to filter through the changes to find just the insertions
-    const insertions = changes.filter((change) => (
-        change.entityType === 'node' && change.changeType === 'add' && change.property === 'insert'
+    const structural = changes.filter((change) => (
+        change.entityType === 'node' && (
+            (change.changeType === 'add' && change.property === 'insert') ||
+            (change.changeType === 'delete' && change.property === 'remove')
+        )
     ));
-    // return if no insertions
-    if (insertions.length === 0) {
+    const modifiedGraph = editSession.modified.getGraph(0);
+    const modifiedCount = (modifiedGraph.nodes || []).length;
+    const protoCount = (graph.node || []).length;
+    if (structural.length === 0 && modifiedCount === protoCount) {
         return;
     }
     const originalNodesByName = new Map();
@@ -658,7 +662,6 @@ const applyNodeInsertions = (graph, originalProto, editSession) => {
             originalNodesByName.set(node.name, node);
         }
     }
-    const modifiedGraph = editSession.modified.getGraph(0);
     const rebuiltNodes = [];
     for (const modifiedNode of modifiedGraph.nodes || []) {
         const existing = originalNodesByName.get(modifiedNode.name);
@@ -756,7 +759,7 @@ const applyChanges = (cloned, originalProto, editSession) => {
         renameInGraph(graph, oldName, newName);
     }
 
-    applyNodeInsertions(graph, originalProto, editSession);
+    applyStructuralNodeChanges(graph, originalProto, editSession);
 };
 
 export const canExportOnnx = (model) => {

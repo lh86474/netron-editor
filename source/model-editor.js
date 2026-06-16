@@ -898,6 +898,120 @@ export const insertNode = (graph, refNodeIndex, position, nodeSpec) => {
     }
     return { insertIndex, node: newNode };
 };
+
+export class NodeDeleteError extends Error {
+
+    constructor(message) {
+        super(message);
+        this.name = 'NodeDeleteError';
+    }
+}
+
+const tensorAt = (args, index) => {
+    const argument = args[index];
+    if (!argument || !Array.isArray(argument.value) || argument.value.length === 0) {
+        return null;
+    }
+    return argument.value[0];
+};
+
+const inputTensorAt = (node, index) => tensorAt(node.inputs || [], index);
+
+const outputTensorAt = (node, index) => tensorAt(node.outputs || [], index);
+
+const bypassInputForOutput = (node, outputIndex) => {
+    const inputSlots = (node.inputs || []).length > 0 ? node.inputs.length : 1;
+    const outputSlots = (node.outputs || []).length > 0 ? node.outputs.length : 1;
+    if (outputSlots === 1 && inputSlots === 1) {
+        return inputTensorAt(node, 0);
+    }
+    if (outputSlots === inputSlots) {
+        return inputTensorAt(node, outputIndex);
+    }
+    if (outputSlots === 1 && inputSlots > 1) {
+        return inputTensorAt(node, 0);
+    }
+    return null;
+};
+
+export const canDeleteNode = (graph, node) => {
+    if (!graph || !node) {
+        return { ok: false, reason: 'Node not found.' };
+    }
+    const inputs = node.inputs || [];
+    const outputs = node.outputs || [];
+    const inputSlots = inputs.length > 0 ? inputs.length : 1;
+    const outputSlots = outputs.length > 0 ? outputs.length : 1;
+    if (!inputTensorAt(node, 0) && inputSlots === 1) {
+        return { ok: false, reason: 'Cannot delete a node with no inputs to bypass from.' };
+    }
+    if (outputSlots === 1 && inputSlots === 1) {
+        return inputTensorAt(node, 0) ?
+            { ok: true } :
+            { ok: false, reason: 'Cannot delete a node with no inputs to bypass from.' };
+    }
+    if (outputSlots === inputSlots) {
+        for (let index = 0; index < outputSlots; index++) {
+            if (!inputTensorAt(node, index)) {
+                return { ok: false, reason: `Cannot delete node: input ${index} is missing a tensor.` };
+            }
+        }
+        return { ok: true };
+    }
+    if (outputSlots === 1 && inputSlots > 1) {
+        const first = inputTensorAt(node, 0);
+        if (!first) {
+            return { ok: false, reason: 'Cannot delete a node with no inputs to bypass from.' };
+        }
+        const firstName = first.name;
+        for (let index = 1; index < inputSlots; index++) {
+            const tensor = inputTensorAt(node, index);
+            if (tensor && tensor.name !== firstName) {
+                return {
+                    ok: false,
+                    reason: 'Cannot delete node: multiple different inputs cannot be bypassed to a single output.'
+                };
+            }
+        }
+        return { ok: true };
+    }
+    return { ok: false, reason: 'Cannot delete node: input and output counts cannot be rewired safely.' };
+};
+
+export const deleteNode = (graph, nodeIndex) => {
+    const nodes = graph.nodes || [];
+    const node = nodes[nodeIndex];
+    if (!node) {
+        throw new NodeDeleteError(`Node at index ${nodeIndex} not found.`);
+    }
+    const check = canDeleteNode(graph, node);
+    if (!check.ok) {
+        throw new NodeDeleteError(check.reason);
+    }
+    const outputSlots = (node.outputs || []).length > 0 ? node.outputs.length : 1;
+    const rewiredPairs = [];
+    for (let index = 0; index < outputSlots; index++) {
+        const outputValue = outputTensorAt(node, index);
+        if (!outputValue) {
+            continue;
+        }
+        const bypass = bypassInputForOutput(node, index);
+        if (!bypass) {
+            continue;
+        }
+        const consumers = findValueConsumers(graph, outputValue);
+        for (const consumer of consumers) {
+            if (consumer.node === node) {
+                continue;
+            }
+            consumer.argument.value[consumer.index] = bypass;
+        }
+        rewiredPairs.push({ from: outputValue, to: bypass });
+    }
+    const deleted = nodes.splice(nodeIndex, 1)[0];
+    return { deletedIndex: nodeIndex, node: deleted, rewiredPairs };
+};
+
 // This builds a picture of the old graph
 // essentially, this works by iterating through the graph and adding the nodes and attributes to the snapshot
 const buildOriginalSnapshot = (model) => {
@@ -1079,6 +1193,12 @@ class EditorState {
             this.delta.remapNodeIndices(location.graphIndex, insertIndex, 1);
             entityId = `graph:${location.graphIndex}/node:${insertIndex}`;
             changeType = 'add';
+        } else if (patch.changeType === 'delete' && patch.entityType === 'node' && patch.property === 'remove') {
+            const location = parseNodeEntityId(entityId);
+            const graph = this.modified.getGraph(location.graphIndex);
+            deleteNode(graph, location.nodeIndex);
+            this.delta.remapNodeIndices(location.graphIndex, location.nodeIndex + 1, -1);
+            changeType = 'delete';
         } else {
             const location = parseNodeEntityId(entityId.includes('/attr:') ? entityId : patch.parentId || entityId);
             const graph = this.modified.getGraph(location.graphIndex);
