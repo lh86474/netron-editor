@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import { mockModel, mockChainModel, identityNodeSpec } from './fixtures/mock-graph.js';
 import { onnxShapedModel } from './fixtures/onnx-shaped-mock.js';
-import { ModelEditor, AttributeSchemaResolver, locateValueEntity, buildNodeFromMetadata } from '../source/model-editor.js';
+import { ModelEditor, AttributeSchemaResolver, locateValueEntity, buildNodeFromMetadata, analyzeDeleteNode, canDeleteNode, deleteNode, findDanglingNodes, NodeDeleteError } from '../source/model-editor.js';
 
 describe('EditorState', () => {
     it('clone produces independent Model_Modified', () => {
@@ -302,6 +302,160 @@ describe('Node insertion', () => {
         assert.equal(node.type.name, 'Relu');
         assert.equal(node.inputs[0].name, 'X');
         assert.equal(node.outputs[0].name, 'Y');
+    });
+});
+
+describe('Node deletion', () => {
+    it('delete middle node rewires downstream consumer', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        const graph = editor.modified.getGraph();
+        const change = editor.applyPatch({
+            entityId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'delete',
+            property: 'remove'
+        });
+        assert.equal(graph.nodes.length, 2);
+        assert.equal(change.changeType, 'delete');
+        assert.equal(change.entityId, 'graph:0/node:1');
+        const softmax = graph.nodes[1];
+        assert.equal(softmax.name, 'Softmax1');
+        assert.equal(softmax.inputs[0].value[0].name, 'hidden1');
+        assert.notEqual(softmax.inputs[0].value[0].name, 'hidden2');
+    });
+
+    it('deleted original node is marked deleted in delta', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        editor.applyPatch({
+            entityId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'delete',
+            property: 'remove'
+        });
+        assert.equal(editor.delta.getState('graph:0/node:1'), 'deleted');
+    });
+
+    it('delete inserted node clears delta entry', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        const graph = editor.modified.getGraph();
+        const insertChange = editor.applyPatch({
+            parentId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'add',
+            property: 'insert',
+            position: 'below',
+            newValue: identityNodeSpec('InsertedBelow')
+        });
+        assert.equal(editor.delta.getState(insertChange.entityId), 'added');
+        editor.applyPatch({
+            entityId: insertChange.entityId,
+            entityType: 'node',
+            changeType: 'delete',
+            property: 'remove'
+        });
+        assert.equal(graph.nodes.length, 3);
+        assert.equal(editor.delta.getState(insertChange.entityId), 'unchanged');
+        assert.equal(editor.delta.getChanges().some((entry) => entry.entityId === insertChange.entityId), false);
+    });
+
+    it('delete remaps attribute delta on shifted nodes', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        editor.applyPatch({
+            parentId: 'graph:0/node:2',
+            entityType: 'attribute',
+            changeType: 'add',
+            property: 'attributes.axis',
+            newValue: 1
+        });
+        editor.applyPatch({
+            entityId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'delete',
+            property: 'remove'
+        });
+        const attributeChange = editor.delta.getChanges().find((entry) => entry.property === 'attributes.axis');
+        assert.ok(attributeChange);
+        assert.equal(attributeChange.entityId, 'graph:0/node:1/attr:0');
+    });
+
+    it('canDeleteNode rejects node without data inputs', () => {
+        const graph = {
+            nodes: [{
+                name: 'Source',
+                inputs: [],
+                outputs: [{ name: 'Y', value: [{ name: 'out' }] }]
+            }]
+        };
+        const check = canDeleteNode(graph, graph.nodes[0]);
+        assert.equal(check.ok, false);
+        assert.match(check.reason, /data inputs/i);
+    });
+
+    it('analyzeDeleteNode allows conv with weight inputs', () => {
+        const activation = { name: 'act', attributes: [] };
+        const weight = { name: 'W', initializer: true, attributes: [] };
+        const graph = {
+            nodes: [{
+                name: 'Conv1',
+                inputs: [
+                    { name: 'X', value: [activation] },
+                    { name: 'W', value: [weight] }
+                ],
+                outputs: [{ name: 'Y', value: [{ name: 'conv_out', attributes: [] }] }]
+            }, {
+                name: 'Relu1',
+                inputs: [{ name: 'X', value: [{ name: 'conv_out', attributes: [] }] }],
+                outputs: [{ name: 'Y', value: [{ name: 'relu_out', attributes: [] }] }]
+            }]
+        };
+        graph.nodes[1].inputs[0].value[0] = graph.nodes[0].outputs[0].value[0];
+        const analysis = analyzeDeleteNode(graph, graph.nodes[0]);
+        assert.equal(analysis.ok, true);
+        assert.ok(analysis.warnings.some((entry) => entry.code === 'WEIGHTS_IGNORED'));
+        deleteNode(graph, 0);
+        assert.equal(graph.nodes.length, 1);
+        assert.equal(graph.nodes[0].inputs[0].value[0].name, 'act');
+    });
+
+    it('deleteNode allows merge-style bypass with warning', () => {
+        const graph = {
+            nodes: [{
+                name: 'Bad',
+                inputs: [
+                    { name: 'A', value: [{ name: 'a', attributes: [] }] },
+                    { name: 'B', value: [{ name: 'b', attributes: [] }] }
+                ],
+                outputs: [{ name: 'Y', value: [{ name: 'out', attributes: [] }] }]
+            }]
+        };
+        const analysis = analyzeDeleteNode(graph, graph.nodes[0]);
+        assert.equal(analysis.ok, true);
+        assert.ok(analysis.warnings.some((entry) => entry.code === 'MERGE_NODE'));
+        deleteNode(graph, 0);
+        assert.equal(graph.nodes.length, 0);
+    });
+
+    it('findDanglingNodes detects unused branch output', () => {
+        const shared = { name: 'kept', attributes: [] };
+        const orphan = { name: 'orphan', attributes: [] };
+        const graph = {
+            outputs: [{ name: 'output', value: [shared] }],
+            nodes: [
+                {
+                    name: 'Left',
+                    inputs: [{ name: 'X', value: [{ name: 'in', attributes: [] }] }],
+                    outputs: [{ name: 'Y', value: [shared] }]
+                },
+                {
+                    name: 'Right',
+                    inputs: [{ name: 'X', value: [{ name: 'in2', attributes: [] }] }],
+                    outputs: [{ name: 'Y', value: [orphan] }]
+                }
+            ]
+        };
+        const dangling = findDanglingNodes(graph);
+        assert.equal(dangling.length, 1);
+        assert.equal(dangling[0].name, 'Right');
     });
 });
 

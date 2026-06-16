@@ -300,6 +300,26 @@ describe('ONNX export', () => {
         assert.notEqual(second.input[0], 'hidden');
     });
 
+    it('exports graph after deleting middle node', () => {
+        const proto = buildThreeNodeChainModel();
+        const viewModel = buildThreeNodeChainViewModel(proto);
+        const editor = ModelEditor.createSession(viewModel);
+        editor.applyPatch({
+            entityId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'delete',
+            property: 'remove'
+        });
+        const bytes = exportModifiedOnnx(viewModel, editor);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        assert.equal(decoded.graph.node.length, 2);
+        const third = decoded.graph.node.find((node) => node.name === 'third');
+        assert.ok(third);
+        assert.equal(third.input[0], 'hidden1');
+        assert.equal(decoded.graph.node[0].name, 'first');
+        assert.equal(decoded.graph.output[0].name, 'y');
+    });
+
     it('exports graph after subgraph extract and proto rebuild', () => {
         const proto = buildThreeNodeChainModel();
         const viewModel = buildThreeNodeChainViewModel(proto);
