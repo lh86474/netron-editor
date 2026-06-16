@@ -807,6 +807,7 @@ view.View = class {
     }
 
     async _handleEditorDelta(changes) {
+        if (this._applyingHistory) return;
         if (!this._editSession) {
             return;
         }
