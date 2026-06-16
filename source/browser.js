@@ -620,6 +620,58 @@ browser.Host = class {
             }
         });
     }
+    // confirm dialog for insert
+    async confirm(options) {
+        const {
+            title = '',
+            issues = [],
+            confirmLabel = 'OK',
+            cancelLabel = 'Cancel'
+        } = options || {};
+        return new Promise((resolve) => {
+            const document = this.document;
+            const type = document.body.getAttribute('class');
+            this._element('confirm-title').innerText = title;
+            const issuesElement = this._element('confirm-issues');
+            issuesElement.replaceChildren();
+            if (issues.length === 0) {
+                const item = document.createElement('li');
+                item.className = 'confirm-issue confirm-issue-none';
+                item.textContent = 'No issues detected.';
+                issuesElement.appendChild(item);
+            } else {
+                for (const issue of issues) {
+                    const item = document.createElement('li');
+                    const severity = issue.severity === 'error' ? 'error' : 'warning';
+                    item.className = `confirm-issue confirm-issue-${severity}`;
+                    item.textContent = issue.message || '';
+                    issuesElement.appendChild(item);
+                }
+            }
+            const okButton = this._element('confirm-ok');
+            const cancelButton = this._element('confirm-cancel');
+            okButton.innerText = confirmLabel;
+            cancelButton.innerText = cancelLabel;
+            const cleanup = (result) => {
+                okButton.onclick = null;
+                cancelButton.onclick = null;
+                document.removeEventListener('keydown', onKeyDown);
+                document.body.setAttribute('class', type);
+                resolve(result);
+            };
+            const onKeyDown = (event) => {
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    cleanup(false);
+                }
+            };
+            okButton.onclick = () => cleanup(true);
+            cancelButton.onclick = () => cleanup(false);
+            document.addEventListener('keydown', onKeyDown);
+            document.body.setAttribute('class', 'confirm');
+            cancelButton.focus();
+        });
+    }
 };
 
 browser.BrowserFileContext = class {

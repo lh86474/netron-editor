@@ -3,6 +3,7 @@ import * as base from './base.js';
 import * as grapher from './grapher.js';
 import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError } from './onnx-export.js';
+import { validateNodeInsert } from './onnx-operator-validation.js';
 import { GraphPane } from './graph-pane.js';
 
 const view = {};
@@ -806,8 +807,24 @@ view.View = class {
                 throw new Error('Node entity not found.');
             }
             const graph = this._editSession.modified.getGraph(entity.graphIndex);
+            const refNode = graph.nodes[entity.nodeIndex];
+            if (!refNode) {
+                throw new Error('Reference node not found.');
+            }
             const uniqueName = genUniqueNodeName(`Inserted${opSchema.name}`, graph);
             const nodeSpec = buildNodeFromMetadata(opSchema, uniqueName, graph);
+            const { issues } = validateNodeInsert(graph, entity.nodeIndex, position, opSchema, nodeSpec);
+            const positionLabel = position === 'above' ? 'above' : 'below';
+            const refLabel = refNode.name || refNode.type?.name || 'node';
+            const proceed = await this._host.confirm({
+                title: `Insert ${opSchema.name} ${positionLabel} ${refLabel}?`,
+                issues,
+                confirmLabel: issues.length > 0 ? 'Insert anyway' : 'Insert',
+                cancelLabel: 'Cancel'
+            });
+            if (!proceed) {
+                return;
+            }
             await this.applyEditorPatch({
                 parentId: entity.nodeId,
                 entityType: 'node',
