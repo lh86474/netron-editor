@@ -1649,12 +1649,15 @@ view.Menu = class {
             ['Backspace', '&#x232B;'], ['Enter', '&#x23ce;'],
             ['Up', '&#x2191;'], ['Down', '&#x2193;'],
         ]);
-        const active = this._document.activeElement;
-        const tag = active ? active.tagName : '';
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || (active && active.isContentEditable)) {
-            return;
-        }
         this._keydown = (e) => {
+             // fix to tell the menu not to handle backspace
+             // browser space is naturally to go to the previous tab. We usually override it by doing nothing, but now, 
+             // we make sure _keydown just returns and doesn't handle backspace
+            const active = this._document.activeElement;
+            const tag = active ? active.tagName : '';
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || (active && active.isContentEditable)) {
+                return;
+            }
             this._alt = false;
             const code = e.keyCode | (e.altKey ? 0x0200 : 0) | (e.shiftKey ? 0x0100 : 0);
             const modifier = (e.ctrlKey ? 0x0400 : 0) | (e.metaKey ? 0x0800 : 0);
