@@ -651,6 +651,39 @@ desktop.Host = class {
             }
         });
     }
+
+    // dialog for the desktop app
+    async confirm(message, options = {}) {
+        return new Promise((resolve) => {
+            const document = this.document;
+            const dialog = this._element('confirm-dialog');
+            const title = this._element('confirm-dialog-title');
+            const text = this._element('confirm-dialog-message');
+            const cancelButton = this._element('confirm-dialog-cancel');
+            const confirmButton = this._element('confirm-dialog-confirm');
+            title.innerText = options.title || 'Confirm';
+            text.innerText = message || '';
+            cancelButton.innerText = options.cancelLabel || 'Cancel';
+            confirmButton.innerText = options.confirmLabel || 'OK';
+            const cleanup = () => {
+                dialog.style.display = 'none';
+                document.body.classList.remove('confirm-dialog-open');
+                cancelButton.onclick = null;
+                confirmButton.onclick = null;
+            };
+            cancelButton.onclick = () => {
+                cleanup();
+                resolve(false);
+            };
+            confirmButton.onclick = () => {
+                cleanup();
+                resolve(true);
+            };
+            dialog.style.display = 'flex';
+            document.body.classList.add('confirm-dialog-open');
+            confirmButton.focus();
+        });
+    }
 };
 
 // encapsulate the data of a specific file or folder the user has opened

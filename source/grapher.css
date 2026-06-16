@@ -75,6 +75,7 @@
 .range-begin > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
 .range-end > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
 .range-begin.range-end > .node.node-border { stroke: rgba(120, 0, 160, 0.95); stroke-width: 2px; }
+.dangling > .node.node-border { stroke: rgba(230, 160, 0, 0.95); stroke-width: 2px; stroke-dasharray: 6 4; }
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }
 .edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }
 .select.node-argument > rect { fill: transparent; stroke: rgba(220, 0, 0, 0.9); }
@@ -105,6 +106,7 @@
     .range-begin > .node.node-border { stroke: rgba(80, 200, 80, 0.9); }
     .range-end > .node.node-border { stroke: rgba(100, 160, 255, 0.9); }
     .range-begin.range-end > .node.node-border { stroke: rgba(180, 120, 255, 0.9); }
+    .dangling > .node.node-border { stroke: rgba(255, 190, 60, 0.9); stroke-dasharray: 6 4; }
     .select.edge-path { stroke: rgba(192, 0, 0, 0.8); }
     .edge-path.edge-path-edited { stroke: rgba(192, 0, 0, 0.8); }
     .select.node-argument > rect { fill: transparent; stroke: rgba(192, 0, 0, 0.8); }

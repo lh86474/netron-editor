@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, canDeleteNode, NodeDeleteError } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
 import { GraphPane } from './graph-pane.js';
@@ -42,6 +42,8 @@ view.View = class {
         // arrays to support multiple begin and end marker
         this._rangeBegins = [];
         this._rangeEnds = [];
+        this._danglingNodeNames = new Set();
+        this._applyingHistory = false;
         this._exportBasenameOverride = null;
         this._sidebar = new view.Sidebar(this._host);
         this._find = null;
@@ -185,6 +187,18 @@ view.View = class {
                 }
                 const edit = this._menu.group('&Edit');
                 edit.add({
+                    label: '&Undo',
+                    accelerator: 'CmdOrCtrl+Z',
+                    execute: async () => await this._undoEdit(),
+                    enabled: () => this._canUndoEdit()
+                });
+                edit.add({
+                    label: '&Redo',
+                    accelerator: platform === 'darwin' ? 'CmdOrCtrl+Shift+Z' : 'CmdOrCtrl+Y',
+                    execute: async () => await this._redoEdit(),
+                    enabled: () => this._canRedoEdit()
+                });
+                edit.add({
                     label: '&Find...',
                     accelerator: 'CmdOrCtrl+F',
                     execute: () => this.find(),
@@ -274,6 +288,7 @@ view.View = class {
                     execute: async () => await this._host.execute('about')
                 });
             }
+            this._setupUndoRedoToolbar(platform);
             const navigator = this._element('toolbar-navigator');
             this._select = new view.TargetSelector(this, navigator);
             this._select.on('change', (sender, target) => this._updateActiveTarget([target]));
@@ -582,6 +597,40 @@ view.View = class {
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
     }
 
+    _setupUndoRedoToolbar(platform) {
+        const undoButton = this._element('undo-button');
+        const redoButton = this._element('redo-button');
+        const undoShortcut = this._element('undo-shortcut');
+        const redoShortcut = this._element('redo-shortcut');
+        if (!undoButton || !redoButton || !undoShortcut || !redoShortcut || !this._menu) {
+            return;
+        }
+        const undoAccelerator = 'CmdOrCtrl+Z';
+        const redoAccelerator = platform === 'darwin' ? 'CmdOrCtrl+Shift+Z' : 'CmdOrCtrl+Y';
+        undoShortcut.innerHTML = this._menu.formatAccelerator(undoAccelerator);
+        redoShortcut.innerHTML = this._menu.formatAccelerator(redoAccelerator);
+        undoButton.addEventListener('click', () => {
+            this._undoEdit();
+        });
+        redoButton.addEventListener('click', () => {
+            this._redoEdit();
+        });
+        this._updateUndoRedoButtons();
+    }
+
+    _updateUndoRedoButtons() {
+        const undoButton = this._element('undo-button');
+        const redoButton = this._element('redo-button');
+        if (!undoButton || !redoButton) {
+            return;
+        }
+        const visible = Boolean(this._editSession);
+        undoButton.hidden = !visible;
+        redoButton.hidden = !visible;
+        undoButton.disabled = !this._canUndoEdit();
+        redoButton.disabled = !this._canRedoEdit();
+    }
+
     _syncEnabled() {
         if (!this._options.syncScroll || this._syncApplying) {
             return false;
@@ -654,6 +703,7 @@ view.View = class {
                 this._handleEditorDelta(changes);
             });
         }
+        this._updateUndoRedoButtons();
     }
 
     _resolveNodeEntity(node) {
@@ -771,26 +821,102 @@ view.View = class {
                 }
             } else if (this._editorChangeNeedsGraphRefresh(last)) {
                 await this.refresh(null, { skipShow: true, skipAnimation: true });
+                if (last.entityType === 'node' && last.changeType === 'delete') {
+                    const match = /^graph:(\d+)/.exec(last.entityId);
+                    const graphIndex = match ? Number(match[1]) : 0;
+                    this._setDanglingNodeNames(findDanglingNodes(this._editSession.modified.getGraph(graphIndex)));
+                } else {
+                    this._danglingNodeNames.clear();
+                }
             }
             this._refreshOpenSidebars();
             this._ensureDefaultScreen();
             if (this._target && this._target.refreshDeltaStyles) {
                 this._target.refreshDeltaStyles();
             }
+            if (this._target && this._target.refreshDanglingStyles) {
+                this._target.refreshDanglingStyles();
+            }
         } catch (error) {
             this.error(error, 'Error applying edit.', null);
         }
+    }
+
+    _canUndoEdit() {
+        return Boolean(this._editSession && this._editSession.history.canUndo && this._canInsertNode());
+    }
+
+    _canRedoEdit() {
+        return Boolean(this._editSession && this._editSession.history.canRedo && this._canInsertNode());
+    }
+
+    async _undoEdit() {
+        if (!this._canUndoEdit()) {
+            return;
+        }
+        this._applyingHistory = true;
+        try {
+            this._editSession.history.undo(this._editSession);
+            this._danglingNodeNames.clear();
+            this._closeGraphOverlays();
+            this._sidebar.close();
+            await this._refreshModifiedPane();
+        } catch (error) {
+            this.error(error, 'Error undoing edit.', null);
+        } finally {
+            this._applyingHistory = false;
+            this._updateUndoRedoButtons();
+        }
+    }
+
+    async _redoEdit() {
+        if (!this._canRedoEdit()) {
+            return;
+        }
+        this._applyingHistory = true;
+        try {
+            this._editSession.history.redo(this._editSession);
+            this._danglingNodeNames.clear();
+            this._closeGraphOverlays();
+            this._sidebar.close();
+            await this._refreshModifiedPane();
+        } catch (error) {
+            this.error(error, 'Error redoing edit.', null);
+        } finally {
+            this._applyingHistory = false;
+            this._updateUndoRedoButtons();
+        }
+    }
+
+    _checkpointEditHistory() {
+        if (this._editSession && !this._applyingHistory) {
+            this._editSession.history.checkpoint(this._editSession);
+        }
+    }
+
+    _formatDeleteWarningMessage(node, analysis) {
+        const lines = [];
+        for (const warning of analysis.warnings) {
+            lines.push(`- ${warning.message}`);
+        }
+        const nodeName = node.name || (node.type && node.type.name) || 'node';
+        return `Delete ${nodeName}?\n\n${lines.join('\n')}`;
     }
 
     async applyEditorPatch(patch) {
         if (!this._editSession) {
             return null;
         }
+        this._checkpointEditHistory();
+        if (!(patch.entityType === 'node' && patch.changeType === 'delete' && patch.property === 'remove')) {
+            this._danglingNodeNames.clear();
+        }
         const change = this._editSession.applyPatch(patch);
         // eslint-disable-next-line no-console
         console.log('[editor] Patch applied:', stringifyEditorJSON(patch));
         // eslint-disable-next-line no-console
         console.log('[editor] Delta updated:', stringifyEditorJSON(this._editSession.delta.toJSON()));
+        this._updateUndoRedoButtons();
         return change;
     }
 
@@ -819,7 +945,7 @@ view.View = class {
         const entity = this._resolveNodeEntity(nodeView.value);
         const graph = entity ? this._editSession.modified.getGraph(entity.graphIndex) : null;
         const node = graph && entity ? graph.nodes[entity.nodeIndex] : null;
-        const deleteCheck = node ? canDeleteNode(graph, node) : { ok: false };
+        const deleteAnalysis = node ? analyzeDeleteNode(graph, node) : { ok: false };
         const isBegin = this._isRangeBegin(entity);
         const isEnd = this._isRangeEnd(entity);
         const hasMarkers = this._rangeBegins.length > 0 || this._rangeEnds.length > 0;
@@ -839,7 +965,7 @@ view.View = class {
             {
                 label: 'Delete Node\u2026',
                 action: () => this._deleteNodeAt(nodeView),
-                enabled: deleteCheck.ok
+                enabled: deleteAnalysis.ok
             },
             { separator: true },
             {
@@ -951,6 +1077,7 @@ view.View = class {
             const beginNodes = this._resolveMarkedNodes(this._rangeBegins, graph);
             const endNodes = this._resolveMarkedNodes(this._rangeEnds, graph);
             const extracted = extractSubgraph(graph, beginNodes, endNodes);
+            this._checkpointEditHistory();
             this._editSession.replaceGraph(graphIndex, extracted);
             if (this._model && this._model.proto) {
                 this._model.proto.graph = rebuildGraphProtoFromModified(extracted, this._model.proto);
@@ -1004,6 +1131,12 @@ view.View = class {
         }
     }
 
+    _setDanglingNodeNames(nodes) {
+        this._danglingNodeNames = new Set(
+            (nodes || []).map((node) => node && node.name).filter(Boolean)
+        );
+    }
+
     async _deleteNodeAt(nodeView) {
         if (!this._canInsertNode()) {
             return;
@@ -1015,10 +1148,19 @@ view.View = class {
             }
             const graph = this._editSession.modified.getGraph(entity.graphIndex);
             const node = graph.nodes[entity.nodeIndex];
-            const check = canDeleteNode(graph, node);
-            if (!check.ok) {
-                await this._host.message(check.reason, true, 'OK');
+            const analysis = analyzeDeleteNode(graph, node);
+            if (!analysis.ok) {
+                await this._host.message(analysis.blockReason, true, 'OK');
                 return;
+            }
+            if (analysis.needsConfirm || analysis.warnings.length > 0) {
+                const confirmed = await this._host.confirm(
+                    this._formatDeleteWarningMessage(node, analysis),
+                    { title: 'Delete Node', confirmLabel: 'Delete', cancelLabel: 'Cancel' }
+                );
+                if (!confirmed) {
+                    return;
+                }
             }
             this._closeGraphOverlays();
             if (this._sidebar.identifier === 'node') {
@@ -2219,38 +2361,56 @@ view.Menu = class {
         }
     }
 
-    register(action, accelerator) {
-        let shortcut = '';
-        if (accelerator) {
-            let shift = false;
-            let alt = false;
-            let ctrl = false;
-            let cmd = false;
-            let cmdOrCtrl = false;
-            let key = '';
-            for (const part of accelerator.split('+')) {
-                switch (part) {
-                    case 'CmdOrCtrl': cmdOrCtrl = true; break;
-                    case 'Cmd': cmd = true; break;
-                    case 'Ctrl': ctrl = true; break;
-                    case 'Alt': alt = true; break;
-                    case 'Shift': shift = true; break;
-                    default: key = part; break;
-                }
+    _parseAccelerator(accelerator) {
+        if (!accelerator) {
+            return { shift: false, alt: false, ctrl: false, cmd: false, cmdOrCtrl: false, key: '' };
+        }
+        let shift = false;
+        let alt = false;
+        let ctrl = false;
+        let cmd = false;
+        let cmdOrCtrl = false;
+        let key = '';
+        for (const part of accelerator.split('+')) {
+            switch (part) {
+                case 'CmdOrCtrl': cmdOrCtrl = true; break;
+                case 'Cmd': cmd = true; break;
+                case 'Ctrl': ctrl = true; break;
+                case 'Alt': alt = true; break;
+                case 'Shift': shift = true; break;
+                default: key = part; break;
             }
+        }
+        return { shift, alt, ctrl, cmd, cmdOrCtrl, key };
+    }
+
+    formatAccelerator(accelerator) {
+        const { shift, alt, ctrl, cmd, cmdOrCtrl, key } = this._parseAccelerator(accelerator);
+        if (!key) {
+            return '';
+        }
+        if (this._darwin) {
+            let shortcut = '';
+            shortcut += ctrl ? '&#x2303' : '';
+            shortcut += alt ? '&#x2325;' : '';
+            shortcut += shift ? '&#x21e7;' : '';
+            shortcut += cmdOrCtrl || cmd ? '&#x2318;' : '';
+            shortcut += this._symbols.has(key) ? this._symbols.get(key) : key;
+            return shortcut;
+        }
+        let shortcut = '';
+        shortcut += cmdOrCtrl || ctrl ? 'Ctrl+' : '';
+        shortcut += alt ? 'Alt+' : '';
+        shortcut += shift ? 'Shift+' : '';
+        shortcut += key;
+        return shortcut;
+    }
+
+    register(action, accelerator) {
+        const shortcut = this.formatAccelerator(accelerator);
+        if (accelerator) {
+            const { shift, alt, ctrl, cmd, cmdOrCtrl, key } = this._parseAccelerator(accelerator);
             if (key !== '') {
-                if (this._darwin) {
-                    shortcut += ctrl ? '&#x2303' : '';
-                    shortcut += alt ? '&#x2325;' : '';
-                    shortcut += shift ? '&#x21e7;' : '';
-                    shortcut += cmdOrCtrl || cmd ? '&#x2318;' : '';
-                    shortcut += this._symbols.has(key) ? this._symbols.get(key) : key;
-                } else {
-                    shortcut += cmdOrCtrl || ctrl ? 'Ctrl+' : '';
-                    shortcut += alt ? 'Alt+' : '';
-                    shortcut += shift ? 'Shift+' : '';
-                    shortcut += key;
-                }
                 let code = (cmdOrCtrl ? 0x1000 : 0) | (cmd ? 0x0800 : 0) | (ctrl ? 0x0400 : 0) | (alt ? 0x0200 : 0) | (shift ? 0x0100 : 0);
                 code |= this._keyCodes.has(key) ? this._keyCodes.get(key) : key.charCodeAt(0);
                 this._accelerators.set(code, action);
@@ -2998,6 +3158,14 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyRangeMarkerStyle === 'function') {
                 obj.applyRangeMarkerStyle();
+            }
+        }
+    }
+
+    refreshDanglingStyles() {
+        for (const obj of this._table.values()) {
+            if (obj && typeof obj.applyDanglingStyle === 'function') {
+                obj.applyDanglingStyle();
             }
         }
     }
@@ -3967,10 +4135,20 @@ view.Node = class extends grapher.Node {
         this.element.classList.toggle('range-end', Boolean(isEnd));
     }
 
+    applyDanglingStyle() {
+        if (!this.element || !this.context.view) {
+            return;
+        }
+        const nodeName = this.value && this.value.name;
+        const dangling = nodeName && this.context.view._danglingNodeNames.has(nodeName);
+        this.element.classList.toggle('dangling', Boolean(dangling));
+    }
+
     update() {
         super.update();
         this.applyDeltaStyle();
         this.applyRangeMarkerStyle();
+        this.applyDanglingStyle();
     }
 
     _add(value, type) {

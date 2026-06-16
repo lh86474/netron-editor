@@ -85,6 +85,13 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .toolbar { display: flex; align-items: center; position: absolute; bottom: 10px; left: 10px; padding: 0; margin: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .toolbar button:focus { outline: 0; }
 .toolbar-button { background: None; border-radius: 6px; border: 0; margin: 0; margin-right: 1px; padding: 0; fill: None; stroke: #777; cursor: pointer; width: 32px; height: 32px; user-select: none; }
+.toolbar-button.toolbar-edit-button { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; width: auto; min-width: 52px; height: 32px; padding: 2px 8px; line-height: 1.15; }
+.toolbar-edit-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 11px; color: #444444; }
+.toolbar-edit-shortcut { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 10px; color: #888888; }
+.toolbar-button.toolbar-edit-button:disabled { opacity: 0.35; cursor: default; }
+.toolbar-button.toolbar-edit-button:disabled .toolbar-edit-label,
+.toolbar-button.toolbar-edit-button:disabled .toolbar-edit-shortcut { color: #aaaaaa; }
+.toolbar-button.toolbar-edit-button[hidden] { display: none; }
 .toolbar-path { display: flex; align-items: center; }
 .toolbar-select { background: transparent; position: relative; width: 170px; margin: 4px 4px 4px 4px; }
 .toolbar-select select { width: 100%; appearance: none; -webkit-appearance: none; -moz-appearance: none; font-family: inherit; font-size: 12px; line-height: 16px; border: 1px solid; padding: 3px 18px 3px 10px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
@@ -117,6 +124,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .save-dialog-input { display: block; width: 100%; box-sizing: border-box; font-size: 13px; padding: 6px 8px; border: 1px solid #cccccc; border-radius: 4px; margin-bottom: 12px; }
 .save-dialog-buttons { display: flex; gap: 8px; justify-content: center; }
 .save-dialog-buttons .logo-button { width: auto; min-width: 90px; height: auto; padding: 6px 14px; font-size: 12px; }
+.save-dialog-message { font-size: 13px; line-height: 1.5; margin-bottom: 12px; white-space: pre-wrap; }
 .save-dialog-open .toolbar { display: none; }
 .logo-text { top: -57px; width: 582px; transition: 0.1s; }
 .logo-name { top: -170px; width: 582px; transition: 0.1s; }
@@ -274,6 +282,10 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .toolbar-icon:hover .fill { fill: #dfdfdf; }
 .toolbar-button.active .toolbar-icon .stroke { stroke: #dfdfdf; }
 .toolbar-button.active .toolbar-icon .fill { fill: #dfdfdf; }
+.toolbar-edit-label { color: #cccccc; }
+.toolbar-edit-shortcut { color: #888888; }
+.toolbar-button.toolbar-edit-button:disabled .toolbar-edit-label,
+.toolbar-button.toolbar-edit-button:disabled .toolbar-edit-shortcut { color: #666666; }
 .toolbar-path-back-button { background: #aaaaaa; border-color: #aaaaaa; color: #333333; }
 .toolbar-path-back-button:hover { background: #dfdfdf; border-color: #dfdfdf; }
 .toolbar-path-name-button { background: #aaaaaa ; border-color: #aaaaaa; color: #404040; }
@@ -577,6 +589,14 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
             <polyline class="stroke" points="60,50 52,44 52,56" stroke-width="3" stroke-linejoin="round" fill="none"></polyline>
         </svg>
     </button>
+    <button id="undo-button" class="toolbar-button toolbar-edit-button" type="button" hidden>
+        <span class="toolbar-edit-label">Undo</span>
+        <span id="undo-shortcut" class="toolbar-edit-shortcut"></span>
+    </button>
+    <button id="redo-button" class="toolbar-button toolbar-edit-button" type="button" hidden>
+        <span class="toolbar-edit-label">Redo</span>
+        <span id="redo-shortcut" class="toolbar-edit-shortcut"></span>
+    </button>
     <button id="sidebar-model-button" class="toolbar-button" title="Model Properties">
         <svg class="toolbar-icon" viewbox="0 0 100 100">
             <rect class="border" x="12" y="12" width="76" height="76" rx="16" ry="16" stroke-width="8"></rect>
@@ -788,6 +808,16 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
         <div class="save-dialog-buttons">
             <button id="save-dialog-cancel" class="logo-button" type="button">Cancel</button>
             <button id="save-dialog-confirm" class="logo-button" type="button">Export</button>
+        </div>
+    </div>
+</div>
+<div id="confirm-dialog" class="save-dialog">
+    <div class="save-dialog-panel">
+        <div id="confirm-dialog-title" class="save-dialog-title"></div>
+        <div id="confirm-dialog-message" class="save-dialog-message"></div>
+        <div class="save-dialog-buttons">
+            <button id="confirm-dialog-cancel" class="logo-button" type="button">Cancel</button>
+            <button id="confirm-dialog-confirm" class="logo-button" type="button">OK</button>
         </div>
     </div>
 </div>

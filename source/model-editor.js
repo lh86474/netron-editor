@@ -1,5 +1,6 @@
 
 import { DeltaTracker } from './delta-tracker.js';
+import { EditHistory } from './edit-history.js';
 
 const readType = (type) => {
     if (!type) {
@@ -919,75 +920,83 @@ const inputTensorAt = (node, index) => tensorAt(node.inputs || [], index);
 
 const outputTensorAt = (node, index) => tensorAt(node.outputs || [], index);
 
-const bypassInputForOutput = (node, outputIndex) => {
+const dataInputTensors = (node) => {
     const inputSlots = (node.inputs || []).length > 0 ? node.inputs.length : 1;
+    const tensors = [];
+    for (let index = 0; index < inputSlots; index++) {
+        const tensor = inputTensorAt(node, index);
+        if (tensor && !tensor.initializer) {
+            tensors.push(tensor);
+        }
+    }
+    return tensors;
+};
+
+const primaryDataInput = (node) => {
+    const tensors = dataInputTensors(node);
+    return tensors.length > 0 ? tensors[0] : null;
+};
+
+const bypassInputForOutput = (node, outputIndex) => {
+    const dataInputs = dataInputTensors(node);
+    if (dataInputs.length === 0) {
+        return null;
+    }
     const outputSlots = (node.outputs || []).length > 0 ? node.outputs.length : 1;
-    if (outputSlots === 1 && inputSlots === 1) {
-        return inputTensorAt(node, 0);
+    if (outputSlots === dataInputs.length) {
+        return dataInputs[outputIndex] || dataInputs[0];
     }
-    if (outputSlots === inputSlots) {
-        return inputTensorAt(node, outputIndex);
-    }
-    if (outputSlots === 1 && inputSlots > 1) {
-        return inputTensorAt(node, 0);
-    }
-    return null;
+    return dataInputs[0];
 };
 
-export const canDeleteNode = (graph, node) => {
-    if (!graph || !node) {
-        return { ok: false, reason: 'Node not found.' };
-    }
-    const inputs = node.inputs || [];
-    const outputs = node.outputs || [];
-    const inputSlots = inputs.length > 0 ? inputs.length : 1;
-    const outputSlots = outputs.length > 0 ? outputs.length : 1;
-    if (!inputTensorAt(node, 0) && inputSlots === 1) {
-        return { ok: false, reason: 'Cannot delete a node with no inputs to bypass from.' };
-    }
-    if (outputSlots === 1 && inputSlots === 1) {
-        return inputTensorAt(node, 0) ?
-            { ok: true } :
-            { ok: false, reason: 'Cannot delete a node with no inputs to bypass from.' };
-    }
-    if (outputSlots === inputSlots) {
-        for (let index = 0; index < outputSlots; index++) {
-            if (!inputTensorAt(node, index)) {
-                return { ok: false, reason: `Cannot delete node: input ${index} is missing a tensor.` };
+export const cloneGraphModules = (modules) => readModel({ format: '', modules }).modules;
+
+export const cloneGraph = (graph) => cloneGraphModules([graph])[0];
+
+export const findDanglingNodes = (graph) => {
+    const dangling = [];
+    const graphOutputNames = new Set();
+    for (const output of graph.outputs || []) {
+        for (const value of argumentValues(output)) {
+            if (value && value.name) {
+                graphOutputNames.add(value.name);
             }
         }
-        return { ok: true };
     }
-    if (outputSlots === 1 && inputSlots > 1) {
-        const first = inputTensorAt(node, 0);
-        if (!first) {
-            return { ok: false, reason: 'Cannot delete a node with no inputs to bypass from.' };
+    for (const node of graph.nodes || []) {
+        const outputs = node.outputs || [];
+        if (outputs.length === 0) {
+            continue;
         }
-        const firstName = first.name;
-        for (let index = 1; index < inputSlots; index++) {
-            const tensor = inputTensorAt(node, index);
-            if (tensor && tensor.name !== firstName) {
-                return {
-                    ok: false,
-                    reason: 'Cannot delete node: multiple different inputs cannot be bypassed to a single output.'
-                };
+        let allUnused = true;
+        for (const output of outputs) {
+            for (const value of argumentValues(output)) {
+                if (!value || !value.name) {
+                    continue;
+                }
+                if (graphOutputNames.has(value.name)) {
+                    allUnused = false;
+                    break;
+                }
+                if (findValueConsumers(graph, value).length > 0) {
+                    allUnused = false;
+                    break;
+                }
+            }
+            if (!allUnused) {
+                break;
             }
         }
-        return { ok: true };
+        if (allUnused) {
+            dangling.push(node);
+        }
     }
-    return { ok: false, reason: 'Cannot delete node: input and output counts cannot be rewired safely.' };
+    return dangling;
 };
 
-export const deleteNode = (graph, nodeIndex) => {
+const rewireAndRemoveNode = (graph, nodeIndex) => {
     const nodes = graph.nodes || [];
     const node = nodes[nodeIndex];
-    if (!node) {
-        throw new NodeDeleteError(`Node at index ${nodeIndex} not found.`);
-    }
-    const check = canDeleteNode(graph, node);
-    if (!check.ok) {
-        throw new NodeDeleteError(check.reason);
-    }
     const outputSlots = (node.outputs || []).length > 0 ? node.outputs.length : 1;
     const rewiredPairs = [];
     for (let index = 0; index < outputSlots; index++) {
@@ -1010,6 +1019,97 @@ export const deleteNode = (graph, nodeIndex) => {
     }
     const deleted = nodes.splice(nodeIndex, 1)[0];
     return { deletedIndex: nodeIndex, node: deleted, rewiredPairs };
+};
+
+export const analyzeDeleteNode = (graph, node) => {
+    const warnings = [];
+    if (!graph || !node) {
+        return { ok: false, blockReason: 'Node not found.', warnings, needsConfirm: false };
+    }
+    const inputs = node.inputs || [];
+    const hasInitializerInputs = inputs.some((_, index) => {
+        const tensor = inputTensorAt(node, index);
+        return tensor && tensor.initializer;
+    });
+    if (hasInitializerInputs) {
+        warnings.push({
+            code: 'WEIGHTS_IGNORED',
+            level: 'info',
+            message: 'Weight and bias inputs will be disconnected.'
+        });
+    }
+    const dataInputs = dataInputTensors(node);
+    if (dataInputs.length === 0) {
+        return {
+            ok: false,
+            blockReason: 'Cannot delete a node with no data inputs to bypass from.',
+            warnings,
+            needsConfirm: false
+        };
+    }
+    const distinctDataNames = new Set(dataInputs.map((tensor) => tensor.name).filter(Boolean));
+    if (distinctDataNames.size > 1) {
+        warnings.push({
+            code: 'MERGE_NODE',
+            level: 'warning',
+            message: 'Only the first data input path will be kept; other branches may become unused.'
+        });
+    }
+    const outputSlots = (node.outputs || []).length > 0 ? node.outputs.length : 1;
+    if (outputSlots > 1) {
+        warnings.push({
+            code: 'MULTI_OUTPUT',
+            level: 'warning',
+            message: 'All outputs will be rewired to the corresponding data input (or the primary input).'
+        });
+    }
+    const nodeIndex = (graph.nodes || []).indexOf(node);
+    let predictedDangling = [];
+    if (nodeIndex >= 0) {
+        try {
+            const cloned = cloneGraph(graph);
+            rewireAndRemoveNode(cloned, nodeIndex);
+            predictedDangling = findDanglingNodes(cloned);
+        } catch {
+            predictedDangling = [];
+        }
+    }
+    if (predictedDangling.length > 0) {
+        warnings.push({
+            code: 'DANGLING_PREDICTED',
+            level: 'warning',
+            message: `${predictedDangling.length} node${predictedDangling.length === 1 ? '' : 's'} may become unused (highlighted after delete).`,
+            nodes: predictedDangling
+        });
+    }
+    return {
+        ok: true,
+        warnings,
+        needsConfirm: warnings.some((entry) => entry.level === 'warning')
+    };
+};
+
+export const canDeleteNode = (graph, node) => {
+    const analysis = analyzeDeleteNode(graph, node);
+    return {
+        ok: analysis.ok,
+        reason: analysis.blockReason || ''
+    };
+};
+
+export const deleteNode = (graph, nodeIndex) => {
+    const nodes = graph.nodes || [];
+    const node = nodes[nodeIndex];
+    if (!node) {
+        throw new NodeDeleteError(`Node at index ${nodeIndex} not found.`);
+    }
+    const analysis = analyzeDeleteNode(graph, node);
+    if (!analysis.ok) {
+        throw new NodeDeleteError(analysis.blockReason);
+    }
+    const result = rewireAndRemoveNode(graph, nodeIndex);
+    result.danglingNodes = findDanglingNodes(graph);
+    return result;
 };
 
 // This builds a picture of the old graph
@@ -1128,6 +1228,7 @@ class EditorState {
         this.modified = new EditableModel(normalized);
         this._snapshot = buildOriginalSnapshot(normalized);
         this.delta = new DeltaTracker(this._snapshot);
+        this.history = new EditHistory();
     }
 
     get original() {
@@ -1196,9 +1297,21 @@ class EditorState {
         } else if (patch.changeType === 'delete' && patch.entityType === 'node' && patch.property === 'remove') {
             const location = parseNodeEntityId(entityId);
             const graph = this.modified.getGraph(location.graphIndex);
+            const wasAdded = this.delta.getState(entityId) === 'added';
             deleteNode(graph, location.nodeIndex);
             this.delta.remapNodeIndices(location.graphIndex, location.nodeIndex + 1, -1);
             changeType = 'delete';
+            if (wasAdded) {
+                this.delta.clearEntity(entityId);
+                return {
+                    entityId,
+                    entityType: patch.entityType,
+                    changeType,
+                    property: patch.property,
+                    oldValue: undefined,
+                    newValue: patch.newValue
+                };
+            }
         } else {
             const location = parseNodeEntityId(entityId.includes('/attr:') ? entityId : patch.parentId || entityId);
             const graph = this.modified.getGraph(location.graphIndex);

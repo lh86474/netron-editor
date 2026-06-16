@@ -144,6 +144,33 @@ export class DeltaTracker {
         return aggregates;
     }
 
+    // to support undo
+    restore(changes) {
+        this._changes = new Map();
+        for (const change of changes) {
+            this._changes.set(change.entityId, { ...change });
+        }
+        this._emit();
+    }
+    // to support undo
+    clearEntity(entityId) {
+        if (this._changes.delete(entityId)) {
+            this._emit();
+        }
+    }
+    // to support redo
+    exportSnapshot() {
+        return {
+            original: Array.from(this._original.entries()),
+            changes: this.getChanges().map((change) => ({ ...change }))
+        };
+    }
+
+    restoreSnapshot(snapshot) {
+        this._original = new Map(snapshot.original);
+        this.restore(snapshot.changes);
+    }
+
     subscribe(callback) {
         this._listeners.add(callback);
         return () => this._listeners.delete(callback);
