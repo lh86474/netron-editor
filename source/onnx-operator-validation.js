@@ -67,6 +67,16 @@ const isOptionalSchemaInput = (schemaInput) => schemaInput && schemaInput.option
 
 const isInputConnected = (input) => Array.isArray(input.value) && input.value.length > 0;
 
+const isFixedArityOperator = (opSchema) => {
+    const schemaInputs = opSchema.inputs || [];
+    if (schemaInputs.some((entry) => entry.list)) {
+        return false;
+    }
+    const min = opSchema.min_input;
+    const max = opSchema.max_input !== undefined ? opSchema.max_input : min;
+    return min !== undefined && max !== undefined && min === max && min > 0;
+};
+
 const findTypeConstraint = (opSchema, typeParam) => {
     if (!typeParam || !Array.isArray(opSchema.type_constraints)) {
         return null;
@@ -116,6 +126,20 @@ export const validateNodeInsert = (graph, refNodeIndex, position, opSchema, node
             code: 'UNCONNECTED_INPUT',
             message: `Input '${input.name}' of ${operatorName} will be unconnected after insert ${positionLabel} ${refName}.`
         });
+    }
+
+    if (isFixedArityOperator(opSchema)) {
+        for (let index = 0; index < plan.inputs.length; index++) {
+            const input = plan.inputs[index];
+            if (!isInputConnected(input) || input.value.length <= 1) {
+                continue;
+            }
+            issues.push({
+                severity: 'error',
+                code: 'MULTIPLE_VALUES_IN_SLOT',
+                message: `Input '${input.name}' of ${operatorName} will have ${input.value.length} tensors; expected at most 1 per slot.`
+            });
+        }
     }
 
     if (opSchema.max_input !== undefined && connectedCount > opSchema.max_input) {
