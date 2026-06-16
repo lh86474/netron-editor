@@ -1022,6 +1022,7 @@ const rewireAndRemoveNode = (graph, nodeIndex) => {
 };
 
 export const analyzeDeleteNode = (graph, node) => {
+    // this analyzes the node and returns a list of warnings based on inputs and outputs
     const warnings = [];
     if (!graph || !node) {
         return { ok: false, blockReason: 'Node not found.', warnings, needsConfirm: false };
