@@ -3307,7 +3307,7 @@ view.Node = class extends grapher.Node {
             return;
         }
         const state = this.context.deltaTracker.getAggregateState(this._entityId);
-        this.element.classList.toggle('edited', state === 'modified' || state === 'added');
+        this.element.classList.toggle('edited', state === 'modified' || state === 'added' || state === 'deleted');
     }
 
     update() {
