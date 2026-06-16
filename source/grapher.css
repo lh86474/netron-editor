@@ -75,6 +75,7 @@
 .range-begin > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
 .range-end > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
 .range-begin.range-end > .node.node-border { stroke: rgba(120, 0, 160, 0.95); stroke-width: 2px; }
+/*styling for dangling nodes */
 .dangling > .node.node-border { stroke: rgba(230, 160, 0, 0.95); stroke-width: 2px; stroke-dasharray: 6 4; }
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }
 .edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }
