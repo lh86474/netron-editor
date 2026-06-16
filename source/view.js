@@ -164,17 +164,40 @@ view.View = class {
                         execute: async () => await this._host.execute('quit'),
                     });
                 } else {
+                    // export options on sidebar for original, 
                     file.add({
-                        label: 'Export as &PNG',
-                        accelerator: 'CmdOrCtrl+Shift+E',
-                        execute: async () => await this.export(`${this._host.document.title}.png`),
-                        enabled: () => this.activeTarget
+                        label: 'Export &Original as PNG',
+                        execute: async () => await this.export(
+                            `${this._exportImageBasename('original')}.png`,
+                            { pane: 'original' }
+                        ),
+                        enabled: () => this.activeTarget && Boolean(this._paneGraph('original'))
                     });
                     file.add({
-                        label: 'Export as &SVG',
+                        label: 'Export Original as &SVG',
+                        execute: async () => await this.export(
+                            `${this._exportImageBasename('original')}.svg`,
+                            { pane: 'original' }
+                        ),
+                        enabled: () => this.activeTarget && Boolean(this._paneGraph('original'))
+                    });
+                    file.add({
+                        label: 'Export &Modified as PNG',
+                        accelerator: 'CmdOrCtrl+Shift+E',
+                        execute: async () => await this.export(
+                            `${this._exportImageBasename('modified')}.png`,
+                            { pane: 'modified' }
+                        ),
+                        enabled: () => this.activeTarget && Boolean(this._paneGraph('modified'))
+                    });
+                    file.add({
+                        label: 'Export Modified as &SVG',
                         accelerator: 'CmdOrCtrl+Alt+E',
-                        execute: async () => await this.export(`${this._host.document.title}.svg`),
-                        enabled: () => this.activeTarget
+                        execute: async () => await this.export(
+                            `${this._exportImageBasename('modified')}.svg`,
+                            { pane: 'modified' }
+                        ),
+                        enabled: () => this.activeTarget && Boolean(this._paneGraph('modified'))
                     });
                     file.add({
                         label: 'Export Modified Model as &ONNX...',
@@ -2412,7 +2435,7 @@ view.Menu = class {
             this.unregister(this._pop);
             this.unregister(this._push);
             this._element.style.opacity = 0;
-            this._element.style.left = '-17em';
+            this._element.style.left = '-24em';
             const button = this._element.ownerDocument.activeElement;
             if (this._buttons.indexOf(button) > 0) {
                 button.blur();
@@ -6622,6 +6645,7 @@ view.ModelSidebar = class extends view.ObjectSidebar {
                 this.addArgument(argument.name, argument, 'attribute');
             }
         }
+       
         if (this._view._canMergeOnnx()) {
             this.addSection('Actions');
             const item = this.addProperty('merge', 'Merge ONNX Graph…');
