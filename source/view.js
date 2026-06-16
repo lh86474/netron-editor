@@ -530,9 +530,9 @@ view.View = class {
         }
         if (this._editSession && this._rightPane) {
             this._rightPane.deltaTracker = this._editSession.delta;
-            this._deltaUnsubscribe = this._editSession.delta.subscribe((changes) => {
-                this._handleEditorDelta(changes);
-            });
+            // we don't do .delta.subscribe((changes)) in order to allow graph refresh for 
+            // all types of edits, not just deltas
+            this._deltaUnsubscribe = this._editSession.delta.subscribe(() => {});
         }
     }
 
@@ -629,21 +629,20 @@ view.View = class {
         return false;
     }
 
-    async _handleEditorDelta(changes) {
+    async _handleEditorDelta(change) {
         if (!this._editSession) {
             return;
         }
-        const last = changes.length > 0 ? changes[changes.length - 1] : null;
         try {
-            if (last && last.entityType === 'attribute' && this.options.attributes) {
-                const modelNode = this._resolveNodeFromChange(last);
+            if (change && change.entityType === 'attribute' && this.options.attributes) {
+                const modelNode = this._resolveNodeFromChange(change);
                 if (modelNode && this._target) {
                     const heightChanged = await this._target.refreshNodeArgumentList(modelNode);
                     if (heightChanged) {
-                        await this.refresh(null, { skipShow: true, skipAnimation: true });
+                        await this.refresh(null, { skipShow: true, skipAnimation: true});
                     }
                 }
-            } else if (this._editorChangeNeedsGraphRefresh(last)) {
+            } else if (this._editorChangeNeedsGraphRefresh(change)) {
                 await this.refresh(null, { skipShow: true, skipAnimation: true });
             }
             this._refreshOpenSidebars();
@@ -653,7 +652,7 @@ view.View = class {
             }
         } catch (error) {
             this.error(error, 'Error applying edit.', null);
-        }
+        } 
     }
 
     async applyEditorPatch(patch) {
@@ -665,6 +664,8 @@ view.View = class {
         console.log('[editor] Patch applied:', stringifyEditorJSON(patch));
         // eslint-disable-next-line no-console
         console.log('[editor] Delta updated:', stringifyEditorJSON(this._editSession.delta.toJSON()));
+        // we have to handle the delta here because we need to refresh the graph for all types of edits, not just deltas
+        await this._handleEditorDelta(change);
         return change;
     }
 
