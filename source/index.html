@@ -20,16 +20,14 @@ html { touch-action: none; overflow: hidden; width: 100%; height: 100%; -ms-text
 body { touch-action: none; overflow: hidden; width: 100%; height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 12px; text-rendering: geometricPrecision; }
 button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; }
 :root { --chrome-height: 32px; --chrome-inset: 8px; --chrome-width: 32px; }
+:root { --chrome-height: 32px; --chrome-inset: 8px; --chrome-width: 32px; }
 .center { position: absolute; margin: auto; top: 0; right: 0; bottom: 0; left: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .select { user-select: text; -webkit-user-select: text; -moz-user-select: text; }
 .diff-container { display: flex; height: 100%; width: 100%; }
 .graph-pane { display: flex; flex: 1; height: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; position: relative; }
-<<<<<<< HEAD
 .graph-pane-label { position: absolute; top: 0px; height: var(--chrome-height); display: flex; align-items: center; left: var(--chrome-inset); z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
-=======
-.graph-pane-label { position: absolute; top: 0; height: var(--chrome-height); display: flex; align-items: center; left: var(--chrome-inset); z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
->>>>>>> editor_feature
 .graph-pane-original { border-right: 1px solid #ccc; }
+.graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-readonly { cursor: default; }
 .pane-divider { width: 0; flex-shrink: 0; }
@@ -190,6 +188,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .titlebar-button { display: flex; justify-content: center; align-items: center; width: 46px; height: 32px; user-select: none; -webkit-app-region: no-drag; }
 .titlebar-button:hover { color: #000000; background-color: rgba(0, 0, 0, 0.15); }
 .titlebar-button-close:hover { color: #ffffff; background-color: #b43029; }
+.menu-button { display: flex; justify-content: center; align-items: center; color: #aaaaaa; font-size: 20px; height: 32px; width: 32px; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; -webkit-app-region: no-drag; -webkit-app-region: no-drag; user-select: none; transform: translateY(-2px); }
 .menu-button { display: flex; justify-content: center; align-items: center; color: #aaaaaa; font-size: 20px; height: 32px; width: 32px; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; -webkit-app-region: no-drag; -webkit-app-region: no-drag; user-select: none; transform: translateY(-2px); }
 .menu-button:hover { color: #000000; }
 .menu { display: block; position: absolute; left: -17em; width: 17em; top: 0; height: 100%; z-index: 2; background-color: #ececec; border-right: 1px solid rgba(255, 255, 255, 0.5); padding-top: 40px; padding-bottom: 2px; margin-left: 0; margin-top: 0; overflow: hidden; transition: 0.1s; }

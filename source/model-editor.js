@@ -113,7 +113,6 @@ const readModel = (model) => {
         if (value.initializer !== undefined) {
             cloned.initializer = value.initializer;
         }
-<<<<<<< HEAD
         if (Array.isArray(value.attributes)) {
             cloned.attributes = value.attributes.map((attribute) => readAttribute(attribute));
         } else if (Array.isArray(value.metadata)) {
@@ -125,8 +124,6 @@ const readModel = (model) => {
         } else {
             cloned.attributes = [];
         }
-=======
->>>>>>> editor_feature
         valueMap.set(value, cloned);
         return cloned;
     };
