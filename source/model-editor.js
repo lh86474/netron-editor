@@ -387,6 +387,13 @@ export const buildNodeFromMetadata = (opSchema, uniqueName, graph) => {
     };
 };
 
+const isStaticInput = (argument) => {
+    if (!argument || !Array.isArray(argument.value) || argument.value.length === 0) {
+        return false;
+    }
+    return argument.value.every((value) => value && value.initializer);
+};
+
 export const insertNode = (graph, refNodeIndex, position, nodeSpec) => {
     const nodes = graph.nodes || [];
     const refNode = nodes[refNodeIndex];
@@ -410,27 +417,47 @@ export const insertNode = (graph, refNodeIndex, position, nodeSpec) => {
     };
     if (position === 'above') {
         const refInputs = refNode.inputs || [];
-        const inputCount = Math.max(refInputs.length, (nodeSpec.inputs || []).length, 1);
-        for (let index = 0; index < inputCount; index++) {
+        const schemaInputs = nodeSpec.inputs || [];
+        const schemaOutputs = nodeSpec.outputs || [];
+        const minInputs = nodeSpec.min_input !== undefined ? nodeSpec.min_input : Math.max(schemaInputs.length, 1);
+        const minOutputs = nodeSpec.min_output !== undefined ? nodeSpec.min_output : Math.max(schemaOutputs.length, 1);
+        const inputCount = Math.max(schemaInputs.length, minInputs);
+        const outputCount = Math.max(schemaOutputs.length, minOutputs);
+        const spliceTargets = [];
+        for (let index = 0; index < refInputs.length; index++) {
             const refInput = refInputs[index];
-            const schemaInput = (nodeSpec.inputs || [])[index];
-            const inputValues = refInput && Array.isArray(refInput.value) ? refInput.value.slice() : [];
+            if (!isStaticInput(refInput)) {
+                spliceTargets.push({ index, input: refInput });
+            }
+        }
+        const spliceLimit = Math.min(spliceTargets.length, inputCount);
+        for (let index = 0; index < inputCount; index++) {
+            const schemaInput = schemaInputs[index];
+            const spliceTarget = index < spliceLimit ? spliceTargets[index] : null;
+            const inputValues = spliceTarget && Array.isArray(spliceTarget.input.value) ?
+                spliceTarget.input.value.slice() : [];
             newNode.inputs.push({
-                name: schemaInput ? schemaInput.name : (refInput ? refInput.name : `input_${index}`),
+                name: schemaInput ? schemaInput.name : `input_${index}`,
                 value: inputValues
             });
         }
-        const outputCount = Math.max((nodeSpec.outputs || []).length, refInputs.length, 1);
+        const newOutputValues = [];
         for (let index = 0; index < outputCount; index++) {
-            const schemaOutput = (nodeSpec.outputs || [])[index];
+            const schemaOutput = schemaOutputs[index];
             const tensorName = genUniqueTensorName(`${prefix}_out_${index}`, graph);
             const newValue = { name: tensorName, attributes: [] };
+            newOutputValues.push(newValue);
             newNode.outputs.push({
                 name: schemaOutput ? schemaOutput.name : `output_${index}`,
                 value: [newValue]
             });
-            if (index < refInputs.length && refInputs[index]) {
-                refInputs[index].value = [newValue];
+        }
+        const rewireLimit = Math.min(spliceTargets.length, outputCount);
+        for (let index = 0; index < rewireLimit; index++) {
+            const { index: refIndex } = spliceTargets[index];
+            const newValue = newOutputValues[Math.min(index, newOutputValues.length - 1)];
+            if (newValue && refInputs[refIndex]) {
+                refInputs[refIndex].value = [newValue];
             }
         }
     } else {
