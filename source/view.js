@@ -1649,6 +1649,13 @@ view.Menu = class {
             ['Backspace', '&#x232B;'], ['Enter', '&#x23ce;'],
             ['Up', '&#x2191;'], ['Down', '&#x2193;'],
         ]);
+        // fix backspace issues. 
+        // If the focus is in an editable field, then backspace should not be handled by the menu.
+        const active = this_document.activeElement;
+        const tag = active ? active.tagName : '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || (active && active.isContentEditable)) {
+            return;
+        }
         this._keydown = (e) => {
             this._alt = false;
             const code = e.keyCode | (e.altKey ? 0x0200 : 0) | (e.shiftKey ? 0x0100 : 0);
