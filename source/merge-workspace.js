@@ -737,6 +737,10 @@ export class MergeWorkspaceController {
         const context = new BytesFileContext(this._view._host, 'merged.onnx', bytes);
         const filename = buildMergeFilename(upstream.filename, downstream.filename);
         this.teardown();
+        // it changes when the graph panes exist int he layout tree
+        // a normal file in the file dialog uses welcome spinner. 
+        // keeps panes laid out but invisibile
+        // originally, we just used the plain .show('welcome), which removes from layout since display: none
         this._view.show('welcome spinner');
         await this._view.open(context);
         this._view._host.document.title = filename;
