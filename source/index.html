@@ -127,6 +127,16 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .save-dialog-buttons .logo-button { width: auto; min-width: 90px; height: auto; padding: 6px 14px; font-size: 12px; }
 .save-dialog-message { font-size: 13px; line-height: 1.5; margin-bottom: 12px; white-space: pre-wrap; }
 .save-dialog-open .toolbar { display: none; }
+.confirm-panel { display: none; opacity: 0; position: absolute; top: 0; left: 0; width: 100%; height: 100%; flex-direction: column; justify-content: center; align-items: center; }
+.confirm-title { display: inline; text-align: center; width: 562px; font-size: 14px; font-weight: bold; line-height: 22px; margin-bottom: 12px; user-select: text; -webkit-user-select: text; -moz-user-select: text; }
+.confirm-issues { display: block; text-align: left; width: 562px; max-height: 240px; overflow-y: auto; font-size: 13px; line-height: 20px; margin: 0 0 20px 0; padding: 12px 16px; list-style: none; border: 1px solid #cccccc; background-color: #ffffff; box-sizing: border-box; }
+.confirm-issue { margin: 0 0 8px 0; }
+.confirm-issue:last-child { margin-bottom: 0; }
+.confirm-issue-none { color: #666666; }
+.confirm-issue-error { color: #b00020; }
+.confirm-issue-warning { color: #8a6d00; }
+.confirm-buttons { display: flex; gap: 12px; justify-content: center; }
+.confirm-button { min-width: 125px; }
 .logo-text { top: -57px; width: 582px; transition: 0.1s; }
 .logo-name { top: -170px; width: 582px; transition: 0.1s; }
 .logo-icon { left: 248px; top: -18px; width: 106px; height: 106px; transition: 0.1s; }
@@ -171,6 +181,14 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .alert .message { display: flex; opacity: 1; }
 .alert .message-text { display: inline; opacity: 1; width: 50%; padding-top: 0px; }
 .alert .message-button { display: inline; opacity: 1; }
+.confirm { background-color: #ececec; color: #242424; }
+.confirm .diff-container { display: none; opacity: 0; }
+.confirm .target { display: none; opacity: 0; }
+.confirm .toolbar { display: none; opacity: 0; }
+.confirm .menu { display: none; opacity: 0; }
+.confirm .logo { display: none; opacity: 0; }
+.confirm .message { display: none; opacity: 0; }
+.confirm .confirm-panel { display: flex; opacity: 1; }
 .about { overflow: hidden; }
 .about .toolbar { display: none; }
 .about .logo { display: block; background-color: #ececec; color: #666666; }
@@ -261,6 +279,11 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .merge-source-toggle { color: #ccc; }
 .welcome { background-color: #1e1e1e; color: #888888; }
 .alert { background-color: #1e1e1e; color: #888888; }
+.confirm { background-color: #1e1e1e; color: #888888; }
+.confirm-issues { background-color: #2d2d2d; border-color: #444444; }
+.confirm-issue-none { color: #aaaaaa; }
+.confirm-issue-error { color: #ff8a80; }
+.confirm-issue-warning { color: #ffd54f; }
 .logo-stroke { stroke: #888888; }
 .logo-fill { fill: #888888; }
 .logo-border { stroke: #000000; }
@@ -820,6 +843,14 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
             <button id="confirm-dialog-cancel" class="logo-button" type="button">Cancel</button>
             <button id="confirm-dialog-confirm" class="logo-button" type="button">OK</button>
         </div>
+    </div>
+</div>
+<div id="confirm" class="confirm-panel">
+    <div id="confirm-title" class="confirm-title"></div>
+    <ul id="confirm-issues" class="confirm-issues"></ul>
+    <div class="confirm-buttons">
+        <button id="confirm-cancel" class="logo-button confirm-button" type="button" tabindex="0">Cancel</button>
+        <button id="confirm-ok" class="logo-button confirm-button" type="button" tabindex="0">OK</button>
     </div>
 </div>
 <div id="titlebar" class="titlebar">

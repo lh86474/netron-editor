@@ -800,11 +800,112 @@ export const buildNodeFromMetadata = (opSchema, uniqueName, graph) => {
         type,
         attributes,
         inputs,
-        outputs
+        outputs,
+        min_input: opSchema.min_input !== undefined ? opSchema.min_input : minInputs,
+        max_input: opSchema.max_input !== undefined ? opSchema.max_input : Math.max(schemaInputs.length, minInputs),
+        min_output: opSchema.min_output !== undefined ? opSchema.min_output : minOutputs,
+        max_output: opSchema.max_output !== undefined ? opSchema.max_output : Math.max(schemaOutputs.length, minOutputs),
+        inputSchemas: schemaInputs.map((entry) => ({
+            name: entry.name,
+            list: entry.list === true,
+            option: entry.option
+        }))
     };
 };
 
-export const insertNode = (graph, refNodeIndex, position, nodeSpec) => {
+const isFixedArityWiring = (nodeSpec) => {
+    const schemas = nodeSpec.inputSchemas || [];
+    if (schemas.some((entry) => entry.list)) {
+        return false;
+    }
+    const min = nodeSpec.min_input;
+    const max = nodeSpec.max_input !== undefined ? nodeSpec.max_input : min;
+    return min !== undefined && max !== undefined && min === max && min > 0;
+};
+
+const isVariadicListInput = (nodeSpec) => {
+    const schemas = nodeSpec.inputSchemas || [];
+    return schemas.length === 1 && schemas[0].list === true;
+};
+
+const flattenDynamicTensors = (spliceTargets) => {
+    const tensors = [];
+    for (const target of spliceTargets) {
+        if (!target || !Array.isArray(target.input.value)) {
+            continue;
+        }
+        for (const value of target.input.value) {
+            if (value) {
+                tensors.push(value);
+            }
+        }
+    }
+    return tensors;
+};
+
+const flattenOutputTensors = (refOutputs) => {
+    const tensors = [];
+    for (const refOutput of refOutputs) {
+        if (!refOutput || !Array.isArray(refOutput.value)) {
+            continue;
+        }
+        for (const value of refOutput.value) {
+            if (value) {
+                tensors.push(value);
+            }
+        }
+    }
+    return tensors;
+};
+
+const buildPlannedInputs = (nodeSpec, inputCount, sourceTensors, perSlotSources) => {
+    const schemaInputs = nodeSpec.inputs || [];
+    const inputs = [];
+    if (isVariadicListInput(nodeSpec)) {
+        for (let index = 0; index < inputCount; index++) {
+            const schemaInput = schemaInputs[index];
+            inputs.push({
+                name: schemaInput ? schemaInput.name : `input_${index}`,
+                value: index === 0 ? sourceTensors.slice() : []
+            });
+        }
+        return inputs;
+    }
+    if (isFixedArityWiring(nodeSpec) && inputCount > 1) {
+        for (let index = 0; index < inputCount; index++) {
+            const schemaInput = schemaInputs[index];
+            inputs.push({
+                name: schemaInput ? schemaInput.name : `input_${index}`,
+                value: index < sourceTensors.length ? [sourceTensors[index]] : []
+            });
+        }
+        return inputs;
+    }
+    for (let index = 0; index < inputCount; index++) {
+        const schemaInput = schemaInputs[index];
+        const source = perSlotSources[index];
+        let inputValues = source && Array.isArray(source) ? source.slice() : [];
+        if (inputCount === 1 && inputValues.length > 1) {
+            inputValues = [inputValues[0]];
+        }
+        inputs.push({
+            name: schemaInput ? schemaInput.name : `input_${index}`,
+            value: inputValues
+        });
+    }
+    return inputs;
+};
+
+// treats an argument as static when every value has an initializer
+// meaning that the value is not dynamic and can be used as a static input
+const isStaticInput = (argument) => {
+    if (!argument || !Array.isArray(argument.value) || argument.value.length === 0) {
+        return false;
+    }
+    return argument.value.every((value) => value && value.initializer);
+};
+
+export const planNodeInsert = (graph, refNodeIndex, position, nodeSpec) => {
     const nodes = graph.nodes || [];
     const refNode = nodes[refNodeIndex];
     if (!refNode) {
@@ -813,7 +914,69 @@ export const insertNode = (graph, refNodeIndex, position, nodeSpec) => {
     if (position !== 'above' && position !== 'below') {
         throw new Error(`Invalid insert position: ${position}`);
     }
+    const schemaInputs = nodeSpec.inputs || [];
+    const schemaOutputs = nodeSpec.outputs || [];
+    const minInputs = nodeSpec.min_input !== undefined ? nodeSpec.min_input : Math.max(schemaInputs.length, 1);
+    const minOutputs = nodeSpec.min_output !== undefined ? nodeSpec.min_output : Math.max(schemaOutputs.length, 1);
+    const inputs = [];
+    let outputCount = 1;
+    let spliceTargets = [];
+    if (position === 'above') {
+        const refInputs = refNode.inputs || [];
+        const inputCount = Math.max(schemaInputs.length, minInputs);
+        outputCount = Math.max(schemaOutputs.length, minOutputs);
+        for (let index = 0; index < refInputs.length; index++) {
+            const refInput = refInputs[index];
+            if (!isStaticInput(refInput)) {
+                spliceTargets.push({ index, input: refInput });
+            }
+        }
+        const spliceLimit = Math.min(spliceTargets.length, inputCount);
+        const perSlotSources = [];
+        for (let index = 0; index < inputCount; index++) {
+            const spliceTarget = index < spliceLimit ? spliceTargets[index] : null;
+            perSlotSources.push(spliceTarget && Array.isArray(spliceTarget.input.value) ?
+                spliceTarget.input.value : []);
+        }
+        inputs.push(...buildPlannedInputs(
+            nodeSpec,
+            inputCount,
+            flattenDynamicTensors(spliceTargets),
+            perSlotSources
+        ));
+    } else {
+        const refOutputs = refNode.outputs || [];
+        const inputCount = Math.max(refOutputs.length, schemaInputs.length, 1);
+        outputCount = Math.max(schemaOutputs.length, refOutputs.length, 1);
+        const perSlotSources = refOutputs.map((refOutput) => (
+            refOutput && Array.isArray(refOutput.value) ? refOutput.value : []
+        ));
+        while (perSlotSources.length < inputCount) {
+            perSlotSources.push([]);
+        }
+        const planned = buildPlannedInputs(
+            nodeSpec,
+            inputCount,
+            flattenOutputTensors(refOutputs),
+            perSlotSources
+        );
+        for (let index = 0; index < inputCount; index++) {
+            const refOutput = refOutputs[index];
+            const schemaInput = schemaInputs[index];
+            planned[index].name = schemaInput ? schemaInput.name :
+                (refOutput ? refOutput.name : `input_${index}`);
+        }
+        inputs.push(...planned);
+    }
+    return { refNode, position, inputs, outputCount, spliceTargets };
+};
+
+export const insertNode = (graph, refNodeIndex, position, nodeSpec) => {
+    const nodes = graph.nodes || [];
+    const refNode = nodes[refNodeIndex];
     const prefix = nodeSpec.name || 'inserted';
+    const plan = planNodeInsert(graph, refNodeIndex, position, nodeSpec);
+    const schemaOutputs = nodeSpec.outputs || [];
     const newNode = {
         name: nodeSpec.name,
         type: nodeSpec.type,
@@ -822,61 +985,38 @@ export const insertNode = (graph, refNodeIndex, position, nodeSpec) => {
             type: attribute.type,
             value: cloneAttributeValue(attribute.value)
         })),
-        inputs: [],
+        inputs: plan.inputs.map((input) => ({
+            name: input.name,
+            value: input.value.slice()
+        })),
         outputs: []
     };
+    const newOutputValues = [];
+    for (let index = 0; index < plan.outputCount; index++) {
+        const schemaOutput = schemaOutputs[index];
+        const tensorName = genUniqueTensorName(`${prefix}_out_${index}`, graph);
+        const newValue = { name: tensorName, attributes: [] };
+        newOutputValues.push(newValue);
+        newNode.outputs.push({
+            name: schemaOutput ? schemaOutput.name : `output_${index}`,
+            value: [newValue]
+        });
+    }
     if (position === 'above') {
         const refInputs = refNode.inputs || [];
-        const inputCount = Math.max(refInputs.length, (nodeSpec.inputs || []).length, 1);
-        for (let index = 0; index < inputCount; index++) {
-            const refInput = refInputs[index];
-            const schemaInput = (nodeSpec.inputs || [])[index];
-            const inputValues = refInput && Array.isArray(refInput.value) ? refInput.value.slice() : [];
-            newNode.inputs.push({
-                name: schemaInput ? schemaInput.name : (refInput ? refInput.name : `input_${index}`),
-                value: inputValues
-            });
-        }
-        const outputCount = Math.max((nodeSpec.outputs || []).length, refInputs.length, 1);
-        for (let index = 0; index < outputCount; index++) {
-            const schemaOutput = (nodeSpec.outputs || [])[index];
-            const tensorName = genUniqueTensorName(`${prefix}_out_${index}`, graph);
-            const newValue = { name: tensorName, attributes: [] };
-            newNode.outputs.push({
-                name: schemaOutput ? schemaOutput.name : `output_${index}`,
-                value: [newValue]
-            });
-            if (index < refInputs.length && refInputs[index]) {
-                refInputs[index].value = [newValue];
+        const rewireLimit = Math.min(plan.spliceTargets.length, plan.outputCount);
+        for (let index = 0; index < rewireLimit; index++) {
+            const { index: refIndex } = plan.spliceTargets[index];
+            const newValue = newOutputValues[Math.min(index, newOutputValues.length - 1)];
+            if (newValue && refInputs[refIndex]) {
+                refInputs[refIndex].value = [newValue];
             }
         }
     } else {
         const refOutputs = refNode.outputs || [];
-        const inputCount = Math.max(refOutputs.length, (nodeSpec.inputs || []).length, 1);
-        for (let index = 0; index < inputCount; index++) {
-            const refOutput = refOutputs[index];
-            const schemaInput = (nodeSpec.inputs || [])[index];
-            const inputValues = refOutput && Array.isArray(refOutput.value) ? refOutput.value.slice() : [];
-            newNode.inputs.push({
-                name: schemaInput ? schemaInput.name : (refOutput ? refOutput.name : `input_${index}`),
-                value: inputValues
-            });
-        }
-        const outputCount = Math.max((nodeSpec.outputs || []).length, refOutputs.length, 1);
         const oldOutputValues = refOutputs.map((output) => (
             Array.isArray(output.value) && output.value.length > 0 ? output.value[0] : null
         ));
-        const newOutputValues = [];
-        for (let index = 0; index < outputCount; index++) {
-            const schemaOutput = (nodeSpec.outputs || [])[index];
-            const tensorName = genUniqueTensorName(`${prefix}_out_${index}`, graph);
-            const newValue = { name: tensorName, attributes: [] };
-            newOutputValues.push(newValue);
-            newNode.outputs.push({
-                name: schemaOutput ? schemaOutput.name : `output_${index}`,
-                value: [newValue]
-            });
-        }
         for (let index = 0; index < oldOutputValues.length; index++) {
             const oldValue = oldOutputValues[index];
             const newValue = newOutputValues[Math.min(index, newOutputValues.length - 1)];
