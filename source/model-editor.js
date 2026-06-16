@@ -670,7 +670,7 @@ export const extractSubgraph = (graph, beginNodes, endNodes) => {
                 }
                 if (!boundaryInputs.has(value.name)) {
                     boundaryInputs.set(value.name, {
-                        name: input.name,
+                        name: value.name,
                         value: [cloneExtractValue(value, valueMap)]
                     });
                 }
@@ -694,7 +694,7 @@ export const extractSubgraph = (graph, beginNodes, endNodes) => {
                 });
                 if (isBoundary) {
                     boundaryOutputs.set(value.name, {
-                        name: output.name,
+                        name: value.name,
                         value: [cloneExtractValue(value, valueMap)]
                     });
                 }
