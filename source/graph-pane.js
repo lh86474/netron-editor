@@ -41,8 +41,8 @@ export class GraphPane {
         return this._graph;
     }
 
-    async render(target, signature, state) {
-        const status = await this._view._renderGraphInPane(this, target, signature, state);
+    async render(target, signature, state, model) {
+        const status = await this._view._renderGraphInPane(this, target, signature, state, model);
         return status;
     }
 
