@@ -725,8 +725,8 @@ view.View = class {
             if (last && last.entityType === 'attribute' && this.options.attributes) {
                 const modelNode = this._resolveNodeFromChange(last);
                 if (modelNode && this._target) {
-                    const heightChanged = await this._target.refreshNodeArgumentList(modelNode);
-                    if (heightChanged) {
+                    const rebuildResult = await this._target.refreshNodeArgumentList(modelNode);
+                    if (rebuildResult === null || rebuildResult === true) {
                         await this.refresh(null, { skipShow: true, skipAnimation: true });
                     }
                 }
@@ -2752,7 +2752,7 @@ view.Graph = class extends grapher.Graph {
     async refreshNodeArgumentList(modelNode) {
         const viewNode = this._table.get(modelNode);
         if (!viewNode || typeof viewNode.rebuildArgumentList !== 'function') {
-            return false;
+            return null;
         }
         return viewNode.rebuildArgumentList();
     }
@@ -3887,9 +3887,32 @@ view.Node = class extends grapher.Node {
     }
 
     async rebuildArgumentList() {
-        const block = this._argumentList;
-        if (!block || !block.element) {
-            return false;
+        const options = this.context.options;
+        if (!options.attributes) {
+            return null;
+        }
+        let block = this._argumentList;
+        if (!block) {
+            block = this.list();
+            this._argumentList = block;
+            block.on('click', () => this.context.activate(this.value, 'target'));
+        }
+        if (!block.element) {
+            if (!this.element) {
+                return null;
+            }
+            const document = this.context.host.document;
+            const lastBlock = this.blocks[this.blocks.length - 1];
+            if (lastBlock) {
+                lastBlock.last = false;
+            }
+            block.first = false;
+            block.last = true;
+            block.build(document, this.element);
+            this.element.insertBefore(block.element, this.border);
+        }
+        if (!block.element) {
+            return null;
         }
         const previousHeight = this.height;
         const document = this.context.host.document;
