@@ -213,8 +213,7 @@ export class MergeWorkspaceController {
         }
     }
 
-    // the target is a graph in the model
-    // we return entry.model, which is 
+    // find which loaded merge slot owns it and return the slot's own model
     resolveModelForTarget(target) {
         if (!this._session || !target) {
             return null;
@@ -227,6 +226,7 @@ export class MergeWorkspaceController {
         return null;
     }
 
+    // find the visual grapher for the same graph by checkign each merge pane's grapher.target
     resolveGrapherForTarget(target) {
         if (!target) {
             return null;
