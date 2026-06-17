@@ -611,6 +611,28 @@ view.View = class {
         return this._target;
     }
 
+    _grapherForTarget(target) {
+        const mergeGraph = this._mergeWorkspace.resolveGrapherForTarget(target);
+        if (mergeGraph) {
+            return mergeGraph;
+        }
+        for (const pane of [this._leftPane, this._rightPane]) {
+            const graph = pane && pane.graph;
+            if (graph && graph.target === target) {
+                return graph;
+            }
+        }
+        return this._target || null;
+    }
+
+    _modelForTarget(target) {
+        const mergeModel = this._mergeWorkspace.resolveModelForTarget(target);
+        if (mergeModel) {
+            return mergeModel;
+        }
+        return this._model;
+    }
+
     // this is used to get the graph for the pane because we want to support
     // svg and png export for both panes
     _paneGraph(paneId) {
@@ -2126,24 +2148,35 @@ view.View = class {
             return;
         }
         try {
-            const sidebar = new view.TargetSidebar(this, target, this.activeSignature);
+            const grapher = this._grapherForTarget(target);
+            const sidebar = new view.TargetSidebar(this, target, this.activeSignature, this._modelForTarget(target));
             sidebar.on('show-definition', async (/* sender, e */) => {
                 await this.showDefinition(target);
             });
             sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
+                if (grapher) {
+                    grapher.focus([value]);
+                }
             });
             sidebar.on('blur', (sender, value) => {
-                this._target.blur([value]);
+                if (grapher) {
+                    grapher.blur([value]);
+                }
             });
             sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value], 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.select([value], 'sidebar'));
+                }
             });
             sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value, 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.activate(value, 'sidebar'));
+                }
             });
             sidebar.on('deactivate', () => {
-                this._target.select(null);
+                if (grapher) {
+                    grapher.select(null);
+                }
             });
             let title = null;
             const type = target.type || 'graph';
@@ -2164,7 +2197,7 @@ view.View = class {
         } catch (error) {
             this.error(error, 'Error showing target properties.', null);
         }
-    }
+    } 
 
     showNodeProperties(node, source) {
         if (node) {
@@ -6663,10 +6696,15 @@ view.ModelSidebar = class extends view.ObjectSidebar {
 
 view.TargetSidebar = class extends view.ObjectSidebar {
 
-    constructor(context, target, signature) {
+    constructor(context, target, signature, model) {
         super(context);
         this._target = target;
         this._signature = signature;
+        this._model = model || context.model;
+    }
+
+    get attachment() {
+        return this._model && this._model.attachment ? this._model.attachment : null;
     }
 
     render() {
@@ -6712,7 +6750,8 @@ view.TargetSidebar = class extends view.ObjectSidebar {
                 value.toggle();
             }
         }
-        const metadata = this._view.model.attachment.metadata.graph(target);
+        const attachment = this.attachment;
+        const metadata = attachment ? attachment.metadata.graph(target) : [];
         if (Array.isArray(metadata) && metadata.length > 0) {
             this.addSection('Metadata');
             for (const argument of metadata) {
@@ -6736,8 +6775,12 @@ view.TargetSidebar = class extends view.ObjectSidebar {
     }
 
     get metrics() {
+        const attachment = this.attachment;
+        if (!attachment) {
+            return [];
+        }
         const target = new metrics.Target(this._target);
-        return this._view.model.attachment.metrics.graph(target);
+        return attachment.metrics.graph(target);
     }
 
     get identifier() {
