@@ -611,6 +611,8 @@ view.View = class {
         return this._target;
     }
 
+    //Search order: merge panes, main editor panes (original modified)
+    // If we can't find the panes, we just return this._target, the original single-grapher behavior
     _grapherForTarget(target) {
         const mergeGraph = this._mergeWorkspace.resolveGrapherForTarget(target);
         if (mergeGraph) {
@@ -624,7 +626,8 @@ view.View = class {
         }
         return this._target || null;
     }
-
+    // merge slot model 
+    // fall back is view.model
     _modelForTarget(target) {
         const mergeModel = this._mergeWorkspace.resolveModelForTarget(target);
         if (mergeModel) {
@@ -2138,6 +2141,10 @@ view.View = class {
         }
     }
 
+    // Before, we always used this._target for focus/blur/highlight and view.model implicity in graph properties sidebar
+    // we resolve the correct grapher and model for the specific target graph
+    // pass the model to a target sidebar
+    // and guard every sidebar if(grapher) so missing grapher doesn't throw
     showTargetProperties(target) {
         if (this._sidebar.identifier === 'target' && !target) {
             this.showModelProperties();
@@ -6694,6 +6701,10 @@ view.ModelSidebar = class extends view.ObjectSidebar {
     }
 };
 
+// before, this._view.model.attachment. It crashed when view.model was null
+// Now, we have an explicit model from _modelForTarget
+// attachment getter safetly returns null if model or attachment is missing
+// metadata and metrics are skipped instead of throwing
 view.TargetSidebar = class extends view.ObjectSidebar {
 
     constructor(context, target, signature, model) {
