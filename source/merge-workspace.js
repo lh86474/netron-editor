@@ -213,6 +213,33 @@ export class MergeWorkspaceController {
         }
     }
 
+    // the target is a graph in the model
+    // we return entry.model, which is 
+    resolveModelForTarget(target) {
+        if (!this._session || !target) {
+            return null;
+        }
+        for (const entry of [this._session.getUpstream(), this._session.getDownstream()]) {
+            if (entry && entry.target === target) {
+                return entry.model;
+            }
+        }
+        return null;
+    }
+
+    resolveGrapherForTarget(target) {
+        if (!target) {
+            return null;
+        }
+        for (const pane of [this._upstreamSourcePane, this._downstreamSourcePane, this._previewPane]) {
+            const graph = pane && pane.graph;
+            if (graph && graph.target === target) {
+                return graph;
+            }
+        }
+        return null;
+    }
+
     // this is an entry point from the browser.js or desktop.mjs
     async start(options = {}) {
         this._returnPage = this._view._page || (this._view.model ? 'default' : 'welcome');
