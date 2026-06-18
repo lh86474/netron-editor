@@ -3,6 +3,7 @@ import * as base from './base.js';
 import * as grapher from './grapher.js';
 import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
+import { canEditCheckpoint, isAmbapbCheckpoint } from './ambapb.js';
 import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
 import { validateNodeInsert } from './onnx-operator-validation.js';
 import { GraphPane } from './graph-pane.js';
@@ -813,7 +814,9 @@ view.View = class {
         if (!current || !current._node) {
             return;
         }
-        const sidebar = new view.EditableNodeSidebar(this, current._node, this._editSession);
+        const sidebar = this._canEditModelContent() ?
+            new view.EditableNodeSidebar(this, current._node, this._editSession) :
+            new view.NodeSidebar(this, current._node);
         this._bindNodeSidebarEvents(sidebar, current._node);
         this._sidebar.open(sidebar, entry.title || 'Node Properties');
     }
@@ -827,7 +830,12 @@ view.View = class {
         if (!current || !current._value) {
             return;
         }
-        const sidebar = new view.EditableConnectionSidebar(this, current._value, current._from, current._to, this._editSession);
+        // if the model is an ambapb checkpoint, we need to use the editable connection sidebar
+        // adds model.kind getter
+        // checkpoint files get exportable = false
+        const sidebar = this._canEditModelContent() ?
+            new view.EditableConnectionSidebar(this, current._value, current._from, current._to, this._editSession) :
+            new view.ConnectionSidebar(this, current._value, current._from, current._to);
         this._bindConnectionSidebarEvents(sidebar);
         this._sidebar.open(sidebar, entry.title || 'Connection Properties');
     }
@@ -974,6 +982,9 @@ view.View = class {
         if (!this._editSession) {
             return null;
         }
+        if (!this._canEditModelContent()) {
+            return null;
+        }
         this._checkpointEditHistory();
         if (!(patch.entityType === 'node' && patch.changeType === 'delete' && patch.property === 'remove')) {
             this._danglingNodeNames.clear();
@@ -989,8 +1000,18 @@ view.View = class {
         return change;
     }
 
+    _canEditModelContent() {
+        if (!this._model || !this._editSession) {
+            return false;
+        }
+        if (isAmbapbCheckpoint(this._model)) {
+            return canEditCheckpoint(this._model);
+        }
+        return canExportOnnx(this._model);
+    }
+
     _canInsertNode() {
-        return this._editSession && this._model && canExportOnnx(this._model);
+        return this._canEditModelContent();
     }
 
     _closeGraphOverlays() {
@@ -2212,7 +2233,7 @@ view.View = class {
                 if (this._menu) {
                     this._menu.close();
                 }
-                const sidebar = this._editSession ?
+                const sidebar = this._editSession && this._canEditModelContent() ?
                     new view.EditableNodeSidebar(this, node, this._editSession) :
                     new view.NodeSidebar(this, node);
                 this._bindNodeSidebarEvents(sidebar, node);
@@ -2243,7 +2264,7 @@ view.View = class {
             if (this._menu) {
                 this._menu.close();
             }
-            const sidebar = this._editSession ?
+            const sidebar = this._editSession && this._canEditModelContent() ?
                 new view.EditableConnectionSidebar(this, value, from, to, this._editSession) :
                 new view.ConnectionSidebar(this, value, from, to);
             this._bindConnectionSidebarEvents(sidebar);
