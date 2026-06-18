@@ -1,3 +1,8 @@
+/* 
+ * This file contains tests for the validateNodeInsert function
+ * We make sure that we actually show errors and warnings when we should
+ * Author: Luray He
+ */ 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildNodeFromMetadata } from '../source/model-editor.js';
@@ -6,6 +11,7 @@ import { validateNodeInsert } from '../source/onnx-operator-validation.js';
 const activation = { name: 'act_in', type: 'float32' };
 const convOutput = { name: 'conv_out', type: 'float32' };
 
+// Mock schemas
 const andSchema = {
     name: 'And',
     module: 'ai.onnx',
@@ -82,6 +88,7 @@ const reluGraph = () => ({
 });
 
 describe('validateNodeInsert', () => {
+    // Makes sure that we detect 0 issues
     it('reports no issues for Abs above a unary node', () => {
         const graph = reluGraph();
         const nodeSpec = buildNodeFromMetadata(absSchema, 'InsertedAbs', graph);
@@ -89,6 +96,8 @@ describe('validateNodeInsert', () => {
         assert.equal(issues.length, 0);
     });
 
+    // We inserrt an add below a relu, an issue since and requires 2 inputs
+    // We make sure that for issues, we have the correct code and severity
     it('warns when inserting And below a unary node', () => {
         const graph = reluGraph();
         const nodeSpec = buildNodeFromMetadata(andSchema, 'InsertedAnd', graph);
@@ -97,13 +106,17 @@ describe('validateNodeInsert', () => {
         assert.ok(issues.some((issue) => issue.code === 'UNCONNECTED_INPUT'));
     });
 
+    // compare a connected input's tensor type to the ONNX op's type constraints
+    // but they don't match
+    // Relu output is convOutput with type float32. It's a tensor(float)
+    // And's constraint for T allows only tensor(bool)
     it('warns about type mismatch for And on float tensors', () => {
         const graph = reluGraph();
         const nodeSpec = buildNodeFromMetadata(andSchema, 'InsertedAnd', graph);
         const { issues } = validateNodeInsert(graph, 0, 'below', andSchema, nodeSpec);
         assert.ok(issues.some((issue) => issue.code === 'TYPE_MISMATCH'));
     });
-
+    // Because and requires 2 inputs
     it('warns when inserting And above a node with one dynamic input', () => {
         const graph = reluGraph();
         const nodeSpec = buildNodeFromMetadata(andSchema, 'InsertedAnd', graph);
@@ -111,7 +124,7 @@ describe('validateNodeInsert', () => {
         assert.ok(issues.some((issue) => issue.code === 'INSUFFICIENT_INPUTS'));
         assert.ok(issues.some((issue) => issue.code === 'UNCONNECTED_INPUT'));
     });
-
+    // When we actually have two tensors in one slot, we should not have any issues
     it('reports no input issues when Add above a node with two tensors in one slot', () => {
         const branchB = { name: 'branch_b', type: 'float32' };
         const graph = {
@@ -126,6 +139,7 @@ describe('validateNodeInsert', () => {
         };
         const nodeSpec = buildNodeFromMetadata(addSchema, 'InsertedAdd', graph);
         const { issues } = validateNodeInsert(graph, 0, 'above', addSchema, nodeSpec);
+        // issues.length === 0 could work as well, but this is more explicit
         assert.equal(issues.some((issue) => issue.code === 'INSUFFICIENT_INPUTS'), false);
         assert.equal(issues.some((issue) => issue.code === 'UNCONNECTED_INPUT'), false);
         assert.equal(issues.some((issue) => issue.code === 'MULTIPLE_VALUES_IN_SLOT'), false);

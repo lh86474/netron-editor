@@ -1,3 +1,12 @@
+/*
+ * This file contians tests for the exportModifiedOnnx function
+ * Tests Modified export: if renamed node, changed attributes, correct proto bytes are preserved
+ * Uses stored proto even if in-memory graph was mutated for viewing, schema never changes
+ * If not exportable, must through OnnxExportError
+ * If we have Structural edits, such as insert and delete, that must survive export
+ * Subgraphs must be able to be exported as well. 
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { onnx } from '../source/onnx-proto.js';
@@ -9,6 +18,7 @@ import { exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } fr
 import { identityNodeSpec } from './fixtures/mock-graph.js';
 import { extractSubgraph } from '../source/model-editor.js';
 
+// mock model to test proto byte preservation
 const buildMinimalModel = () => {
     const model = new onnx.ModelProto();
     model.ir_version = 8n;
@@ -48,7 +58,7 @@ const buildMinimalModel = () => {
     model.graph = graph;
     return model;
 };
-
+// Mock graph
 const buildViewModel = (proto) => ({
     format: 'ONNX v8',
     exportable: true,
@@ -67,7 +77,7 @@ const buildViewModel = (proto) => ({
         }]
     }]
 });
-
+// mock chain model
 const buildChainModel = () => {
     const model = new onnx.ModelProto();
     model.ir_version = 8n;
@@ -97,7 +107,7 @@ const buildChainModel = () => {
     model.graph = graph;
     return model;
 };
-
+// build chain mdoel from metadata
 const buildChainViewModel = (proto) => ({
     format: 'ONNX v8',
     exportable: true,
@@ -126,6 +136,7 @@ const buildChainViewModel = (proto) => ({
     }]
 });
 
+// metadata for mock
 const buildThreeNodeChainModel = () => {
     const model = new onnx.ModelProto();
     model.ir_version = 8n;
@@ -161,6 +172,7 @@ const buildThreeNodeChainModel = () => {
     return model;
 };
 
+// build from buildThreeNodeChainModel
 const buildThreeNodeChainViewModel = (proto) => ({
     format: 'ONNX v8',
     exportable: true,
@@ -197,6 +209,8 @@ const buildThreeNodeChainViewModel = (proto) => ({
 });
 
 describe('ONNX export', () => {
+    // if a model was unmodified, we should be able to round-trip it
+    // meaning that the proto bytes should be the same as the original
     it('round-trips an unmodified minimal model', () => {
         const model = buildMinimalModel();
         const bytes = onnx.ModelProto.encodeBytes(model);
@@ -207,6 +221,8 @@ describe('ONNX export', () => {
         assert.deepEqual(decoded.graph.node[0].attribute[0].ints, [1n, 2n, 3n]);
     });
 
+    // Two mock edits that changes the node name and one of the attributes
+    // We make sure that the changes are applied by decoding it and getting the fields
     it('exports modified node and attribute changes', () => {
         const proto = buildMinimalModel();
         const viewModel = buildViewModel(proto);
@@ -230,7 +246,8 @@ describe('ONNX export', () => {
         assert.equal(decoded.graph.node[0].name, 'renamed_identity');
         assert.deepEqual(decoded.graph.node[0].attribute[0].ints, [4n, 5n, 6n]);
     });
-
+    // Makes sure we have same proto, we make sure that when we uploaded a modified graph
+    // we have input name as x and output name as y.
     it('exports from a pristine proto even when the loaded model graph was mutated for viewing', () => {
         const loaded = buildMinimalModel();
         const pristine = onnx.ModelProto.decode(BinaryReader.open(onnx.ModelProto.encodeBytes(loaded)));
@@ -244,14 +261,14 @@ describe('ONNX export', () => {
         assert.equal(decoded.graph.node[0].input[0], 'x');
         assert.equal(decoded.graph.node[0].output[0], 'y');
     });
-
+    // Reject when model is not exportable
     it('rejects export when model is not exportable', () => {
         const viewModel = buildViewModel(buildMinimalModel());
         viewModel.exportable = false;
         const editor = ModelEditor.createSession(viewModel);
         assert.throws(() => exportModifiedOnnx(viewModel, editor), OnnxExportError);
     });
-
+    // Make sure that we have the correct number of nodes, and that the inserted node is correct
     it('exports graph after insert below reference node', () => {
         const proto = buildChainModel();
         const viewModel = buildChainViewModel(proto);
@@ -275,7 +292,7 @@ describe('ONNX export', () => {
         assert.notEqual(second.input[0], 'hidden');
         assert.equal(second.input[0], inserted.output[0]);
     });
-
+    // check for insert above. Check that we have 3 nodes, 
     it('exports graph after insert above reference node', () => {
         const proto = buildChainModel();
         const viewModel = buildChainViewModel(proto);
@@ -300,6 +317,7 @@ describe('ONNX export', () => {
         assert.notEqual(second.input[0], 'hidden');
     });
 
+    // Deletion test. 
     it('exports graph after deleting middle node', () => {
         const proto = buildThreeNodeChainModel();
         const viewModel = buildThreeNodeChainViewModel(proto);
@@ -319,7 +337,7 @@ describe('ONNX export', () => {
         assert.equal(decoded.graph.node[0].name, 'first');
         assert.equal(decoded.graph.output[0].name, 'y');
     });
-
+    // subgraph extract test
     it('exports graph after subgraph extract and proto rebuild', () => {
         const proto = buildThreeNodeChainModel();
         const viewModel = buildThreeNodeChainViewModel(proto);

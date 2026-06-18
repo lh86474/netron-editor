@@ -1,3 +1,8 @@
+/* 
+ * This file contains tests for the export filename helpers
+ * Renames subgraphs to _subgraph. Add .onnx extension when missing. 
+ * Author: luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -14,6 +19,7 @@ describe('export filename helpers', () => {
         assert.equal(stripExportExtension('model'), 'model');
     });
 
+    // This test can probably be removed since this doesn't affect the file
     it('sanitizeExportBasename removes invalid characters', () => {
         assert.equal(sanitizeExportBasename('my model'), 'my_model');
         assert.equal(sanitizeExportBasename('bad/name:onnx'), 'bad_name_onnx');
@@ -30,7 +36,7 @@ describe('export filename helpers', () => {
     it('buildSubgraphExportBasename falls back to _subgraph', () => {
         assert.equal(buildSubgraphExportBasename('model.onnx', '', ''), 'model_subgraph');
     });
-
+    // the most important one. We must add .onnx extension during export. 
     it('normalizeExportFilename adds extension when missing', () => {
         assert.equal(normalizeExportFilename('slice', 'onnx'), 'slice.onnx');
         assert.equal(normalizeExportFilename('slice.onnx', 'onnx'), 'slice.onnx');

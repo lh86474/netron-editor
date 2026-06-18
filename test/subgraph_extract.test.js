@@ -1,3 +1,11 @@
+/* 
+ * This file has tests for the subgraph extract feature
+ * Tests full chain slice (basically whole graph)
+ * Proper subgraph extraction
+ * Unreachable end throws SubgraphExtractError
+ * replaceGraph: swapping the graph resets the delta tracker
+ * Author: Luray He
+ */ 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mockChainModel } from './fixtures/mock-graph.js';
@@ -9,6 +17,8 @@ import {
 } from '../source/model-editor.js';
 
 describe('subgraph extract', () => {
+    // mockChainModel has three nodes: Conv1, Relu1, and Softmax1
+    // we use helper method collectNodesBetween from the beginning and end and makes sure that the graph has all three nodes
     it('collects all nodes on a linear chain from begin to end', () => {
         const graph = mockChainModel.modules[0];
         const begin = graph.nodes[0];
@@ -19,7 +29,7 @@ describe('subgraph extract', () => {
         assert.ok(nodes.has(graph.nodes[1]));
         assert.ok(nodes.has(end));
     });
-
+    // The first two nodes. We get those
     it('collects a partial chain slice', () => {
         const graph = mockChainModel.modules[0];
         const begin = graph.nodes[0];
@@ -29,7 +39,8 @@ describe('subgraph extract', () => {
         assert.ok(nodes.has(begin));
         assert.ok(nodes.has(end));
     });
-
+    // end is set as the beginning node, which is an issue because the end node should be deeper than 
+    // the start node. Checks if we throw a SubgraphExtractError
     it('rejects unreachable end node', () => {
         const graph = mockChainModel.modules[0];
         const begin = graph.nodes[2];
@@ -39,7 +50,7 @@ describe('subgraph extract', () => {
             SubgraphExtractError
         );
     });
-
+    // Makes sure that the input and outupt has its proper name rather than just x and y
     it('extractSubgraph builds boundary inputs and outputs', () => {
         const graph = mockChainModel.modules[0];
         const extracted = extractSubgraph(graph, graph.nodes[0], graph.nodes[1]);
@@ -51,7 +62,7 @@ describe('subgraph extract', () => {
         assert.equal(extracted.outputs.length, 1);
         assert.equal(extracted.outputs[0].value[0].name, 'hidden2');
     });
-
+    // Has to replace the delta tracker or else export and undo-redo will all go wrong
     it('replaceGraph resets delta tracker', () => {
         const editor = ModelEditor.createSession(mockChainModel);
         editor.applyPatch({

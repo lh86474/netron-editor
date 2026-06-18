@@ -1,5 +1,5 @@
 /*
- * This file contains the tests for the merge session
+ * This file contains the tests for the session object that backs the merge UI
  * It has the following tests:
  * 1. starts pending until both slots are loaded
  * 2. auto-detects roles and pre-fills mapping when both models load
@@ -15,7 +15,7 @@ import { onnx } from '../source/onnx-proto.js';
 import '../source/onnx-encode.js';
 import { createMergeSession } from '../source/merge-session.js';
 import { tryMergeOnnxModels } from '../source/model-merge.js';
-
+// We make a mock tensor type
 const makeTensorType = (elemType, dims = []) => {
     const type = new onnx.TypeProto();
     const tensor = new onnx.TypeProto.Tensor();
@@ -32,14 +32,14 @@ const makeTensorType = (elemType, dims = []) => {
     type.tensor_type = tensor;
     return type;
 };
-
+// mock tensor value
 const makeValueInfo = (name, elemType, dims) => {
     const value = new onnx.ValueInfoProto();
     value.name = name;
     value.type = makeTensorType(elemType, dims);
     return value;
 };
-
+// mock model with identity node
 const makeIdentityModel = ({ name, inputs, outputs, nodes }) => {
     const model = new onnx.ModelProto();
     model.ir_version = 8n;
@@ -71,6 +71,9 @@ const slotEntry = (proto, filename) => ({
 });
 
 describe('MergeSession', () => {
+    // shouldn't merge until we have two file slots loaded. 
+    // roleDetection.status must be pending. 
+    // .mappingSource is how we know if the mapping was auto-detected, manual, or empty. 
     it('starts pending until both slots are loaded', () => {
         const session = createMergeSession();
         assert.equal(session.roleDetection.status, 'pending');
@@ -79,6 +82,8 @@ describe('MergeSession', () => {
         assert.match(session.getRoleSummary(), /Load both models/);
     });
 
+    // This is a successful merge that is unidirectional. 
+    // We should auto detect which model is upstream and which one is downstream 
     it('auto-detects roles and pre-fills mapping when both models load', () => {
         const producer = makeIdentityModel({
             name: 'producer',
@@ -107,7 +112,7 @@ describe('MergeSession', () => {
         assert.equal(session.validation.ok, true);
         assert.equal(session.canOpenMerged(), true);
     });
-
+    // When a model is replaced, makes sure we re-run role detection
     it('re-detects roles when a slot model is replaced', () => {
         const producer = makeIdentityModel({
             name: 'producer',
@@ -137,7 +142,7 @@ describe('MergeSession', () => {
         assert.equal(session.mapping.length, 0);
         assert.equal(session.roleDetection.userOverridden, false);
     });
-
+    // Makes sure that when we swap roles back into a valid merge, we clear invalid mapping and still be able to merge
     it('swapRoles flips upstream slot and clears invalid mapping', () => {
         const producer = makeIdentityModel({
             name: 'producer',
@@ -163,7 +168,7 @@ describe('MergeSession', () => {
         assert.equal(session.mappingSource, 'empty');
         assert.equal(session.validation.ok, false);
     });
-
+    // mapping should clear when it becomes invalid after flipped role
     it('swapRoles clears mapping when it is invalid under flipped roles', () => {
         const modelA = makeIdentityModel({
             name: 'model-a',
@@ -194,7 +199,7 @@ describe('MergeSession', () => {
         assert.equal(session.mapping.length, 0);
         assert.equal(session.validation.ok, false);
     });
-
+    // Since the roles are assigned
     it('does not re-detect roles after swap until a slot changes', () => {
         const producer = makeIdentityModel({
             name: 'producer',
@@ -218,7 +223,7 @@ describe('MergeSession', () => {
         assert.equal(session.getUpstreamSlot(), 'B');
         assert.equal(session.roleDetection.userOverridden, true);
     });
-
+    // When the user manually updates the mapping, we should mark it as manual and revalidate
     it('updateMappingRow marks mapping as manual and revalidates', () => {
         const producer = makeIdentityModel({
             name: 'producer',
@@ -244,6 +249,7 @@ describe('MergeSession', () => {
         assert.equal(session.validation.ok, false);
     });
 
+    // Makes sure that when we have a valid mapping, we can drive the merge
     it('auto mapping from session can drive merge', () => {
         const producer = makeIdentityModel({
             name: 'producer',
@@ -266,6 +272,7 @@ describe('MergeSession', () => {
         assert.equal(merged.ok, true);
     });
 
+    // If we want to change a file, we go to pending
     it('clearSlot resets role detection', () => {
         const producer = makeIdentityModel({
             name: 'producer',
