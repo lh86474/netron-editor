@@ -8,7 +8,194 @@ import {
     parsePrimGraphFromAttribute,
     parsePrimGraphImms
 } from './ambapb-prim-graph.js';
+
+const PRIMITIVE_MODULE = 'ambarella.primitive';
+
 export const AMBAPB_KIND = 'amba-checkpoint';
+
+const outputValueKey = (primitiveId, portIndex) => `${primitiveId}\u0000out:${portIndex}`;
+
+const valueAttributesFromOport = (oport) => {
+    const attributes = [];
+    if (oport && oport.dimension && typeof oport.dimension === 'object') {
+        for (const [name, value] of Object.entries(oport.dimension)) {
+            attributes.push({
+                name: `dimension.${name}`,
+                type: 'string',
+                value: String(value)
+            });
+        }
+    }
+    if (oport && oport.dataFormat && typeof oport.dataFormat === 'object') {
+        attributes.push({
+            name: 'data-format',
+            type: 'string',
+            value: JSON.stringify(oport.dataFormat)
+        });
+    }
+    return attributes;
+};
+
+const createOutputValue = (primitive, portIndex, oport, valueMap) => {
+    const key = outputValueKey(primitive.id, portIndex);
+    if (valueMap.has(key)) {
+        return valueMap.get(key);
+    }
+    const value = {
+        name: oport && oport.id ? oport.id : `${primitive.id}_out${portIndex}`,
+        attributes: valueAttributesFromOport(oport)
+    };
+    valueMap.set(key, value);
+    return value;
+};
+
+const resolveProducerValue = (primitiveId, portIndex, valueMap) => {
+    const key = outputValueKey(primitiveId, portIndex);
+    const value = valueMap.get(key);
+    if (!value) {
+        throw new Error(`Missing producer value for primitive '${primitiveId}' port ${portIndex}.`);
+    }
+    return value;
+};
+
+const primitiveAttributes = (primitive) => {
+    return Object.entries(primitive.attributes || {}).map(([name, value]) => ({
+        name,
+        type: 'string',
+        value
+    }));
+};
+
+// make sure that endpoint id is a string
+const normalizeEndpointId = (value, fallbackId) => {
+    if (typeof value === 'string' && value.length > 0) {
+        return value;
+    }
+    if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'string') {
+        return value[0];
+    }
+    return fallbackId || null;
+}
+
+export const toNetronGraph = (checkpoint) => {
+    if (!checkpoint || !checkpoint.primGraph) {
+        throw new Error('Checkpoint primGraph is required.');
+    }
+    const { primGraph } = checkpoint;
+    const primitives = primGraph.primitives || [];
+    const raw = primGraph.raw || {};
+    const valueMap = new Map();
+
+    for (const primitive of primitives) {
+        for (let portIndex = 0; portIndex < (primitive.oports || []).length; portIndex++) {
+            createOutputValue(primitive, portIndex, primitive.oports[portIndex], valueMap);
+        }
+    }
+
+    const nodes = primitives.map((primitive, primitiveIndex) => {
+        const inputs = [];
+        for (const source of primitive.sources || []) {
+            if (!source.id) {
+                continue;
+            }
+            inputs.push({
+                name: '',
+                value: [resolveProducerValue(source.id, source.port, valueMap)]
+            });
+        }
+        for (const oport of primitive.oports || []) {
+            for (const depId of oport.additionalDepPrimIds || []) {
+                if (!depId) {
+                    continue;
+                }
+                inputs.push({
+                    name: '',
+                    value: [resolveProducerValue(depId, 0, valueMap)]
+                });
+            }
+        }
+        const outputs = (primitive.oports || []).map((oport, portIndex) => ({
+            name: '',
+            value: [resolveProducerValue(primitive.id, portIndex, valueMap)]
+        }));
+        return {
+            name: primitive.id,
+            type: {
+                name: primitive.type,
+                identifier: primitive.type,
+                module: PRIMITIVE_MODULE
+            },
+            attributes: primitiveAttributes(primitive),
+            inputs,
+            outputs,
+            _primitiveId: primitive.id,
+            _primitiveIndex: primitiveIndex
+        };
+    });
+
+    const inputFallbackId = (primitives.find((primitive) => primitive.type === 'input') || {}).id;
+    const outputFallbackId = (primitives.find((primitive) => primitive.type === 'output') || {}).id;
+    const graphInputId = normalizeEndpointId(raw.graph_input, inputFallbackId);
+    const graphOutputId = normalizeEndpointId(raw.graph_output, outputFallbackId);
+    const inputPrimitive = primitives.find((primitive) => primitive.id === graphInputId) ||
+        primitives.find((primitive) => primitive.type === 'input');
+    const outputPrimitive = primitives.find((primitive) => primitive.id === graphOutputId) ||
+        primitives.find((primitive) => primitive.type === 'output');
+
+    const graphInputs = [];
+    if (inputPrimitive && inputPrimitive.oports && inputPrimitive.oports.length > 0) {
+        graphInputs.push({
+            name: inputPrimitive.id,
+            value: [resolveProducerValue(inputPrimitive.id, 0, valueMap)]
+        });
+    }
+
+    const graphOutputs = [];
+    if (outputPrimitive) {
+        let outputValue = null;
+        if (outputPrimitive.oports && outputPrimitive.oports.length > 0) {
+            outputValue = resolveProducerValue(outputPrimitive.id, 0, valueMap);
+        } else if (outputPrimitive.sources && outputPrimitive.sources.length > 0) {
+            const source = outputPrimitive.sources[0];
+            outputValue = resolveProducerValue(source.id, source.port, valueMap);
+        }
+        if (outputValue) {
+            graphOutputs.push({
+                name: outputPrimitive.id,
+                value: [outputValue]
+            });
+        }
+    }
+
+    const graph = {
+        name: graphInputId || 'ambapb-prim-graph',
+        identifier: 'ambapb-prim-graph',
+        inputs: graphInputs,
+        outputs: graphOutputs,
+        nodes,
+        _ambapb: true
+    };
+
+    return {
+        modules: [graph],
+        graphMetadata: {
+            graphInput: graphInputId || null,
+            graphOutput: graphOutputId || null,
+            primitiveCount: primitives.length
+        }
+    };
+};
+
+export const expandCheckpointModel = (model) => {
+    if (!model || !model._ambapb || !model._ambapb.primGraph) {
+        return false;
+    }
+    const expanded = toNetronGraph(model._ambapb);
+    model._modules = expanded.modules;
+    model._ambapb.expandedGraph = expanded.modules[0];
+    model._ambapb.graphMetadata = expanded.graphMetadata;
+    return true;
+};
 
 const PRIM_GRAPH_ATTRIBUTE = 'prim_graph';
 const COMPILED_PRIM_GRAPH_ATTRIBUTE = 'compiled_prim_graph';
@@ -116,6 +303,7 @@ export const canExportCheckpoint = (model) => {
     return Boolean(model && model._ambapb && model._ambapb.canExport === true);
 };
 
+// parses the checkpoint metadata and the prim_graph and imms from the model proto
 export const parseCheckpoint = (modelProto) => {
     if (!detectCheckpoint(modelProto)) {
         return null;

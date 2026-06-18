@@ -127,9 +127,13 @@ onnx.Model = class {
             this._metadata.unshift(new onnx.Argument('editor', 'Amba checkpoint: primitive editing not yet available.'));
         }
         const context = new onnx.Context.Model(metadata, target.locations, imports, model.graph, model.functions);
-        const graph = context.graph(null);
-        if (graph) {
-            this._modules.push(graph);
+        if (this._kind === ambapb.AMBAPB_KIND) {
+            ambapb.expandCheckpointModel(this);
+        } else {
+            const graph = context.graph(null);
+            if (graph) {
+                this._modules.push(graph);
+            }
         }
         this._functions = context.functions;
     }
