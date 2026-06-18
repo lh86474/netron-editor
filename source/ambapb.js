@@ -4,6 +4,10 @@
  * Exposes helpers the UI uses to restrict editing 
  * Author: Luray He
  */
+import {
+    parsePrimGraphFromAttribute,
+    parsePrimGraphImms
+} from './ambapb-prim-graph.js';
 export const AMBAPB_KIND = 'amba-checkpoint';
 
 const PRIM_GRAPH_ATTRIBUTE = 'prim_graph';
@@ -111,20 +115,41 @@ export const canEditCheckpoint = (model) => {
 export const canExportCheckpoint = (model) => {
     return Boolean(model && model._ambapb && model._ambapb.canExport === true);
 };
-// When an ONNX model loads, we attach the checkpoint metadata to the model object
-export const attachCheckpoint = (model, modelProto) => {
-    if (!model || !modelProto || !detectCheckpoint(modelProto)) {
-        return false;
+
+export const parseCheckpoint = (modelProto) => {
+    if (!detectCheckpoint(modelProto)) {
+        return null;
     }
     const wrapperNode = findCVFlowNVPNode(modelProto.graph);
+    const primGraphAttribute = getPrimGraphAttribute(wrapperNode);
+    const primGraphImmsAttribute = getPrimGraphImmsAttribute(wrapperNode);
+    return {
+        metadata: readCheckpointMetadata(modelProto),
+        wrapperNode,
+        primGraphAttribute,
+        compiledPrimGraphAttribute: getCompiledPrimGraphAttribute(wrapperNode),
+        primGraphImmsAttribute,
+        primGraph: parsePrimGraphFromAttribute(primGraphAttribute),
+        imms: parsePrimGraphImms(primGraphImmsAttribute)
+    };
+};
+
+// When an ONNX model loads, we attach the checkpoint metadata to the model object
+export const attachCheckpoint = (model, modelProto) => {
+    const checkpoint = parseCheckpoint(modelProto);
+    if (!model || !checkpoint) {
+        return false;
+    }
     model._kind = AMBAPB_KIND;
     model._exportable = false;
     model._ambapb = {
-        metadata: readCheckpointMetadata(modelProto),
-        wrapperNode,
-        primGraphAttribute: getPrimGraphAttribute(wrapperNode),
-        compiledPrimGraphAttribute: getCompiledPrimGraphAttribute(wrapperNode),
-        primGraphImmsAttribute: getPrimGraphImmsAttribute(wrapperNode),
+        metadata: checkpoint.metadata,
+        wrapperNode: checkpoint.wrapperNode,
+        primGraphAttribute: checkpoint.primGraphAttribute,
+        compiledPrimGraphAttribute: checkpoint.compiledPrimGraphAttribute,
+        primGraphImmsAttribute: checkpoint.primGraphImmsAttribute,
+        primGraph: checkpoint.primGraph,
+        imms: checkpoint.imms,
         canEdit: false,
         canExport: false
     };
