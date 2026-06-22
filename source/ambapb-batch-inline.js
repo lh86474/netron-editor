@@ -56,8 +56,31 @@ const cloneAttributeValue = (value) => {
     return value;
 };
 
+const graphArguments = (node) => {
+    if (!node) {
+        return [];
+    }
+    return (node.attributes || []).concat(node.blocks || []);
+};
+
 const getNodeAttribute = (node, name) => {
-    return (node.attributes || []).find((entry) => entry.name === name) || null;
+    return graphArguments(node).find((entry) => entry.name === name) || null;
+};
+
+const normalizeGraphId = (value) => {
+    if (value === null || value === undefined) {
+        return '';
+    }
+    if (typeof value === 'string') {
+        return value.trim();
+    }
+    if (typeof value === 'bigint' || typeof value === 'number') {
+        return String(value);
+    }
+    if (Array.isArray(value) && value.length > 0) {
+        return normalizeGraphId(value[0]);
+    }
+    return String(value).trim();
 };
 
 const mappingEntryId = (entry) => {
@@ -92,9 +115,9 @@ const findGraphByName = (graph, name) => {
         return graph;
     }
     for (const node of graph.nodes || []) {
-        for (const attribute of node.attributes || []) {
-            if (attribute.type === 'graph' && attribute.value) {
-                const found = findGraphByName(attribute.value, name);
+        for (const entry of graphArguments(node)) {
+            if (entry.type === 'graph' && entry.value) {
+                const found = findGraphByName(entry.value, name);
                 if (found) {
                     return found;
                 }
@@ -104,12 +127,46 @@ const findGraphByName = (graph, name) => {
     return null;
 };
 
-const getCompiledGraph = (fragNode) => {
-    const attribute = getNodeAttribute(fragNode, COMPILED_PRIM_GRAPH_ATTR);
-    if (!attribute || attribute.type !== 'graph' || !attribute.value) {
+const getCompiledGraphFromNode = (node) => {
+    for (const entry of graphArguments(node)) {
+        if (entry.name === COMPILED_PRIM_GRAPH_ATTR && entry.type === 'graph' && entry.value) {
+            return entry.value;
+        }
+    }
+    return null;
+};
+
+const graphIdMatches = (rootGraph, graphId) => {
+    if (!rootGraph || !graphId) {
         return null;
     }
-    return attribute.value;
+    if (rootGraph.name === graphId) {
+        return rootGraph;
+    }
+    const byName = findGraphByName(rootGraph, graphId);
+    if (byName) {
+        return byName;
+    }
+    if (rootGraph.name && (rootGraph.name.endsWith(graphId) || graphId.endsWith(rootGraph.name))) {
+        return rootGraph;
+    }
+    return null;
+};
+
+const findBatchCallTargetInNode = (hostNode, graphId) => {
+    const compiled = getCompiledGraphFromNode(hostNode);
+    if (!compiled) {
+        return null;
+    }
+    const subGraph = graphIdMatches(compiled, graphId);
+    if (!subGraph) {
+        return null;
+    }
+    return {
+        fragSubgraphNode: hostNode,
+        subGraph,
+        graphId
+    };
 };
 
 // This is the lookup step
@@ -119,9 +176,7 @@ export const resolveBatchCallTarget = (graph, batchCallNode) => {
         return null;
     }
     const graphIdAttr = getNodeAttribute(batchCallNode, 'graph_id');
-    const graphId = graphIdAttr && graphIdAttr.value !== undefined && graphIdAttr.value !== null
-        ? String(graphIdAttr.value)
-        : '';
+    const graphId = normalizeGraphId(graphIdAttr ? graphIdAttr.value : null);
     if (!graphId) {
         return null;
     }
@@ -129,17 +184,18 @@ export const resolveBatchCallTarget = (graph, batchCallNode) => {
         if (node.type?.name !== FRAG_SUBGRAPH_OP) {
             continue;
         }
-        const compiled = getCompiledGraph(node);
-        if (!compiled) {
+        const target = findBatchCallTargetInNode(node, graphId);
+        if (target) {
+            return target;
+        }
+    }
+    for (const node of graph.nodes || []) {
+        if (node.type?.name === FRAG_SUBGRAPH_OP) {
             continue;
         }
-        const subGraph = compiled.name === graphId ? compiled : findGraphByName(compiled, graphId);
-        if (subGraph) {
-            return {
-                fragSubgraphNode: node,
-                subGraph,
-                graphId
-            };
+        const target = findBatchCallTargetInNode(node, graphId);
+        if (target) {
+            return target;
         }
     }
     return null;
@@ -147,6 +203,14 @@ export const resolveBatchCallTarget = (graph, batchCallNode) => {
 
 export const canExpandBatchCall = (graph, batchCallNode) => {
     return resolveBatchCallTarget(graph, batchCallNode) !== null;
+};
+
+export const inlineExpansionBatchCallName = (node) => {
+    if (!node || !node.name) {
+        return null;
+    }
+    const match = /^inline::([^:]+)::/.exec(node.name);
+    return match ? match[1] : null;
 };
 
 const collectSubgraphBoundaryNames = (subGraph) => {

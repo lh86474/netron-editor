@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import {
     applyBatchInlineExpansions,
     canExpandBatchCall,
+    inlineExpansionBatchCallName,
     parseMappingAttribute,
     resolveBatchCallTarget
 } from '../source/ambapb-batch-inline.js';
@@ -123,6 +124,21 @@ describe('ambapb batch inline expansion', () => {
         const batchCall = graph.nodes.find((node) => node.name === 'batch_call');
         assert.equal(canExpandBatchCall(graph, batchCall), true);
         assert.equal(canExpandBatchCall(graph, graph.nodes[0]), false);
+    });
+
+    it('finds compiled_prim_graph on node blocks', () => {
+        const graph = buildRuntimeGraph();
+        const frag = graph.nodes.find((node) => node.name === 'frag');
+        const compiled = frag.attributes.find((entry) => entry.name === 'compiled_prim_graph');
+        frag.blocks = [compiled];
+        frag.attributes = [];
+        const batchCall = graph.nodes.find((node) => node.name === 'batch_call');
+        assert.ok(resolveBatchCallTarget(graph, batchCall));
+    });
+
+    it('extracts batch call name from inlined node prefix', () => {
+        assert.equal(inlineExpansionBatchCallName({ name: 'inline::batch_call::inner_nvp' }), 'batch_call');
+        assert.equal(inlineExpansionBatchCallName({ name: 'inner_nvp' }), null);
     });
     // Make sure that we don't have batch call anymore after inline expansion
     // We prefix node names to avoid confusion

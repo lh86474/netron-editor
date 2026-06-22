@@ -26,6 +26,7 @@ import { MergeWorkspaceController } from './merge-workspace.js';
 import {
     applyBatchInlineExpansions,
     canExpandBatchCall,
+    inlineExpansionBatchCallName,
     isBatchCallNode
 } from './ambapb-batch-inline.js';
 
@@ -1127,34 +1128,79 @@ view.View = class {
         }
     }
 
-    _canShowBatchCallContextMenu(nodeView) {
-        if (!nodeView || !nodeView.value || this._target?.readOnly) {
+    _resolveBatchCallGraph(nodeView) {
+        const entity = this._resolveNodeEntity(nodeView.value);
+        if (entity && this._editSession) {
+            return this._editSession.modified.getGraph(entity.graphIndex);
+        }
+        if (nodeView.context && nodeView.context.target) {
+            return nodeView.context.target;
+        }
+        return this.activeTarget;
+    }
+
+    _isBatchCallContextMenuTarget(nodeView) {
+        if (!nodeView || !nodeView.value || !nodeView.context) {
             return false;
         }
+        if (nodeView.context.readOnly) {
+            return false;
+        }
+        if (isBatchCallNode(nodeView.value)) {
+            return true;
+        }
+        return Boolean(nodeView.value._inlineExpanded && inlineExpansionBatchCallName(nodeView.value));
+    }
+
+    _canExpandBatchCall(nodeView) {
         if (!isBatchCallNode(nodeView.value)) {
             return false;
         }
-        let graph = this.activeTarget;
-        const entity = this._resolveNodeEntity(nodeView.value);
-        if (entity && this._editSession) {
-            graph = this._editSession.modified.getGraph(entity.graphIndex);
-        }
+        const graph = this._resolveBatchCallGraph(nodeView);
         return Boolean(graph && canExpandBatchCall(graph, nodeView.value));
     }
 
     _showBatchCallContextMenu(nodeView, event) {
-        if (!this._canShowBatchCallContextMenu(nodeView)) {
+        if (!this._isBatchCallContextMenuTarget(nodeView)) {
             return;
         }
         this._closeGraphOverlays();
         const x = event.clientX;
         const y = event.clientY;
-        const nodeName = nodeView.value.name;
-        const isExpanded = this._batchInlineExpanded.has(nodeName);
-        const items = [{
-            label: isExpanded ? 'Collapse Subgraph Inline' : 'Expand Subgraph Inline',
-            action: () => this._toggleBatchInlineExpansion(nodeName)
-        }];
+        const node = nodeView.value;
+        const items = [];
+
+        if (node._inlineExpanded) {
+            const batchCallName = inlineExpansionBatchCallName(node);
+            if (batchCallName) {
+                items.push({
+                    label: 'Collapse Subgraph Inline',
+                    action: () => this._toggleBatchInlineExpansion(batchCallName)
+                });
+            }
+        } else if (isBatchCallNode(node)) {
+            const nodeName = node.name;
+            const isExpanded = this._batchInlineExpanded.has(nodeName);
+            const canExpand = this._canExpandBatchCall(nodeView);
+            if (isExpanded) {
+                items.push({
+                    label: 'Collapse Subgraph Inline',
+                    action: () => this._toggleBatchInlineExpansion(nodeName)
+                });
+            } else {
+                items.push({
+                    label: canExpand
+                        ? 'Expand Subgraph Inline'
+                        : 'Expand Subgraph Inline (no matching FragSubgraph)',
+                    enabled: canExpand,
+                    action: () => this._toggleBatchInlineExpansion(nodeName)
+                });
+            }
+        }
+
+        if (items.length === 0) {
+            return;
+        }
         this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, items);
         this._graphContextMenu.open();
     }
@@ -4421,7 +4467,7 @@ view.Node = class extends grapher.Node {
                     return;
                 }
                 const viewRef = this.context.view;
-                if (viewRef._canShowBatchCallContextMenu(this)) {
+                if (viewRef._isBatchCallContextMenuTarget(this)) {
                     viewRef._showBatchCallContextMenu(this, event);
                     return;
                 }
