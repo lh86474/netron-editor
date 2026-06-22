@@ -9,8 +9,10 @@ import {
     ensureAmbapbUiState,
     filterPrimitives,
     formatPrimGraphForEditor,
+    isAmbapbRuntimeShellNode,
     isAmbapbShellNode,
     isPrimitiveModified,
+    isViewingCompiledAmbapbGraph,
     PRIM_GRAPH_ATTRIBUTE,
     READ_ONLY_SHELL_ATTRIBUTES,
     resolveSelectedPrimitiveId,
@@ -787,9 +789,22 @@ view.View = class {
         this._updateUndoRedoButtons();
     }
 
+    _isViewingCompiledAmbapbGraph() {
+        return isViewingCompiledAmbapbGraph(this._path, this.activeTarget);
+    }
+
     _createNodeSidebar(node) {
-        if (this._editSession && this._canEditModelContent() && isAmbapbCheckpoint(this._model) && isAmbapbShellNode(node)) {
-            return new view.AmbaShellNodeSidebar(this, node, this._editSession);
+        if (this._editSession && isAmbapbCheckpoint(this._model)) {
+            if (this._isViewingCompiledAmbapbGraph()) {
+                return new view.NodeSidebar(this, node);
+            }
+            if (this._canEditModelContent() && isAmbapbShellNode(node)) {
+                return new view.AmbaShellNodeSidebar(this, node, this._editSession);
+            }
+            if (this._canEditModelContent() && isAmbapbRuntimeShellNode(node)) {
+                return new view.EditableNodeSidebar(this, node, this._editSession);
+            }
+            return new view.NodeSidebar(this, node);
         }
         if (this._editSession && this._canEditModelContent()) {
             return new view.EditableNodeSidebar(this, node, this._editSession);
@@ -1021,7 +1036,9 @@ view.View = class {
         }
         if (isAmbapbCheckpoint(this._model)) {
             try {
-                validateAmbapbPatch(this._editSession.modified.model, patch);
+                validateAmbapbPatch(this._editSession.modified.model, patch, {
+                    viewingCompiledGraph: this._isViewingCompiledAmbapbGraph()
+                });
             } catch (error) {
                 this.error(error, 'Edit not allowed.', null);
                 return null;
@@ -5524,7 +5541,17 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
         if (node.identifier) {
             this.addProperty('identifier', node.identifier, 'nowrap');
         }
-        if (node.description) {
+        if (node.description !== undefined && node.description !== null && nodeId) {
+            this.addEditableProperty('description', node.description, (value) => {
+                this._view.applyEditorPatch({
+                    entityId: nodeId,
+                    entityType: 'node',
+                    changeType: 'modify',
+                    property: 'description',
+                    newValue: value
+                });
+            });
+        } else if (node.description) {
             this.addProperty('description', node.description);
         }
         if (node.device) {
@@ -5923,13 +5950,33 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
                 this.addProperty('module', value, 'nowrap');
             }
         }
-        if (node.name) {
+        if (node.name && nodeId) {
+            this.addEditableProperty('name', node.name, (value) => {
+                this._view.applyEditorPatch({
+                    entityId: nodeId,
+                    entityType: 'node',
+                    changeType: 'modify',
+                    property: 'name',
+                    newValue: value
+                });
+            }, { style: 'nowrap' });
+        } else if (node.name) {
             this.addProperty('name', node.name, 'nowrap');
         }
         if (node.identifier) {
             this.addProperty('identifier', node.identifier, 'nowrap');
         }
-        if (node.description) {
+        if (node.description !== undefined && node.description !== null && nodeId) {
+            this.addEditableProperty('description', node.description, (value) => {
+                this._view.applyEditorPatch({
+                    entityId: nodeId,
+                    entityType: 'node',
+                    changeType: 'modify',
+                    property: 'description',
+                    newValue: value
+                });
+            });
+        } else if (node.description) {
             this.addProperty('description', node.description);
         }
         if (node.device) {

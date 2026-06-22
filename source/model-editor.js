@@ -162,6 +162,9 @@ const readModel = (model) => {
             inputs: (node.inputs || []).map((input) => readArgument(input)),
             outputs: (node.outputs || []).map((output) => readArgument(output))
         };
+        if (node.description !== undefined) {
+            result.description = node.description;
+        }
         if (node._primitiveId !== undefined) {
             result._primitiveId = node._primitiveId;
         }
@@ -180,6 +183,9 @@ const readModel = (model) => {
         };
         if (graph._ambapb) {
             result._ambapb = true;
+        }
+        if (graph._ambapbCompiledGraph) {
+            result._ambapbCompiledGraph = true;
         }
         return result;
     };
@@ -1514,6 +1520,8 @@ class EditorState {
 
             if (patch.entityType === 'node' && patch.property === 'name') {
                 node.name = patch.newValue;
+            } else if (patch.entityType === 'node' && patch.property === 'description') {
+                node.description = patch.newValue;
             } else {
                 throw new Error(`Unsupported patch: ${JSON.stringify(patch)}`);
             }

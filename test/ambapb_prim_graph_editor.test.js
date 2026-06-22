@@ -1,3 +1,7 @@
+/* 
+ * This file tests the editing logic for the prim_graph
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -31,6 +35,7 @@ const buildAmbapb = (primGraph) => ({
 });
 
 describe('ambapb prim_graph hybrid editor helpers', () => {
+    // make sure that our attributes are updated in both normalized and raw primGraph
     it('syncPrimitiveAttribute updates normalized and raw entries', () => {
         const ambapb = buildAmbapb(loadSyntheticPrimGraph());
         syncPrimitiveAttribute(ambapb, 'conv0', 'stride', '4');

@@ -1,3 +1,8 @@
+/* 
+ * This file also tests the editing logic, more specifically testing
+ * that the edits are applied and delta tracker tracks changes correctly
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -130,21 +135,52 @@ describe('ambapb shell editing', () => {
         assert.equal(model._ambapb.primGraph.primitives[1].attributes.stride, '4');
     });
 
-    it('rejects add, delete, and read-only attribute patches before apply', () => {
+    it('allows add and delete attribute patches on runtime shell nodes', () => {
         const model = buildShellCheckpointModel();
         const session = ModelEditor.createSession(model);
-        assert.throws(() => validateAmbapbPatch(session.modified.model, {
+        validateAmbapbPatch(session.modified.model, {
             parentId: 'graph:0/node:0',
             entityType: 'attribute',
             changeType: 'add',
             property: 'attributes.new_attr',
             newValue: '1'
-        }), /not supported/);
+        });
         assert.throws(() => validateAmbapbPatch(session.modified.model, {
             entityId: 'graph:0/node:0/attr:0',
             entityType: 'attribute',
             changeType: 'delete',
             property: 'attributes.prim_graph'
+        }), /not supported/);
+    });
+
+    it('allows renaming runtime shell nodes', () => {
+        const model = buildShellCheckpointModel();
+        const session = ModelEditor.createSession(model);
+        validateAmbapbPatch(session.modified.model, {
+            entityId: 'graph:0/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'renamed_nvp'
+        });
+    });
+
+    it('rejects edits on non-shell checkpoint nodes and read-only attributes', () => {
+        const model = buildShellCheckpointModel();
+        model._modules[0].nodes.push({
+            name: 'inner',
+            type: { name: 'Conv' },
+            attributes: [],
+            inputs: [],
+            outputs: []
+        });
+        const session = ModelEditor.createSession(model);
+        assert.throws(() => validateAmbapbPatch(session.modified.model, {
+            parentId: 'graph:0/node:1',
+            entityType: 'attribute',
+            changeType: 'add',
+            property: 'attributes.new_attr',
+            newValue: '1'
         }), /not supported/);
         assert.throws(() => validateAmbapbPatch(session.modified.model, {
             entityId: 'graph:0/node:0/attr:2',
@@ -153,6 +189,19 @@ describe('ambapb shell editing', () => {
             property: 'attributes.compiled_prim_graph',
             newValue: '{}'
         }), /not supported/);
+    });
+
+    it('rejects edits while viewing compiled graphs', () => {
+        const model = buildShellCheckpointModel();
+        model._modules[0]._ambapbCompiledGraph = true;
+        const session = ModelEditor.createSession(model);
+        assert.throws(() => validateAmbapbPatch(session.modified.model, {
+            entityId: 'graph:0/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'renamed'
+        }, { viewingCompiledGraph: true }), /read-only/);
     });
 
     it('attachCheckpoint keeps shell graph and enables editing', () => {

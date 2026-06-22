@@ -882,6 +882,9 @@ onnx.Context = class {
                     break;
                 case onnx.AttributeType.GRAPH:
                     value = attribute.g ? this.graph(attribute.g) : null;
+                    if (value && name === 'compiled_prim_graph') {
+                        value._ambapbCompiledGraph = true;
+                    }
                     type = 'graph';
                     break;
                 case onnx.AttributeType.FLOATS:

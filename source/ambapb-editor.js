@@ -17,14 +17,68 @@ export const READ_ONLY_SHELL_ATTRIBUTES = new Set([
     COMPILED_PRIM_GRAPH_ATTRIBUTE,
     PRIM_GRAPH_IMMS_ATTRIBUTE
 ]);
+// Will be a living list. We only have information from the files that were given to us
+export const EDITABLE_SHELL_OP_TYPES = new Set([
+    CVFLOW_NVP_OP_TYPE,
+    'FragSubgraph',
+    'BatchCall'
+]);
 
 export function isCVFlowNVPNode(node) {
     return Boolean(node && node.type && node.type.name === CVFLOW_NVP_OP_TYPE);
 }
 
+export function isAmbapbRuntimeShellNode(node) {
+    return Boolean(node && node.type && EDITABLE_SHELL_OP_TYPES.has(node.type.name));
+}
+
 export function isAmbapbShellNode(node) {
     return isCVFlowNVPNode(node);
 }
+
+export function isCompiledAmbapbGraph(graph) {
+    return Boolean(graph && graph._ambapbCompiledGraph);
+}
+
+export function isViewingCompiledAmbapbGraph(path, activeTarget) {
+    if (isCompiledAmbapbGraph(activeTarget)) {
+        return true;
+    }
+    if (Array.isArray(path)) {
+        for (const entry of path) {
+            if (entry && isCompiledAmbapbGraph(entry.target)) {
+                return true;
+            }
+        }
+    }
+    return false;
+};
+
+const resolvePatchNodeContext = (model, patch) => {
+    if (!model || !Array.isArray(model.modules)) {
+        return null;
+    }
+    const entityId = patch.entityId || patch.parentId;
+    if (!entityId) {
+        return null;
+    }
+    const match = /^graph:(\d+)\/node:(\d+)/.exec(entityId);
+    if (!match) {
+        return null;
+    }
+    const graphIndex = Number(match[1]);
+    const nodeIndex = Number(match[2]);
+    const graph = model.modules[graphIndex];
+    if (!graph || !Array.isArray(graph.nodes)) {
+        return null;
+    }
+    return {
+        graph,
+        node: graph.nodes[nodeIndex] || null,
+        graphIndex,
+        nodeIndex
+    };
+};
 
 export function cloneAmbapbEditingState(ambapb) {
     if (!ambapb) {
@@ -220,34 +274,45 @@ export function isAmbapbEditableGraph(model, graphIndex = 0) {
     return Boolean(model && model._ambapb && model._ambapb.canEdit && graph && !graph._ambapb);
 }
 
-// we don't want to support topology editing for now: too risky and changes 
+// we don't want to support topology editing for now: too risky and changes
 // entire structure of prim_graph
-export function assertAmbapbAttributePatchAllowed(model, patch) {
+export function assertAmbapbAttributePatchAllowed(model, patch, options = {}) {
     if (!model || !model._ambapb || !model._ambapb.canEdit) {
         return;
     }
-    if (patch.entityType === 'attribute' && (patch.changeType === 'add' || patch.changeType === 'delete')) {
-        throw new Error('Adding or removing checkpoint attributes is not supported.');
+    if (options.viewingCompiledGraph === true) {
+        throw new Error('Compiled graph nodes are read-only.');
     }
-    if (patch.entityType === 'node') {
-        if (patch.property === 'name') {
-            throw new Error('Renaming checkpoint nodes is not supported.');
-        }
-        if (patch.property === 'insert' || patch.property === 'remove') {
-            throw new Error('Checkpoint topology editing is not supported.');
-        }
+    const context = resolvePatchNodeContext(model, patch);
+    if (context && isCompiledAmbapbGraph(context.graph)) {
+        throw new Error('Compiled graph nodes are read-only.');
     }
-    if (patch.entityType === 'attribute' && patch.changeType === 'modify') {
+    if (patch.entityType === 'node' && (patch.property === 'insert' || patch.property === 'remove')) {
+        throw new Error('Checkpoint topology editing is not supported.');
+    }
+    if (patch.entityType === 'node' && (patch.property === 'name' || patch.property === 'description')) {
+        if (!context || !context.node || !isAmbapbRuntimeShellNode(context.node)) {
+            throw new Error('Editing this checkpoint node is not supported.');
+        }
+        return;
+    }
+    if (patch.entityType === 'attribute') {
+        if (!context || !context.node || !isAmbapbRuntimeShellNode(context.node)) {
+            throw new Error('Editing this checkpoint node is not supported.');
+        }
         const attributeName = attributeNameFromProperty(patch.property);
         if (READ_ONLY_SHELL_ATTRIBUTES.has(attributeName)) {
             throw new Error(`Editing '${attributeName}' is not supported.`);
+        }
+        if (patch.changeType === 'delete' && attributeName === PRIM_GRAPH_ATTRIBUTE) {
+            throw new Error(`Deleting '${attributeName}' is not supported.`);
         }
     }
 }
 
 // for now, prim_graph edits are JSON text, we will change this later
-export function validateAmbapbPatch(model, patch) {
-    assertAmbapbAttributePatchAllowed(model, patch);
+export function validateAmbapbPatch(model, patch, options = {}) {
+    assertAmbapbAttributePatchAllowed(model, patch, options);
     if (patch.entityType !== 'attribute' || patch.changeType !== 'modify') {
         return;
     }

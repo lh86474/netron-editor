@@ -1,3 +1,7 @@
+/*
+ * This file tests the visualization logic for the ambapb checkpoint
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -38,6 +42,7 @@ const loadSyntheticPrimGraph = () => {
     return parsePrimGraphJson(JSON.stringify(JSON.parse(fs.readFileSync(filePath, 'utf8'))));
 };
 
+// We don't need this anymore. Outdated and removed feature
 describe('ambapb visualization', () => {
     it('maps synthetic prim_graph to a Netron graph module', () => {
         const checkpoint = { primGraph: loadSyntheticPrimGraph() };
