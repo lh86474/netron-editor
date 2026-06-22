@@ -179,4 +179,62 @@ describe('ambapb batch inline expansion', () => {
         assert.equal(collapsed.nodes.some((node) => node.name === 'batch_call'), true);
         assert.equal(expanded.nodes.some((node) => node.name === 'batch_call'), false);
     });
+    it('resolves BatchCall target through FragSubgraph graph attribute', () => {
+        const subgraphName = 'subgraph_/multi_scale_deform_attention/GridSample_output_0_frag';
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'frag_with_graph_attr',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{
+                        name: 'graph',
+                        type: 'graph',
+                        value: {
+                            name: subgraphName,
+                            inputs: [{ name: 'sub_input_0', value: [tensor('sub_input_0')] }],
+                            outputs: [{ name: 'sub_output_0', value: [tensor('sub_output_0')] }],
+                            nodes: [{
+                                name: 'inner_nvp',
+                                type: { name: 'CVFlowNVP' },
+                                attributes: [],
+                                inputs: [{ name: 'input0', value: [tensor('sub_input_0')] }],
+                                outputs: [{ name: 'output', value: [tensor('sub_output_0')] }]
+                            }]
+                        }
+                    }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'batch_call',
+                    type: { name: 'BatchCall' },
+                    attributes: [
+                        { name: 'graph_id', type: 'string', value: subgraphName },
+                        {
+                            name: 'src_mappings',
+                            type: 'string',
+                            value: JSON.stringify([{ id: 'sub_input_0' }])
+                        },
+                        {
+                            name: 'out_mappings',
+                            type: 'string',
+                            value: JSON.stringify([{ id: 'sub_output_0' }])
+                        }
+                    ],
+                    inputs: [{ name: 'input0', value: [tensor('producer_out')] }],
+                    outputs: [{ name: 'output', value: [tensor('batch_out')] }]
+                }
+            ]
+        };
+        const batchCall = graph.nodes.find((node) => node.name === 'batch_call');
+        const target = resolveBatchCallTarget(graph, batchCall);
+        assert.ok(target);
+        assert.equal(target.graphId, subgraphName);
+        assert.equal(target.fragSubgraphNode.name, 'frag_with_graph_attr');
+        assert.equal(target.subGraph.name, subgraphName);
+        assert.equal(canExpandBatchCall(graph, batchCall), true);
+    });
 });

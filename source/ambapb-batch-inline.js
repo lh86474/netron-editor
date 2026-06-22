@@ -10,6 +10,7 @@ import { cloneGraph } from './model-editor.js';
 const BATCH_CALL_OP = 'BatchCall';
 const FRAG_SUBGRAPH_OP = 'FragSubgraph';
 const COMPILED_PRIM_GRAPH_ATTR = 'compiled_prim_graph';
+const FRAG_SUBGRAPH_GRAPH_ATTR = 'graph';
 
 export class BatchCallInlineError extends Error {
     constructor(message) {
@@ -128,9 +129,17 @@ const findGraphByName = (graph, name) => {
 };
 
 const getCompiledGraphFromNode = (node) => {
-    for (const entry of graphArguments(node)) {
-        if (entry.name === COMPILED_PRIM_GRAPH_ATTR && entry.type === 'graph' && entry.value) {
-            return entry.value;
+    if (!node) {
+        return null;
+    }
+    const attrNames = node.type?.name === FRAG_SUBGRAPH_OP
+        ? [COMPILED_PRIM_GRAPH_ATTR, FRAG_SUBGRAPH_GRAPH_ATTR]
+        : [COMPILED_PRIM_GRAPH_ATTR];
+    for (const name of attrNames) {
+        for (const entry of graphArguments(node)) {
+            if (entry.name === name && entry.type === 'graph' && entry.value) {
+                return entry.value;
+            }
         }
     }
     return null;
