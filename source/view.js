@@ -1264,13 +1264,68 @@ view.View = class {
         return Boolean(graph && canExpandBatchCall(graph, nodeView.value));
     }
 
-    _showBatchCallContextMenu(nodeView, event) {
-        const node = = nodeView.value;
+    _batchCallContextMenuItems(nodeView) {
+        const node = nodeView.value;
         const items = [];
 
         if (node._inlineExpanded) {
-            const batchCallName  
+            const batchCallName = inlineExpansionBatchCallName(node);
+            if (batchCallName) {
+                items.push({
+                    label: 'Collapse Subgraph Inline',
+                    action: () => this._toggleBatchInlineExpansion(batchCallName)
+                });
+            }
+            return items;
         }
+        if (!isBatchCallNode(node)) {
+            return items;
+        }
+
+        const nodeName = node.name;
+        const isExpanded = this._batchInlineExpanded.has(nodeName);
+        const canExpand = this._canExpandBatchCall(nodeView);
+
+        if (isExpanded) {
+            items.push({
+                label: 'Collapse Subgraph Inline',
+                action: () => this._toggleBatchInlineExpansion(nodeName)
+            });
+        } else {
+            items.push({
+                label: canExpand
+                    ? 'Expand Subgraph Inline'
+                    : 'Expand Subgraph Inline (no matching FragSubgraph)',
+                enabled: canExpand,
+                action: () => this._toggleBatchInlineExpansion(nodeName)
+            });
+        }
+        return items;
+    }
+
+    _showBatchCallContextMenu(nodeView, event) {
+        if (!this._isBatchCallContextMenuTarget(nodeView)) {
+            return;
+        }
+        this._closeGraphOverlays();
+
+        const items = this._batchCallContextMenuItems(nodeView);
+
+        if (this._canShowSubgraphContextMenu(nodeView)) {
+            if (items.length > 0) {
+                items.push({ separator: true });
+            }
+            items.push(...this._subgraphContextMenuItems(nodeView));
+        }
+
+        if (items.length === 0) {
+            return;
+        }
+
+        this._graphContextMenu = new view.GraphContextMenu(
+            this, this._host, event.clientX, event.clientY, items
+        );
+        this._graphContextMenu.open();
     }
 
     async _toggleBatchInlineExpansion(batchCallName) {
