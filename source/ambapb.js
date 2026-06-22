@@ -328,8 +328,8 @@ export const attachCheckpoint = (model, modelProto) => {
     if (!model || !checkpoint) {
         return false;
     }
+    const exportable = Boolean(model._exportable);
     model._kind = AMBAPB_KIND;
-    model._exportable = false;
     model._ambapb = {
         metadata: checkpoint.metadata,
         wrapperNode: checkpoint.wrapperNode,
@@ -339,7 +339,7 @@ export const attachCheckpoint = (model, modelProto) => {
         primGraph: checkpoint.primGraph,
         imms: checkpoint.imms,
         canEdit: true,
-        canExport: false
+        canExport: exportable
     };
     return true;
 };

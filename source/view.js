@@ -2262,7 +2262,13 @@ view.View = class {
     }
 
     _canExportOnnx() {
-        return this._model && this._editSession && canExportOnnx(this._model);
+        if (!this._model || !this._editSession) {
+            return false;
+        }
+        if(canExportOnnx(this._model)) {
+            return true;
+        }
+        return isAmbapbCheckpoint(this._model) && canExportCheckpoint(this._model);
     }
 
     _suggestedExportBasename() {

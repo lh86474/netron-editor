@@ -113,5 +113,7 @@ describe('ambapb checkpoint detection', () => {
         assert.ok(viewModel._ambapb.primGraph);
         assert.equal(viewModel._ambapb.primGraph.primitives.length, 68);
         assert.equal(viewModel._ambapb.imms.entries.length, 720);
+        assert.equal(viewModel._exportable, true);   
+        assert.equal(canExportCheckpoint(viewModel), true);
     });
 });

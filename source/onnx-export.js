@@ -6,6 +6,7 @@ import './onnx-encode.js';
 import { onnx } from './onnx-proto.js';
 import { BinaryReader } from './protobuf.js';
 import { enumerateGraphValues } from './model-editor.js';
+import { buildPrimGraphAttributeProto, PRIM_GRAPH_ATTRIBUTE_NAME } from './ambapb-prim-graph.js';
 // class to create the ONNXExportError
 // Holds the error message and has property ONNX Export Error
 // from parent class Error
@@ -436,6 +437,14 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
         }
         const modifiedNode = editSession.modified.getGraph(location.graphIndex).nodes[location.nodeIndex];
         const modifiedAttribute = (modifiedNode.attributes || [])[location.attributeIndex];
+
+        if (attribute.name === PRIM_GRAPH_ATTRIBUTE_NAME && typeof change.newValue ==='string') {
+            const originalNode = originalProto.graph.node[location.nodeIndex];
+            const originalAttribute = (originalNode.attribute || [])[location.attributeIndex];
+            node.attribute[location.attributeIndex] =
+                buildPrimGraphAttributeProto(change.newValue, originalAttribute);
+            continue;
+        }
         const attributeType = change.attributeType || (modifiedAttribute && modifiedAttribute.type) || 'string';
         const rebuilt = buildAttributeProto(attribute.name, attributeType, change.newValue);
         node.attribute[location.attributeIndex] = rebuilt;

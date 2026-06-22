@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { onnx } from '../source/onnx-proto.js';
 import '../source/onnx-encode.js';
+import { buildPrimGraphAttributeProto, parsePrimGraphFromAttribute} from '../source/ambapb-prim-graph.js';
 import { BinaryReader } from '../source/protobuf.js';
 import {
     attachCheckpoint,
@@ -136,5 +137,13 @@ describe('ambapb prim graph integration', () => {
         const serialized = serializePrimGraphJson(checkpoint.primGraph);
         const roundTrip = parsePrimGraphJson(serialized);
         deepEqualJson(roundTrip.raw, checkpoint.primGraph.raw);
+    });
+    it('encodes prim_graph JSON into tensor raw_data', () => {
+        const originalAttr = buildPrimGraphAttributeProto(JSON.stringify(fixture.raw));
+        const edited = JSON.parse(JSON.stringify(fixture.raw));
+        edited.primitives[1].attributes.stride = '4';
+        const rebuilt = buildPrimGraphAttributeProto(JSON.stringify(edited), originalAttr);
+        const roundTrip = parsePrimGraphFromAttribute(rebuilt);
+        assert.equal(roundTrip.primitives[1].attributes.stride, '4');
     });
 });
