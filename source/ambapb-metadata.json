@@ -1,0 +1,21 @@
+{
+  "conv2ibesbcp": {
+    "attributes": {
+      "w": { "label": "width" },
+      "h": { "label": "height" },
+      "stride": { "label": "stride" }
+    }
+  },
+  "input": {
+    "attributes": {
+      "w": { "label": "width" },
+      "h": { "label": "height" },
+      "d": { "label": "depth" }
+    }
+  },
+  "output": {
+    "attributes": {
+      "dram_format": { "label": "dram format" }
+    }
+  }
+}

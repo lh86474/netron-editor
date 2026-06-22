@@ -4,6 +4,13 @@ import * as grapher from './grapher.js';
 import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint } from './ambapb.js';
+import {
+    formatPrimGraphForEditor,
+    isAmbapbShellNode,
+    PRIM_GRAPH_ATTRIBUTE,
+    READ_ONLY_SHELL_ATTRIBUTES,
+    validateAmbapbPatch
+} from './ambapb-editor.js';
 import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
 import { validateNodeInsert } from './onnx-operator-validation.js';
 import { GraphPane } from './graph-pane.js';
@@ -773,6 +780,16 @@ view.View = class {
         this._updateUndoRedoButtons();
     }
 
+    _createNodeSidebar(node) {
+        if (this._editSession && this._canEditModelContent() && isAmbapbCheckpoint(this._model) && isAmbapbShellNode(node)) {
+            return new view.AmbaShellNodeSidebar(this, node, this._editSession);
+        }
+        if (this._editSession && this._canEditModelContent()) {
+            return new view.EditableNodeSidebar(this, node, this._editSession);
+        }
+        return new view.NodeSidebar(this, node);
+    }
+
     _resolveNodeEntity(node) {
         if (!this._editSession || !node) {
             return null;
@@ -814,9 +831,7 @@ view.View = class {
         if (!current || !current._node) {
             return;
         }
-        const sidebar = this._canEditModelContent() ?
-            new view.EditableNodeSidebar(this, current._node, this._editSession) :
-            new view.NodeSidebar(this, current._node);
+        const sidebar = this._createNodeSidebar(current._node);
         this._bindNodeSidebarEvents(sidebar, current._node);
         this._sidebar.open(sidebar, entry.title || 'Node Properties');
     }
@@ -918,11 +933,23 @@ view.View = class {
     }
 
     _canUndoEdit() {
-        return Boolean(this._editSession && this._editSession.history.canUndo && this._canInsertNode());
+        if (!this._editSession || !this._editSession.history.canUndo) {
+            return false;
+        }
+        if (isAmbapbCheckpoint(this._model)) {
+            return canEditCheckpoint(this._model);
+        }
+        return this._canInsertNode();
     }
 
     _canRedoEdit() {
-        return Boolean(this._editSession && this._editSession.history.canRedo && this._canInsertNode());
+        if (!this._editSession || !this._editSession.history.canRedo) {
+            return false;
+        }
+        if (isAmbapbCheckpoint(this._model)) {
+            return canEditCheckpoint(this._model);
+        }
+        return this._canInsertNode();
     }
 
     async _undoEdit() {
@@ -985,11 +1012,25 @@ view.View = class {
         if (!this._canEditModelContent()) {
             return null;
         }
+        if (isAmbapbCheckpoint(this._model)) {
+            try {
+                validateAmbapbPatch(this._editSession.modified.model, patch);
+            } catch (error) {
+                this.error(error, 'Edit not allowed.', null);
+                return null;
+            }
+        }
         this._checkpointEditHistory();
         if (!(patch.entityType === 'node' && patch.changeType === 'delete' && patch.property === 'remove')) {
             this._danglingNodeNames.clear();
         }
-        const change = this._editSession.applyPatch(patch);
+        let change = null;
+        try {
+            change = this._editSession.applyPatch(patch);
+        } catch (error) {
+            this.error(error, 'Error applying edit.', null);
+            return null;
+        }
         // eslint-disable-next-line no-console
         console.log('[editor] Patch applied:', stringifyEditorJSON(patch));
         // eslint-disable-next-line no-console
@@ -1011,6 +1052,9 @@ view.View = class {
     }
 
     _canInsertNode() {
+        if (isAmbapbCheckpoint(this._model)) {
+            return false;
+        }
         return this._canEditModelContent();
     }
 
@@ -2233,9 +2277,7 @@ view.View = class {
                 if (this._menu) {
                     this._menu.close();
                 }
-                const sidebar = this._editSession && this._canEditModelContent() ?
-                    new view.EditableNodeSidebar(this, node, this._editSession) :
-                    new view.NodeSidebar(this, node);
+                const sidebar = this._createNodeSidebar(node);
                 this._bindNodeSidebarEvents(sidebar, node);
                 this._sidebar.open(sidebar, 'Node Properties', source);
             } catch (error) {
@@ -5532,6 +5574,167 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
             this.addSection('Blocks');
             for (const block of blocks) {
                 this.addArgument(block.name, block);
+            }
+        }
+    }
+
+    activate() {
+        this.emit('select', this._node);
+    }
+
+    deactivate() {
+        this.emit('select', null);
+        if (this._focused) {
+            for (const value of this._focused) {
+                this.emit('blur', value);
+            }
+            this._focused.clear();
+        }
+    }
+};
+
+view.EditablePrimGraphJsonView = class extends view.Control {
+
+    constructor(context, jsonText, options = {}) {
+        super(context);
+        this._onCommit = options.onCommit;
+        this._committedValue = jsonText;
+        this.element = this.createElement('div', 'sidebar-item-value');
+        const line = this.createElement('div', 'sidebar-editable-attribute-row sidebar-item-value-line');
+        const textarea = this.createElement('textarea');
+        textarea.setAttribute('class', 'sidebar-editable-input');
+        textarea.style.fontFamily = 'monospace';
+        textarea.style.minHeight = '12em';
+        textarea.style.width = '100%';
+        textarea.style.resize = 'vertical';
+        textarea.value = jsonText;
+        const commit = () => {
+            const nextValue = textarea.value;
+            if (nextValue !== this._committedValue && this._onCommit) {
+                this._committedValue = nextValue;
+                this._onCommit(nextValue);
+            }
+        };
+        textarea.addEventListener('blur', commit);
+        textarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                textarea.blur();
+            }
+        });
+        line.appendChild(textarea);
+        this.element.appendChild(line);
+    }
+
+    render() {
+        return [this.element];
+    }
+
+    toggle() {
+    }
+};
+
+view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
+
+    constructor(context, node, editSession) {
+        super(context);
+        this._node = node;
+        this._editSession = editSession;
+        this._entity = context._resolveNodeEntity(node);
+    }
+
+    get identifier() {
+        return 'node';
+    }
+
+    render() {
+        const node = this._node;
+        const nodeId = this._entity ? this._entity.nodeId : null;
+        const ambapb = this._editSession.modified.model._ambapb;
+        if (node.type) {
+            const type = node.type;
+            const item = this.addProperty('type', node.type.identifier || node.type.name);
+            if (type && (type.description || type.inputs || type.outputs || type.attributes)) {
+                let icon = '?';
+                let tooltip = 'Show Definition';
+                if (type.type === 'weights') {
+                    icon = '\u25CF';
+                    tooltip = 'Show Weights';
+                } else if (Array.isArray(type.nodes)) {
+                    icon = '\u0192';
+                }
+                item.action(icon, tooltip, () => {
+                    this.emit('show-definition', null);
+                });
+            }
+            const module = node.type.module;
+            const version = node.type.version;
+            const status = node.type.status;
+            if (module || version || status) {
+                const list = [module, version ? `v${version}` : '', status];
+                const value = list.filter((value) => value).join(' ');
+                this.addProperty('module', value, 'nowrap');
+            }
+        }
+        if (node.name) {
+            this.addProperty('name', node.name, 'nowrap');
+        }
+        if (node.identifier) {
+            this.addProperty('identifier', node.identifier, 'nowrap');
+        }
+        if (node.description) {
+            this.addProperty('description', node.description);
+        }
+        if (node.device) {
+            this.addProperty('device', node.device);
+        }
+        const attributes = node.attributes;
+        if (Array.isArray(attributes) && attributes.length > 0) {
+            this.addSection('Attributes');
+            for (let index = 0; index < attributes.length; index++) {
+                const attribute = attributes[index];
+                if (!nodeId) {
+                    this.addArgument(attribute.name, attribute, 'attribute');
+                    continue;
+                }
+                const attributeId = `${nodeId}/attr:${index}`;
+                if (attribute.name === PRIM_GRAPH_ATTRIBUTE) {
+                    const jsonText = formatPrimGraphForEditor(ambapb);
+                    const item = new view.EditablePrimGraphJsonView(this._view, jsonText, {
+                        onCommit: (value) => {
+                            this._view.applyEditorPatch({
+                                entityId: attributeId,
+                                entityType: 'attribute',
+                                changeType: 'modify',
+                                property: `attributes.${attribute.name}`,
+                                newValue: value
+                            });
+                        }
+                    });
+                    this.addEntry(attribute.name, item);
+                } else if (READ_ONLY_SHELL_ATTRIBUTES.has(attribute.name)) {
+                    this.addArgument(attribute.name, attribute, 'attribute');
+                } else if (attribute.type === 'string' || attribute.type === 'float32' || attribute.type === 'int64') {
+                    this.addEditableAttribute(attribute, attributeId, (patch) => {
+                        this._view.applyEditorPatch(patch);
+                    });
+                } else {
+                    this.addArgument(attribute.name, attribute, 'attribute');
+                }
+            }
+        }
+        const inputs = node.inputs;
+        if (Array.isArray(inputs) && inputs.length > 0) {
+            this.addSection('Inputs');
+            for (const input of inputs) {
+                this.addArgument(input.name, input);
+            }
+        }
+        const outputs = node.outputs;
+        if (Array.isArray(outputs) && outputs.length > 0) {
+            this.addSection('Outputs');
+            for (const output of outputs) {
+                this.addArgument(output.name, output);
             }
         }
     }

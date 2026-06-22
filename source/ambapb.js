@@ -338,7 +338,7 @@ export const attachCheckpoint = (model, modelProto) => {
         primGraphImmsAttribute: checkpoint.primGraphImmsAttribute,
         primGraph: checkpoint.primGraph,
         imms: checkpoint.imms,
-        canEdit: false,
+        canEdit: true,
         canExport: false
     };
     return true;

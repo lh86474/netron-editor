@@ -3,6 +3,7 @@
  * Author: Luray He
  */
 import { cloneGraphModules, stringifyEditorJSON } from './model-editor.js';
+import { cloneAmbapbEditingState } from './ambapb-editor.js';
 
 const cloneData = (value) => JSON.parse(stringifyEditorJSON(value));
 
@@ -55,15 +56,26 @@ export class EditHistory {
     }
 
     _capture(session) {
-        return {
+        const snapshot = {
             modules: cloneGraphModules(session.modified.model.modules),
             delta: cloneData(session.delta.exportSnapshot())
         };
+        if (session.modified.model._ambapb) {
+            snapshot.ambapb = cloneAmbapbEditingState(session.modified.model._ambapb);
+        }
+        return snapshot;
     }
 
     // restore the session to the previous snapshot
     _restore(session, snapshot) {
         session.modified.model.modules = cloneGraphModules(snapshot.modules);
+        if (snapshot.ambapb) {
+            const ambapb = cloneAmbapbEditingState(snapshot.ambapb);
+            session.modified.model._ambapb = ambapb;
+            if (session.original._ambapb) {
+                session.original._ambapb.primGraph = ambapb.primGraph;
+            }
+        }
         session.delta.restoreSnapshot(snapshot.delta);
     }
 }

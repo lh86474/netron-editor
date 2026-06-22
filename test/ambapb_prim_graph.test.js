@@ -1,3 +1,8 @@
+/*
+ * Fixture parsing, dependency graphs, round-trip
+ * mobilenet integration
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

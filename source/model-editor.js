@@ -1,6 +1,15 @@
 
 import { DeltaTracker } from './delta-tracker.js';
 import { EditHistory } from './edit-history.js';
+import {
+    assertAmbapbAttributePatchAllowed,
+    attachAmbapbEditingState,
+    getPrimGraphSnapshotValue,
+    isAmbapbShellNode,
+    PRIM_GRAPH_ATTRIBUTE,
+    syncShellAttribute,
+    validateAmbapbPatch
+} from './ambapb-editor.js';
 
 const readType = (type) => {
     if (!type) {
@@ -145,20 +154,35 @@ const readModel = (model) => {
             value: readArgumentValues(argument)
         };
     };
-    const readNode = (node) => ({
-        name: node.name,
-        type: readType(node.type),
-        attributes: (node.attributes || []).map((attribute) => readAttribute(attribute)),
-        inputs: (node.inputs || []).map((input) => readArgument(input)),
-        outputs: (node.outputs || []).map((output) => readArgument(output))
-    });
-    const readGraph = (graph) => ({
-        name: graph.name,
-        identifier: graph.identifier,
-        inputs: (graph.inputs || []).map((input) => readArgument(input)),
-        outputs: (graph.outputs || []).map((output) => readArgument(output)),
-        nodes: (graph.nodes || []).map((node) => readNode(node))
-    });
+    const readNode = (node) => {
+        const result = {
+            name: node.name,
+            type: readType(node.type),
+            attributes: (node.attributes || []).map((attribute) => readAttribute(attribute)),
+            inputs: (node.inputs || []).map((input) => readArgument(input)),
+            outputs: (node.outputs || []).map((output) => readArgument(output))
+        };
+        if (node._primitiveId !== undefined) {
+            result._primitiveId = node._primitiveId;
+        }
+        if (node._primitiveIndex !== undefined) {
+            result._primitiveIndex = node._primitiveIndex;
+        }
+        return result;
+    };
+    const readGraph = (graph) => {
+        const result = {
+            name: graph.name,
+            identifier: graph.identifier,
+            inputs: (graph.inputs || []).map((input) => readArgument(input)),
+            outputs: (graph.outputs || []).map((output) => readArgument(output)),
+            nodes: (graph.nodes || []).map((node) => readNode(node))
+        };
+        if (graph._ambapb) {
+            result._ambapb = true;
+        }
+        return result;
+    };
     return {
         format: model.format,
         modules: (model.modules || []).map((graph) => readGraph(graph))
@@ -1263,7 +1287,11 @@ const buildOriginalSnapshot = (model) => {
             snapshot.set(nodeId, node.name);
             node.attributes.forEach((attribute, attributeIndex) => {
                 const attributeId = `${nodeId}/attr:${attributeIndex}`;
-                snapshot.set(attributeId, cloneAttributeValue(attribute.value));
+                let snapshotValue = cloneAttributeValue(attribute.value);
+                if (model._ambapb && isAmbapbShellNode(node) && attribute.name === PRIM_GRAPH_ATTRIBUTE) {
+                    snapshotValue = getPrimGraphSnapshotValue(model._ambapb);
+                }
+                snapshot.set(attributeId, snapshotValue);
             });
         });
         for (const [value, valueId] of enumerateGraphValues(graph, graphIndex)) {
@@ -1366,6 +1394,9 @@ class EditorState {
     constructor(original) {
         this._original = original;
         const normalized = readModel(original);
+        if (original._ambapb) {
+            attachAmbapbEditingState(normalized, original._ambapb);
+        }
         this.modified = new EditableModel(normalized);
         this._snapshot = buildOriginalSnapshot(normalized);
         this.delta = new DeltaTracker(this._snapshot);
@@ -1385,6 +1416,8 @@ class EditorState {
     applyPatch(patch) {
         let entityId = patch.entityId;
         let changeType = patch.changeType;
+        let newValueForDelta = patch.newValue;
+        validateAmbapbPatch(this.modified.model, patch);
 
         if (patch.changeType === 'add' && patch.entityType === 'attribute') {
             const location = parseAttributeParentId(patch.parentId);
@@ -1427,6 +1460,27 @@ class EditorState {
             const target = getAttributeTarget(this.modified.model, location);
             const attribute = target.attributes[location.attributeIndex];
             attribute.value = Array.isArray(patch.newValue) ? patch.newValue.slice() : patch.newValue;
+            if (location.target === 'node' && this.modified.model._ambapb) {
+                syncShellAttribute(
+                    this.modified.model,
+                    location.graphIndex,
+                    location.targetIndex,
+                    attribute.name,
+                    patch.newValue
+                );
+                if (this._original._ambapb) {
+                    syncShellAttribute(
+                        { modules: this.modified.model.modules, _ambapb: this._original._ambapb },
+                        location.graphIndex,
+                        location.targetIndex,
+                        attribute.name,
+                        patch.newValue
+                    );
+                }
+                if (attribute.name === PRIM_GRAPH_ATTRIBUTE) {
+                    newValueForDelta = getPrimGraphSnapshotValue(this.modified.model._ambapb);
+                }
+            }
         } else if (patch.changeType === 'add' && patch.entityType === 'node' && patch.property === 'insert') {
             const location = parseNodeEntityId(patch.parentId);
             const graph = this.modified.getGraph(location.graphIndex);
@@ -1470,7 +1524,7 @@ class EditorState {
             entityType: patch.entityType,
             changeType,
             property: patch.property,
-            newValue: patch.newValue
+            newValue: newValueForDelta
         };
         if (patch.parentId) {
             change.parentId = patch.parentId;
@@ -1486,7 +1540,7 @@ class EditorState {
             changeType,
             property: patch.property,
             oldValue: undefined,
-            newValue: patch.newValue
+            newValue: newValueForDelta
         };
     }
 }

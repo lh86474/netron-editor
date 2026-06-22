@@ -124,7 +124,7 @@ onnx.Model = class {
             }
         }
         if (ambapb.attachCheckpoint(this, this._proto)) {
-            this._metadata.unshift(new onnx.Argument('editor', 'Amba checkpoint: primitive editing not yet available.'));
+            this._metadata.unshift(new onnx.Argument('editor', 'Amba checkpoint: edit CVFlowNVP attributes in the modified pane.'));
         }
         const context = new onnx.Context.Model(metadata, target.locations, imports, model.graph, model.functions);
         const graph = context.graph(null);

@@ -106,7 +106,7 @@ describe('ambapb checkpoint detection', () => {
         assert.equal(attachCheckpoint(viewModel, modelProto), true);
         assert.equal(viewModel._kind, AMBAPB_KIND);
         assert.equal(viewModel._exportable, false);
-        assert.equal(canEditCheckpoint(viewModel), false);
+        assert.equal(canEditCheckpoint(viewModel), true);
         assert.equal(canExportCheckpoint(viewModel), false);
         assert.ok(viewModel._ambapb.wrapperNode);
         assert.ok(viewModel._ambapb.primGraphAttribute);

@@ -1,5 +1,5 @@
 /*
- * 
+ * This file is for parsing, serializing, and validating the prim_graph JSON
  * Author: Luray He
  */
 export class AmbapbParseError extends Error {
@@ -74,6 +74,7 @@ const normalizeOport = (oport) => {
         raw: oport
     };
 };
+
 
 const normalizeSource = (source) => {
     return {
@@ -179,6 +180,8 @@ export const parsePrimGraphImms = (attribute) => {
 };
 
 // from sources and oport additional-dep-prim-ids
+// I'm going to remove this feature since this originally, our plan
+// was to visualize prim_graph as an actual rendered graph, but
 export const buildDependencyGraph = (primitives) => {
     const graph = new Map();
     const ensureEntry = (id) => {
@@ -228,7 +231,7 @@ export const enumeratePrimPorts = (primitives) => {
     }
     return ports;
 };
-
+// set to make sure all primitives have unique ids
 export const validatePrimGraph = (primitives) => {
     const errors = [];
     const ids = new Set();
