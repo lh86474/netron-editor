@@ -1,3 +1,7 @@
+/*
+ * Assert that when we attach a checkpoint, we can edit the prim_graph JSON text
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
