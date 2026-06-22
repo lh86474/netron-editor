@@ -73,15 +73,7 @@
 .node-border-outer { fill: none; stroke: none; pointer-events: none; }
 
 .select > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
-<<<<<<< HEAD
-.edited > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
-.range-begin > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
-.range-end > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
-.range-begin.range-end > .node.node-border { stroke: rgba(120, 0, 160, 0.95); stroke-width: 2px; }
-/*styling for dangling nodes */
-.dangling > .node.node-border { stroke: rgba(230, 160, 0, 0.95); stroke-width: 2px; stroke-dasharray: 6 4; }
-=======
-.edited:not(.range-begin):not(.range-end) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
+.edited:not(.range-begin):not(.range-end):not(.inline-expanded) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .range-begin:not(.edited) > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
 .range-end:not(.edited) > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
 .range-begin.range-end:not(.edited) > .node.node-border { stroke: rgba(120, 0, 160, 0.95); stroke-width: 2px; }
@@ -91,7 +83,8 @@
 .edited.range-end:not(.range-begin) > .node.node-border-outer { stroke: rgba(0, 80, 200, 0.95); stroke-width: 6px; }
 .edited.range-begin.range-end > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .edited.range-begin.range-end > .node.node-border-outer { stroke: rgba(120, 0, 160, 0.95); stroke-width: 6px; }
->>>>>>> graph_extraction_feature
+.inline-expanded > .node.node-border { stroke: rgba(220, 0, 0, 0.95); stroke-width: 2px; }
+.dangling > .node.node-border { stroke: rgba(230, 160, 0, 0.95); stroke-width: 2px; stroke-dasharray: 6 4; }
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }
 .edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }
 .select.node-argument > rect { fill: transparent; stroke: rgba(220, 0, 0, 0.9); }
@@ -118,14 +111,7 @@
     .node line { stroke: #242424; }
 
     .select > .node.node-border { stroke: rgba(192, 0, 0, 0.8); }
-<<<<<<< HEAD
-    .edited > .node.node-border { stroke: rgba(192, 0, 0, 0.8); }
-    .range-begin > .node.node-border { stroke: rgba(80, 200, 80, 0.9); }
-    .range-end > .node.node-border { stroke: rgba(100, 160, 255, 0.9); }
-    .range-begin.range-end > .node.node-border { stroke: rgba(180, 120, 255, 0.9); }
-    .dangling > .node.node-border { stroke: rgba(255, 190, 60, 0.9); stroke-dasharray: 6 4; }
-=======
-    .edited:not(.range-begin):not(.range-end) > .node.node-border { stroke: rgba(192, 0, 0, 0.8); }
+    .edited:not(.range-begin):not(.range-end):not(.inline-expanded) > .node.node-border { stroke: rgba(192, 0, 0, 0.8); }
     .range-begin:not(.edited) > .node.node-border { stroke: rgba(80, 200, 80, 0.9); }
     .range-end:not(.edited) > .node.node-border { stroke: rgba(100, 160, 255, 0.9); }
     .range-begin.range-end:not(.edited) > .node.node-border { stroke: rgba(180, 120, 255, 0.9); }
@@ -135,7 +121,8 @@
     .edited.range-end:not(.range-begin) > .node.node-border-outer { stroke: rgba(100, 160, 255, 0.9); stroke-width: 6px; }
     .edited.range-begin.range-end > .node.node-border { stroke: rgba(192, 0, 0, 0.8); }
     .edited.range-begin.range-end > .node.node-border-outer { stroke: rgba(180, 120, 255, 0.9); stroke-width: 6px; }
->>>>>>> graph_extraction_feature
+    .inline-expanded > .node.node-border { stroke: rgba(220, 0, 0, 0.95); stroke-width: 2px; }
+    .dangling > .node.node-border { stroke: rgba(255, 190, 60, 0.9); stroke-dasharray: 6 4; }
     .select.edge-path { stroke: rgba(192, 0, 0, 0.8); }
     .edge-path.edge-path-edited { stroke: rgba(192, 0, 0, 0.8); }
     .select.node-argument > rect { fill: transparent; stroke: rgba(192, 0, 0, 0.8); }

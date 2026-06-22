@@ -23,6 +23,11 @@ import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilen
 import { validateNodeInsert } from './onnx-operator-validation.js';
 import { GraphPane } from './graph-pane.js';
 import { MergeWorkspaceController } from './merge-workspace.js';
+import {
+    applyBatchInlineExpansions,
+    canExpandBatchCall,
+    isBatchCallNode
+} from './ambapb-batch-inline.js';
 
 const view = {};
 const markdown = {};
@@ -59,6 +64,7 @@ view.View = class {
         // arrays to support multiple begin and end marker
         this._rangeBegins = [];
         this._rangeEnds = [];
+        this._batchInlineExpanded = new Set();
         this._danglingNodeNames = new Set();
         this._applyingHistory = false;
         this._exportBasenameOverride = null;
@@ -1093,6 +1099,80 @@ view.View = class {
         }
     }
 
+    _resolveDisplayGraph(graph) {
+        if (!graph || this._batchInlineExpanded.size === 0) {
+            return graph;
+        }
+        return applyBatchInlineExpansions(graph, this._batchInlineExpanded);
+    }
+
+    _restoreBatchInlineState(state) {
+        if (state && Array.isArray(state.batchInlineExpanded)) {
+            this._batchInlineExpanded = new Set(state.batchInlineExpanded);
+        }
+    }
+
+    _persistBatchInlineState() {
+        if (this._batchInlineExpanded.size > 0 && this._path.length > 0) {
+            this._path[0].state = Object.assign(this._path[0].state || {}, {
+                batchInlineExpanded: Array.from(this._batchInlineExpanded)
+            });
+        }
+    }
+
+    _refreshInlineExpandedStyles() {
+        const graph = this._target;
+        if (graph && graph.refreshInlineExpandedStyles) {
+            graph.refreshInlineExpandedStyles();
+        }
+    }
+
+    _canShowBatchCallContextMenu(nodeView) {
+        if (!nodeView || !nodeView.value || this._target?.readOnly) {
+            return false;
+        }
+        if (!isBatchCallNode(nodeView.value)) {
+            return false;
+        }
+        let graph = this.activeTarget;
+        const entity = this._resolveNodeEntity(nodeView.value);
+        if (entity && this._editSession) {
+            graph = this._editSession.modified.getGraph(entity.graphIndex);
+        }
+        return Boolean(graph && canExpandBatchCall(graph, nodeView.value));
+    }
+
+    _showBatchCallContextMenu(nodeView, event) {
+        if (!this._canShowBatchCallContextMenu(nodeView)) {
+            return;
+        }
+        this._closeGraphOverlays();
+        const x = event.clientX;
+        const y = event.clientY;
+        const nodeName = nodeView.value.name;
+        const isExpanded = this._batchInlineExpanded.has(nodeName);
+        const items = [{
+            label: isExpanded ? 'Collapse Subgraph Inline' : 'Expand Subgraph Inline',
+            action: () => this._toggleBatchInlineExpansion(nodeName)
+        }];
+        this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, items);
+        this._graphContextMenu.open();
+    }
+
+    async _toggleBatchInlineExpansion(batchCallName) {
+        if (!batchCallName) {
+            return;
+        }
+        if (this._batchInlineExpanded.has(batchCallName)) {
+            this._batchInlineExpanded.delete(batchCallName);
+        } else {
+            this._batchInlineExpanded.add(batchCallName);
+        }
+        this._persistBatchInlineState();
+        await this.refresh();
+        this._refreshInlineExpandedStyles();
+    }
+
     _showNodeContextMenu(nodeView, event) {
         if (!this._canInsertNode() || this._target && this._target.readOnly) {
             return;
@@ -1453,7 +1533,9 @@ view.View = class {
         let status = '';
         if (target) {
             const document = this._host.document;
-            const graph = target;
+            this._restoreBatchInlineState(state);
+            const sourceGraph = target;
+            const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph, model));
             if (state && state.blocks) {
@@ -1470,6 +1552,7 @@ view.View = class {
                 viewGraph.restore(state);
                 viewGraph.refreshDeltaStyles();
                 viewGraph.refreshRangeMarkerStyles();
+                viewGraph.refreshInlineExpandedStyles();
                 pane._setGraph(viewGraph);
                 pane._logRender();
             } else {
@@ -1506,11 +1589,13 @@ view.View = class {
         if (blocks && blocks.size > 0 && this._path.length > 0) {
             this._path[0].state = Object.assign(this._path[0].state || {}, { blocks });
         }
+        this._persistBatchInlineState();
         let previous = null;
         if (origin && this.activeTarget && pane) {
             previous = origin.getScreenCTM();
             const oldChildren = Array.from(origin.children);
-            const graph = this._resolveModifiedTarget(this.activeTarget);
+            const sourceGraph = this._resolveModifiedTarget(this.activeTarget);
+            const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
             const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
@@ -1538,6 +1623,7 @@ view.View = class {
                 viewGraph.restore(state);
                 viewGraph.refreshDeltaStyles();
                 viewGraph.refreshRangeMarkerStyles();
+                viewGraph.refreshInlineExpandedStyles();
                 pane._setGraph(viewGraph);
                 this.target = viewGraph;
                 if (options.skipShow) {
@@ -1971,7 +2057,12 @@ view.View = class {
         if (graph && graph !== this.activeTarget && Array.isArray(graph.nodes)) {
             this._sidebar.close();
             if (context && this._path.length > 0) {
-                this._path[0].state = { context, zoom: this._target.zoom, blocks: this._target.blocks };
+                this._path[0].state = {
+                    context,
+                    zoom: this._target.zoom,
+                    blocks: this._target.blocks,
+                    batchInlineExpanded: Array.from(this._batchInlineExpanded)
+                };
             }
             const signature = Array.isArray(graph.signatures) && graph.signatures.length > 0 ? graph.signatures[0] : null;
             const entry = { target: graph, signature };
@@ -3269,6 +3360,7 @@ view.Graph = class extends grapher.Graph {
 .edited.range-end:not(.range-begin) > .node.node-border-outer { stroke: rgba(0, 80, 200, 0.95); stroke-width: 6px; }
 .edited.range-begin.range-end > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .edited.range-begin.range-end > .node.node-border-outer { stroke: rgba(120, 0, 160, 0.95); stroke-width: 6px; }
+.inline-expanded > .node.node-border { stroke: rgba(220, 0, 0, 0.95); stroke-width: 2px; }
 .edge-path-tunnel { stroke-dasharray: 5, 3; marker-end: url(#${prefix}arrowhead-tunnel); opacity: 0.5; }
 #${prefix}arrowhead { fill: #000; }
 #${prefix}arrowhead-hover { fill: rgba(220, 0, 0, 0.9); }
@@ -3382,6 +3474,14 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyRangeMarkerStyle === 'function') {
                 obj.applyRangeMarkerStyle();
+            }
+        }
+    }
+
+    refreshInlineExpandedStyles() {
+        for (const obj of this._table.values()) {
+            if (obj && typeof obj.applyInlineExpandedStyle === 'function') {
+                obj.applyInlineExpandedStyle();
             }
         }
     }
@@ -4317,9 +4417,18 @@ view.Node = class extends grapher.Node {
         }
         if (type !== 'graph' && type !== 'function') {
             this.onContextMenu = (event) => {
-                if (!this.context.readOnly && this.context.view && this.context.view._canInsertNode()) {
-                    this.context.view._showNodeContextMenu(this, event);
+                if (this.context.readOnly || !this.context.view) {
+                    return;
                 }
+                const viewRef = this.context.view;
+                if (viewRef._canShowBatchCallContextMenu(this)) {
+                    viewRef._showBatchCallContextMenu(this, event);
+                    return;
+                }
+                if (!viewRef._canInsertNode()) {
+                    return;
+                }
+                viewRef._showNodeContextMenu(this, event);
             };
         }
     }
@@ -4358,6 +4467,14 @@ view.Node = class extends grapher.Node {
         this.element.classList.toggle('range-end', Boolean(isEnd));
     }
 
+    applyInlineExpandedStyle() {
+        if (!this.element) {
+            return;
+        }
+        const expanded = Boolean(this.value && this.value._inlineExpanded);
+        this.element.classList.toggle('inline-expanded', expanded);
+    }
+
     applyDanglingStyle() {
         if (!this.element || !this.context.view) {
             return;
@@ -4371,6 +4488,7 @@ view.Node = class extends grapher.Node {
         super.update();
         this.applyDeltaStyle();
         this.applyRangeMarkerStyle();
+        this.applyInlineExpandedStyle();
         this.applyDanglingStyle();
     }
 
