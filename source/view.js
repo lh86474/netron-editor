@@ -5,12 +5,18 @@ import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolv
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint } from './ambapb.js';
 import {
+    buildPrimGraphJsonAfterAttributeEdit,
+    ensureAmbapbUiState,
+    filterPrimitives,
     formatPrimGraphForEditor,
     isAmbapbShellNode,
+    isPrimitiveModified,
     PRIM_GRAPH_ATTRIBUTE,
     READ_ONLY_SHELL_ATTRIBUTES,
+    resolveSelectedPrimitiveId,
     validateAmbapbPatch
 } from './ambapb-editor.js';
+import { AmbapbMetadataResolver } from './ambapb-metadata.js';
 import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
 import { validateNodeInsert } from './onnx-operator-validation.js';
 import { GraphPane } from './graph-pane.js';
@@ -67,6 +73,7 @@ view.View = class {
             const zip = await import('./zip.js');
             await zip.Archive.import();
             await this._host.view(this);
+            await AmbapbMetadataResolver.load(this._host);
             this._registerDebugEditorState();
             const options = this._host.get('options') || {};
             for (const [name, value] of Object.entries(options)) {
@@ -5599,6 +5606,7 @@ view.EditablePrimGraphJsonView = class extends view.Control {
         super(context);
         this._onCommit = options.onCommit;
         this._committedValue = jsonText;
+        this._collapsed = options.collapsed === true;
         this.element = this.createElement('div', 'sidebar-item-value');
         const line = this.createElement('div', 'sidebar-editable-attribute-row sidebar-item-value-line');
         const textarea = this.createElement('textarea');
@@ -5624,6 +5632,245 @@ view.EditablePrimGraphJsonView = class extends view.Control {
         });
         line.appendChild(textarea);
         this.element.appendChild(line);
+        if (this._collapsed) {
+            this.element.style.display = 'none';
+        }
+        this._textarea = textarea;
+    }
+
+    render() {
+        return [this.element];
+    }
+
+    setVisible(visible) {
+        this.element.style.display = visible ? '' : 'none';
+    }
+
+    toggle() {
+    }
+};
+
+// class for the primgraph editor. 
+// we have a hybrid editor because we can also edit the raw prim_graph JSON text is the user chooses to do so
+// normally, we will find all primitives in prim_graph through ambapb-editor.js
+// When we rerender, we call helpers from ambapb-editor to build new, edited list
+view.PrimGraphHybridEditor = class extends view.Control {
+
+    constructor(context, options) {
+        super(context);
+        this._options = options;
+        this._ambapb = options.ambapb;
+        this._editSession = options.editSession;
+        this._entityId = options.entityId;
+        this._onCommit = options.onCommit;
+        this._canEdit = options.canEdit !== false;
+        this._uiState = ensureAmbapbUiState(this._ambapb);
+        this.element = this.createElement('div', 'prim-graph-editor sidebar-item-value');
+        this._build();
+    }
+
+    _originalAmbapb() {
+        return this._editSession && this._editSession.original && this._editSession.original.model ?
+            this._editSession.original.model._ambapb :
+            null;
+    }
+
+    _primitives() {
+        return this._ambapb && this._ambapb.primGraph && this._ambapb.primGraph.primitives ?
+            this._ambapb.primGraph.primitives :
+            [];
+    }
+
+    _selectedPrimitive() {
+        const ids = this._primitives().map((entry) => entry.id);
+        const selectedId = resolveSelectedPrimitiveId(this._ambapb, ids);
+        return this._primitives().find((entry) => entry.id === selectedId) || null;
+    }
+
+    _commitPrimGraphJson(jsonText) {
+        if (this._onCommit) {
+            this._onCommit(jsonText);
+        }
+    }
+
+    _commitAttribute(primitiveId, attributeName, value) {
+        if (!this._canEdit || !this._onCommit) {
+            return;
+        }
+        try {
+            const jsonText = buildPrimGraphJsonAfterAttributeEdit(this._ambapb, primitiveId, attributeName, value);
+            this._commitPrimGraphJson(jsonText);
+        } catch (error) {
+            this._view.error(error, 'Error applying prim_graph edit.', null);
+        }
+    }
+    // we heavily use DOM manipulation here, like appendChild, though appendChild is quite outdated
+    // We use createElement to create new elements and replaceChildren to replace the existing elements
+    _renderList() {
+        this._listElement.replaceChildren();
+        const filtered = filterPrimitives(this._primitives(), this._uiState.searchQuery);
+        const originalAmbapb = this._originalAmbapb();
+        const selected = this._selectedPrimitive();
+        for (const primitive of filtered) {
+            const row = this.createElement('div', 'prim-graph-list-row');
+            if (selected && selected.id === primitive.id) {
+                row.classList.add('prim-graph-list-row-selected');
+            }
+            const idCell = this.createElement('span', 'prim-graph-list-id');
+            idCell.textContent = primitive.id || '-';
+            const typeCell = this.createElement('span', 'prim-graph-list-type');
+            typeCell.textContent = primitive.type || '-';
+            row.appendChild(idCell);
+            row.appendChild(typeCell);
+            if (originalAmbapb && isPrimitiveModified(originalAmbapb, this._ambapb, primitive.id)) {
+                const marker = this.createElement('span', 'prim-graph-list-modified');
+                marker.textContent = '\u25CF';
+                marker.setAttribute('title', 'Modified');
+                row.appendChild(marker);
+            }
+            row.addEventListener('click', () => {
+                this._uiState.selectedPrimitiveId = primitive.id;
+                this._renderList();
+                this._renderForm();
+            });
+            this._listElement.appendChild(row);
+        }
+        if (filtered.length === 0) {
+            const empty = this.createElement('div', 'prim-graph-list-empty');
+            empty.textContent = 'No matching primitives';
+            this._listElement.appendChild(empty);
+        }
+    }
+
+    _renderForm() {
+        this._formElement.replaceChildren();
+        const primitive = this._selectedPrimitive();
+        if (!primitive) {
+            const empty = this.createElement('div', 'prim-graph-form-empty');
+            empty.textContent = 'Select a primitive';
+            this._formElement.appendChild(empty);
+            this._formHeaderElement.textContent = '';
+            return;
+        }
+        this._formHeaderElement.textContent = `${primitive.id} (${primitive.type})`;
+        const attributes = primitive.attributes || {};
+        const keys = AmbapbMetadataResolver.getOrderedAttributeKeys(primitive.type, attributes);
+        if (keys.length === 0) {
+            const empty = this.createElement('div', 'prim-graph-form-empty');
+            empty.textContent = 'No editable attributes';
+            this._formElement.appendChild(empty);
+            return;
+        }
+        for (const key of keys) {
+            const row = this.createElement('div', 'prim-graph-form-row sidebar-item');
+            const nameElement = this.createElement('div', 'sidebar-item-name prim-graph-form-name');
+            const nameInput = this.createElement('input');
+            nameInput.setAttribute('type', 'text');
+            nameInput.setAttribute('readonly', 'true');
+            nameInput.setAttribute('value', AmbapbMetadataResolver.getAttributeLabel(primitive.type, key));
+            nameInput.setAttribute('title', key);
+            nameElement.appendChild(nameInput);
+            const valueElement = this.createElement('div', 'sidebar-item-value-list prim-graph-form-value');
+            const line = this.createElement('div', 'sidebar-editable-attribute-row sidebar-item-value-line');
+            const input = this.createElement('input');
+            input.setAttribute('type', 'text');
+            input.setAttribute('class', 'sidebar-editable-input');
+            input.value = attributes[key] === undefined || attributes[key] === null ? '' : String(attributes[key]);
+            if (!this._canEdit) {
+                input.setAttribute('readonly', 'true');
+            } else {
+                const committedValue = input.value;
+                const commit = () => {
+                    if (input.value !== committedValue) {
+                        this._commitAttribute(primitive.id, key, input.value);
+                    }
+                };
+                input.addEventListener('blur', commit);
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        input.blur();
+                    }
+                });
+            }
+            line.appendChild(input);
+            valueElement.appendChild(line);
+            row.appendChild(nameElement);
+            row.appendChild(valueElement);
+            this._formElement.appendChild(row);
+        }
+    }
+
+    _build() {
+        const searchRow = this.createElement('div', 'prim-graph-search-row');
+        this._searchInput = this.createElement('input');
+        this._searchInput.setAttribute('type', 'text');
+        this._searchInput.setAttribute('class', 'sidebar-editable-input prim-graph-search');
+        this._searchInput.setAttribute('placeholder', 'Search primitives...');
+        this._searchInput.value = this._uiState.searchQuery || '';
+        this._searchInput.addEventListener('input', () => {
+            this._uiState.searchQuery = this._searchInput.value;
+            this._renderList();
+        });
+        searchRow.appendChild(this._searchInput);
+        this.element.appendChild(searchRow);
+
+        this._listElement = this.createElement('div', 'prim-graph-list');
+        this.element.appendChild(this._listElement);
+
+        this._formHeaderElement = this.createElement('div', 'prim-graph-form-header');
+        this.element.appendChild(this._formHeaderElement);
+
+        this._formElement = this.createElement('div', 'prim-graph-form');
+        this.element.appendChild(this._formElement);
+
+        const advanced = this.createElement('div', 'prim-graph-advanced');
+        this._advancedToggle = this.createElement('div', 'prim-graph-advanced-toggle sidebar-item-value-line-link');
+        this._advancedToggle.textContent = this._uiState.advancedOpen ?
+            '\u25BC Advanced: edit raw JSON' :
+            '\u25B6 Advanced: edit raw JSON';
+        this._advancedToggle.addEventListener('click', () => {
+            this._uiState.advancedOpen = !this._uiState.advancedOpen;
+            this._advancedToggle.textContent = this._uiState.advancedOpen ?
+                '\u25BC Advanced: edit raw JSON' :
+                '\u25B6 Advanced: edit raw JSON';
+            this._advancedJsonView.setVisible(this._uiState.advancedOpen);
+        });
+        advanced.appendChild(this._advancedToggle);
+        const jsonText = formatPrimGraphForEditor(this._ambapb);
+        this._advancedJsonView = new view.EditablePrimGraphJsonView(this._view, jsonText, {
+            collapsed: !this._uiState.advancedOpen,
+            onCommit: (value) => {
+                if (this._canEdit) {
+                    try {
+                        const parsed = JSON.parse(value);
+                        if (parsed && Array.isArray(parsed.primitives)) {
+                            const currentId = this._uiState.selectedPrimitiveId;
+                            const stillExists = currentId &&
+                                parsed.primitives.some((entry) => entry && entry.id === currentId);
+                            if (!stillExists) {
+                                this._uiState.selectedPrimitiveId = parsed.primitives[0] && parsed.primitives[0].id ?
+                                    parsed.primitives[0].id :
+                                    null;
+                            }
+                        }
+                    } catch {
+                        // validation happens when the patch is applied
+                    }
+                    this._commitPrimGraphJson(value);
+                }
+            }
+        });
+        if (!this._canEdit) {
+            this._advancedJsonView._textarea.setAttribute('readonly', 'true');
+        }
+        for (const element of this._advancedJsonView.render()) {
+            advanced.appendChild(element);
+        }
+        this.element.appendChild(advanced);
+
+        this._renderList();
+        this._renderForm();
     }
 
     render() {
@@ -5699,8 +5946,11 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
                 }
                 const attributeId = `${nodeId}/attr:${index}`;
                 if (attribute.name === PRIM_GRAPH_ATTRIBUTE) {
-                    const jsonText = formatPrimGraphForEditor(ambapb);
-                    const item = new view.EditablePrimGraphJsonView(this._view, jsonText, {
+                    const item = new view.PrimGraphHybridEditor(this._view, {
+                        ambapb,
+                        editSession: this._editSession,
+                        entityId: attributeId,
+                        canEdit: true,
                         onCommit: (value) => {
                             this._view.applyEditorPatch({
                                 entityId: attributeId,

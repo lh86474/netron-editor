@@ -93,7 +93,113 @@ export function syncPrimGraphFromJson(ambapb, jsonText) {
     }
     ambapb.primGraph = primGraph;
     return true;
-}
+};
+// the indice is used to find the primitive in the primGraph
+const findPrimitiveIndices = (primGraph, primitiveId) => {
+    if (!primGraph || !primitiveId) {
+        return { normalizedIndex: -1, rawIndex: -1 };
+    }
+    const normalizedIndex = (primGraph.primitives || []).findIndex((entry) => entry.id === primitiveId);
+    const rawIndex = (primGraph.raw && Array.isArray(primGraph.raw.primitives)) ?
+        primGraph.raw.primitives.findIndex((entry) => entry && entry.id === primitiveId) :
+        -1;
+    return { normalizedIndex, rawIndex };
+};
+
+// we go through the prim graph and find the primitive and all of the data 
+// it has because we eventually want to display it in a list. 
+export function syncPrimitiveAttribute(ambapb, primitiveId, attributeName, value) {
+    if (!ambapb || !ambapb.primGraph) {
+        throw new Error('primGraph is required.');
+    }
+    if (!primitiveId || !attributeName) {
+        throw new Error('primitive id and attribute name are required.');
+    }
+    const stringValue = value === null || value === undefined ? '' : String(value);
+    const { normalizedIndex, rawIndex } = findPrimitiveIndices(ambapb.primGraph, primitiveId);
+    if (normalizedIndex < 0) {
+        throw new Error(`Primitive '${primitiveId}' not found.`);
+    }
+    const primitive = ambapb.primGraph.primitives[normalizedIndex];
+    primitive.attributes = primitive.attributes || {};
+    primitive.attributes[attributeName] = stringValue;
+    if (rawIndex >= 0) {
+        const rawPrimitive = ambapb.primGraph.raw.primitives[rawIndex];
+        rawPrimitive.attributes = rawPrimitive.attributes || {};
+        rawPrimitive.attributes[attributeName] = stringValue;
+    }
+    return true;
+};
+
+export function buildPrimGraphJsonAfterAttributeEdit(ambapb, primitiveId, attributeName, value) {
+    const primGraph = parsePrimGraphJson(serializePrimGraphJson(ambapb.primGraph));
+    syncPrimitiveAttribute({ primGraph }, primitiveId, attributeName, value);
+    const validation = validatePrimGraph(primGraph.primitives);
+    if (!validation.ok) {
+        throw new Error(validation.errors.join('\n'));
+    }
+    return serializePrimGraphJson(primGraph);
+};
+// match id, type, mangled-id
+export function filterPrimitives(primitives, query) {
+    const list = Array.isArray(primitives) ? primitives : [];
+    const term = typeof query === 'string' ? query.trim().toLowerCase() : '';
+    if (!term) {
+        return list;
+    }
+    return list.filter((primitive) => {
+        const id = (primitive.id || '').toLowerCase();
+        const type = (primitive.type || '').toLowerCase();
+        const mangledId = (primitive.mangledId || '').toLowerCase();
+        return id.includes(term) || type.includes(term) || mangledId.includes(term);
+    });
+};
+// helper to check if we have modified something. 
+// helper is run everytime the list is rendered. We re-render when we edit something
+export function isPrimitiveModified(originalAmbapb, modifiedAmbapb, primitiveId) {
+    if (!originalAmbapb || !modifiedAmbapb || !primitiveId) {
+        return false;
+    }
+    const original = (originalAmbapb.primGraph && originalAmbapb.primGraph.primitives || [])
+        .find((entry) => entry.id === primitiveId);
+    const modified = (modifiedAmbapb.primGraph && modifiedAmbapb.primGraph.primitives || [])
+        .find((entry) => entry.id === primitiveId);
+    if (!original || !modified) {
+        return Boolean(original) !== Boolean(modified);
+    }
+    const originalAttrs = original.attributes || {};
+    const modifiedAttrs = modified.attributes || {};
+    const keys = new Set([...Object.keys(originalAttrs), ...Object.keys(modifiedAttrs)]);
+    for (const key of keys) {
+        if (String(originalAttrs[key] ?? '') !== String(modifiedAttrs[key] ?? '')) {
+            return true;
+        }
+    }
+    return false;
+};
+
+export function ensureAmbapbUiState(ambapb) {
+    if (!ambapb) {
+        return null;
+    }
+    if (!ambapb._uiState || typeof ambapb._uiState !== 'object') {
+        ambapb._uiState = {
+            selectedPrimitiveId: null,
+            searchQuery: '',
+            advancedOpen: false
+        };
+    }
+    return ambapb._uiState;
+};
+
+export function resolveSelectedPrimitiveId(ambapb, primitiveIds) {
+    const uiState = ensureAmbapbUiState(ambapb);
+    const ids = Array.isArray(primitiveIds) ? primitiveIds : [];
+    if (uiState.selectedPrimitiveId && ids.includes(uiState.selectedPrimitiveId)) {
+        return uiState.selectedPrimitiveId;
+    }
+    return ids.length > 0 ? ids[0] : null;
+};
 // sync the prim_graph JSON text into model._ambapb.primGraph
 export function syncShellAttribute(model, graphIndex, nodeIndex, attributeName, value) {
     const ambapb = model && model._ambapb;
