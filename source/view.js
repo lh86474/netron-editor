@@ -29,6 +29,11 @@ import {
     inlineExpansionBatchCallName,
     isBatchCallNode
 } from './ambapb-batch-inline.js';
+import {
+    buildExtractWorkingGraph,
+    resolveMarkedNodesByName,
+    stripInlineExpansionPrefixes
+} from './ambapb-subgraph.js';
 
 const view = {};
 const markdown = {};
@@ -1114,7 +1119,7 @@ view.View = class {
     }
 
     _persistBatchInlineState() {
-        if (this._batchInlineExpanded.size > 0 && this._path.length > 0) {
+        if (this._path.length > 0) {
             this._path[0].state = Object.assign(this._path[0].state || {}, {
                 batchInlineExpanded: Array.from(this._batchInlineExpanded)
             });
@@ -1146,10 +1151,109 @@ view.View = class {
         if (nodeView.context.readOnly) {
             return false;
         }
-        if (isBatchCallNode(nodeView.value)) {
-            return true;
+        return isBatchCallNode(nodeView.value);
+    }
+
+    _canShowSubgraphContextMenu(nodeView) {
+        if (!nodeView || !nodeView.value || !nodeView.context) {
+            return false;
         }
-        return Boolean(nodeView.value._inlineExpanded && inlineExpansionBatchCallName(nodeView.value));
+        if (nodeView.context.readOnly || !this._editSession) {
+            return false;
+        }
+        if (!this._canEditModelContent()) {
+            return false;
+        }
+        return !this._canInsertNode();
+    }
+
+    _createRangeMarker(nodeView) {
+        const node = nodeView && nodeView.value;
+        if (!node || !node.name) {
+            return null;
+        }
+        const entity = this._resolveNodeEntity(node);
+        const graphIndex = entity
+            ? entity.graphIndex
+            : (nodeView.context && nodeView.context.graphIndex !== undefined ? nodeView.context.graphIndex : 0);
+        return {
+            graphIndex,
+            nodeName: node.name,
+            nodeId: entity ? entity.nodeId : null
+        };
+    }
+
+    _matchesRangeMarker(entry, marker) {
+        if (!entry || !marker || entry.graphIndex !== marker.graphIndex) {
+            return false;
+        }
+        if (entry.nodeName && marker.nodeName) {
+            return entry.nodeName === marker.nodeName;
+        }
+        return Boolean(entry.nodeId && marker.nodeId && entry.nodeId === marker.nodeId);
+    }
+
+    _isRangeBeginForNode(nodeView) {
+        const marker = this._createRangeMarker(nodeView);
+        return Boolean(marker && this._rangeBegins.some((entry) => this._matchesRangeMarker(entry, marker)));
+    }
+
+    _isRangeEndForNode(nodeView) {
+        const marker = this._createRangeMarker(nodeView);
+        return Boolean(marker && this._rangeEnds.some((entry) => this._matchesRangeMarker(entry, marker)));
+    }
+
+    _subgraphContextMenuItems(nodeView) {
+        const isBegin = this._isRangeBeginForNode(nodeView);
+        const isEnd = this._isRangeEndForNode(nodeView);
+        const hasMarkers = this._rangeBegins.length > 0 || this._rangeEnds.length > 0;
+        const canExtract = this._rangeBegins.length > 0 && this._rangeEnds.length > 0;
+        const extractLabel = canExtract
+            ? `Extract Subgraph (${this._rangeBegins.length} start${this._rangeBegins.length === 1 ? '' : 's'}, ${this._rangeEnds.length} end${this._rangeEnds.length === 1 ? '' : 's'})`
+            : 'Extract Subgraph';
+        const items = [];
+        const node = nodeView.value;
+        if (node._inlineExpanded) {
+            const batchCallName = inlineExpansionBatchCallName(node);
+            if (batchCallName) {
+                items.push({
+                    label: 'Collapse Subgraph Inline',
+                    action: () => this._toggleBatchInlineExpansion(batchCallName)
+                });
+                items.push({ separator: true });
+            }
+        }
+        items.push(
+            {
+                label: isBegin ? 'Unmark Beginning' : 'Mark as Beginning',
+                action: () => this._markRangeBegin(nodeView)
+            },
+            {
+                label: isEnd ? 'Unmark End' : 'Mark as End',
+                action: () => this._markRangeEnd(nodeView)
+            },
+            {
+                label: 'Clear Range Markers',
+                action: () => this._clearRangeMarkers(),
+                enabled: hasMarkers
+            },
+            {
+                label: extractLabel,
+                action: () => this._extractAndReplaceGraph(),
+                enabled: canExtract
+            }
+        );
+        return items;
+    }
+
+    _showSubgraphContextMenu(nodeView, event) {
+        if (!this._canShowSubgraphContextMenu(nodeView)) {
+            return;
+        }
+        this._closeGraphOverlays();
+        const items = this._subgraphContextMenuItems(nodeView);
+        this._graphContextMenu = new view.GraphContextMenu(this, this._host, event.clientX, event.clientY, items);
+        this._graphContextMenu.open();
     }
 
     _canExpandBatchCall(nodeView) {
@@ -1161,48 +1265,12 @@ view.View = class {
     }
 
     _showBatchCallContextMenu(nodeView, event) {
-        if (!this._isBatchCallContextMenuTarget(nodeView)) {
-            return;
-        }
-        this._closeGraphOverlays();
-        const x = event.clientX;
-        const y = event.clientY;
-        const node = nodeView.value;
+        const node = = nodeView.value;
         const items = [];
 
         if (node._inlineExpanded) {
-            const batchCallName = inlineExpansionBatchCallName(node);
-            if (batchCallName) {
-                items.push({
-                    label: 'Collapse Subgraph Inline',
-                    action: () => this._toggleBatchInlineExpansion(batchCallName)
-                });
-            }
-        } else if (isBatchCallNode(node)) {
-            const nodeName = node.name;
-            const isExpanded = this._batchInlineExpanded.has(nodeName);
-            const canExpand = this._canExpandBatchCall(nodeView);
-            if (isExpanded) {
-                items.push({
-                    label: 'Collapse Subgraph Inline',
-                    action: () => this._toggleBatchInlineExpansion(nodeName)
-                });
-            } else {
-                items.push({
-                    label: canExpand
-                        ? 'Expand Subgraph Inline'
-                        : 'Expand Subgraph Inline (no matching FragSubgraph)',
-                    enabled: canExpand,
-                    action: () => this._toggleBatchInlineExpansion(nodeName)
-                });
-            }
+            const batchCallName  
         }
-
-        if (items.length === 0) {
-            return;
-        }
-        this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, items);
-        this._graphContextMenu.open();
     }
 
     async _toggleBatchInlineExpansion(batchCallName) {
@@ -1230,13 +1298,6 @@ view.View = class {
         const graph = entity ? this._editSession.modified.getGraph(entity.graphIndex) : null;
         const node = graph && entity ? graph.nodes[entity.nodeIndex] : null;
         const deleteAnalysis = node ? analyzeDeleteNode(graph, node) : { ok: false };
-        const isBegin = this._isRangeBegin(entity);
-        const isEnd = this._isRangeEnd(entity);
-        const hasMarkers = this._rangeBegins.length > 0 || this._rangeEnds.length > 0;
-        const canExtract = this._rangeBegins.length > 0 && this._rangeEnds.length > 0;
-        const extractLabel = canExtract
-            ? `Extract Subgraph (${this._rangeBegins.length} start${this._rangeBegins.length === 1 ? '' : 's'}, ${this._rangeEnds.length} end${this._rangeEnds.length === 1 ? '' : 's'})`
-            : 'Extract Subgraph';
         const items = [
             {
                 label: 'Insert Above\u2026',
@@ -1252,24 +1313,7 @@ view.View = class {
                 enabled: deleteAnalysis.ok
             },
             { separator: true },
-            {
-                label: isBegin ? 'Unmark Beginning' : 'Mark as Beginning',
-                action: () => this._markRangeBegin(nodeView)
-            },
-            {
-                label: isEnd ? 'Unmark End' : 'Mark as End',
-                action: () => this._markRangeEnd(nodeView)
-            },
-            {
-                label: 'Clear Range Markers',
-                action: () => this._clearRangeMarkers(),
-                enabled: hasMarkers
-            },
-            {
-                label: extractLabel,
-                action: () => this._extractAndReplaceGraph(),
-                enabled: canExtract
-            }
+            ...this._subgraphContextMenuItems(nodeView)
         ];
         this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, items);
         this._graphContextMenu.open();
@@ -1277,32 +1321,32 @@ view.View = class {
 
     // mark begin node for graph extraction
     _markRangeBegin(nodeView) {
-        const entity = this._resolveNodeEntity(nodeView.value);
-        if (!entity) {
+        const marker = this._createRangeMarker(nodeView);
+        if (!marker) {
             return;
         }
-        if (this._isRangeBegin(entity)) {
-            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== entity.nodeId);
+        if (this._isRangeBeginForNode(nodeView)) {
+            this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
         } else {
-            this._clearRangeMarkersOnOtherGraph(entity.graphIndex);
-            this._rangeBegins.push(entity);
-            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== entity.nodeId);
+            this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
+            this._rangeBegins.push(marker);
+            this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
         }
         this._refreshRangeMarkerStyles();
     }
 
     // mark end node for graph extraction
     _markRangeEnd(nodeView) {
-        const entity = this._resolveNodeEntity(nodeView.value);
-        if (!entity) {
+        const marker = this._createRangeMarker(nodeView);
+        if (!marker) {
             return;
         }
-        if (this._isRangeEnd(entity)) {
-            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== entity.nodeId);
+        if (this._isRangeEndForNode(nodeView)) {
+            this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
         } else {
-            this._clearRangeMarkersOnOtherGraph(entity.graphIndex);
-            this._rangeEnds.push(entity);
-            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== entity.nodeId);
+            this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
+            this._rangeEnds.push(marker);
+            this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
         }
         this._refreshRangeMarkerStyles();
     }
@@ -1321,11 +1365,17 @@ view.View = class {
     }
 
     _isRangeBegin(entity) {
-        return entity && this._rangeBegins.some((entry) => entry.nodeId === entity.nodeId);
+        return entity && this._rangeBegins.some((entry) =>
+            entry.nodeId === entity.nodeId ||
+            (entry.nodeName && entity.node && entry.nodeName === entity.node.name)
+        );
     }
 
     _isRangeEnd(entity) {
-        return entity && this._rangeEnds.some((entry) => entry.nodeId === entity.nodeId);
+        return entity && this._rangeEnds.some((entry) =>
+            entry.nodeId === entity.nodeId ||
+            (entry.nodeName && entity.node && entry.nodeName === entity.node.name)
+        );
     }
 
     _clearRangeMarkersOnOtherGraph(graphIndex) {
@@ -1334,15 +1384,7 @@ view.View = class {
     }
 
     _resolveMarkedNodes(entities, graph) {
-        const nodes = [];
-        for (const entity of entities) {
-            const node = graph.nodes[entity.nodeIndex];
-            if (!node) {
-                throw new SubgraphExtractError('Marked nodes are no longer available.');
-            }
-            nodes.push(node);
-        }
-        return nodes;
+        return resolveMarkedNodesByName(graph, entities);
     }
 
     // extract and replace graph
@@ -1357,10 +1399,12 @@ view.View = class {
             return;
         }
         try {
-            const graph = this._editSession.modified.getGraph(graphIndex);
-            const beginNodes = this._resolveMarkedNodes(this._rangeBegins, graph);
-            const endNodes = this._resolveMarkedNodes(this._rangeEnds, graph);
-            const extracted = extractSubgraph(graph, beginNodes, endNodes);
+            const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+            const workingGraph = buildExtractWorkingGraph(sourceGraph, this._batchInlineExpanded);
+            const beginNodes = resolveMarkedNodesByName(workingGraph, this._rangeBegins);
+            const endNodes = resolveMarkedNodesByName(workingGraph, this._rangeEnds);
+            let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
+            extracted = stripInlineExpansionPrefixes(extracted);
             this._checkpointEditHistory();
             this._editSession.replaceGraph(graphIndex, extracted);
             if (this._model && this._model.proto) {
@@ -1375,6 +1419,8 @@ view.View = class {
             this._host.document.title = `${this._exportBasenameOverride}.onnx`;
             this._rangeBegins = [];
             this._rangeEnds = [];
+            this._batchInlineExpanded.clear();
+            this._persistBatchInlineState();
             this._sidebar.close();
             this._bindEditorSession();
             await this._refreshModifiedPane();
@@ -4471,6 +4517,10 @@ view.Node = class extends grapher.Node {
                     viewRef._showBatchCallContextMenu(this, event);
                     return;
                 }
+                if (viewRef._canShowSubgraphContextMenu(this)) {
+                    viewRef._showSubgraphContextMenu(this, event);
+                    return;
+                }
                 if (!viewRef._canInsertNode()) {
                     return;
                 }
@@ -4502,13 +4552,14 @@ view.Node = class extends grapher.Node {
 
     // apply range marker style for graph extraction
     applyRangeMarkerStyle() {
-        if (!this.element || !this._entityId || !this.context.view) {
+        if (!this.element || !this.context.view || !this.value || !this.value.name) {
             return;
         }
         const view = this.context.view;
-        const isBegin = view._rangeBegins.some((entry) => entry.nodeId === this._entityId);
-        const isEnd = view._rangeEnds.some((entry) => entry.nodeId === this._entityId);
-        // change css
+        const graphIndex = this.context.graphIndex !== undefined ? this.context.graphIndex : 0;
+        const marker = { graphIndex, nodeName: this.value.name };
+        const isBegin = view._rangeBegins.some((entry) => view._matchesRangeMarker(entry, marker));
+        const isEnd = view._rangeEnds.some((entry) => view._matchesRangeMarker(entry, marker));
         this.element.classList.toggle('range-begin', Boolean(isBegin));
         this.element.classList.toggle('range-end', Boolean(isEnd));
     }
