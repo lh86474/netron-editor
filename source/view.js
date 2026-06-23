@@ -69,6 +69,13 @@ view.View = class {
         this._rangeEnds = [];
         // expanded batch call names are here
         this._batchInlineExpanded = new Set();
+        this._displayGraphCache = null;
+        this._displayGraphRevision = 0;
+        this._refreshPromise = null;
+        this._refreshQueued = null;
+        this._graphBusyCount = 0;
+        this._graphBusyShowTimer = null;
+        this._graphBusyOverlay = null;
         this._danglingNodeNames = new Set();
         this._applyingHistory = false;
         this._exportBasenameOverride = null;
@@ -428,6 +435,59 @@ view.View = class {
         const bar = this._element('progress-bar');
         if (bar) {
             bar.style.width = `${percent}%`;
+        }
+    }
+
+    _invalidateDisplayGraphCache() {
+        this._displayGraphRevision++;
+        this._displayGraphCache = null;
+    }
+
+    _graphBusyElement() {
+        if (!this._graphBusyOverlay) {
+            this._graphBusyOverlay = this._element('graph-busy-overlay');
+        }
+        return this._graphBusyOverlay;
+    }
+
+    _beginGraphBusy() {
+        this._graphBusyCount++;
+        if (this._graphBusyCount !== 1) {
+            return;
+        }
+        const overlay = this._graphBusyElement();
+        if (!overlay) {
+            return;
+        }
+        this._graphBusyShowTimer = this._host.window.setTimeout(() => {
+            this._graphBusyShowTimer = null;
+            overlay.classList.add('visible');
+            overlay.setAttribute('aria-busy', 'true');
+        }, 80);
+    }
+
+    _endGraphBusy() {
+        this._graphBusyCount = Math.max(0, this._graphBusyCount - 1);
+        if (this._graphBusyCount > 0) {
+            return;
+        }
+        if (this._graphBusyShowTimer) {
+            this._host.window.clearTimeout(this._graphBusyShowTimer);
+            this._graphBusyShowTimer = null;
+        }
+        const overlay = this._graphBusyElement();
+        if (overlay) {
+            overlay.classList.remove('visible');
+            overlay.setAttribute('aria-busy', 'false');
+        }
+    }
+
+    async _withGraphBusy(callback) {
+        this._beginGraphBusy();
+        try {
+            await callback();
+        } finally {
+            this._endGraphBusy();
         }
     }
 
@@ -1016,6 +1076,7 @@ view.View = class {
         try {
             this._syncBatchInlineToSession();
             this._editSession.history.undo(this._editSession);
+            this._invalidateDisplayGraphCache();
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
@@ -1037,6 +1098,7 @@ view.View = class {
         try {
             this._syncBatchInlineToSession();
             this._editSession.history.redo(this._editSession);
+            this._invalidateDisplayGraphCache();
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
@@ -1127,6 +1189,7 @@ view.View = class {
         let change = null;
         try {
             change = this._editSession.applyPatch(patch);
+            this._invalidateDisplayGraphCache();
         } catch (error) {
             this.error(error, 'Error applying edit.', null);
             return null;
@@ -1174,7 +1237,24 @@ view.View = class {
             return graph;
         }
         const graphIndex = this._resolveGraphIndex(this.activeTarget);
-        return applyBatchInlineExpansions(graph, this._batchInlineExpanded, graphIndex);
+        const expandedKey = Array.from(this._batchInlineExpanded).sort().join('\0');
+        const cache = this._displayGraphCache;
+        if (cache &&
+            cache.sourceGraph === graph &&
+            cache.graphIndex === graphIndex &&
+            cache.expandedKey === expandedKey &&
+            cache.revision === this._displayGraphRevision) {
+            return cache.displayGraph;
+        }
+        const displayGraph = applyBatchInlineExpansions(graph, this._batchInlineExpanded, graphIndex);
+        this._displayGraphCache = {
+            sourceGraph: graph,
+            graphIndex,
+            expandedKey,
+            revision: this._displayGraphRevision,
+            displayGraph
+        };
+        return displayGraph;
     }
 
     _restoreBatchInlineState(state) {
@@ -1574,25 +1654,27 @@ view.View = class {
         if (!this._rightPane || !this.activeTarget) {
             return;
         }
-        const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
-        const previous = this._rightPane.graph;
-        const zoom = previous ? previous.zoom : 1;
-        const container = this._rightPane.container;
-        const scrollLeft = container ? container.scrollLeft : 0;
-        const scrollTop = container ? container.scrollTop : 0;
-        if (previous && this._target === previous) {
-            previous.unregister();
-        }
-        await this._rightPane.render(this._resolveModifiedTarget(this.activeTarget), this.activeSignature, state);
-        if (this._rightPane.graph) {
-            this._rightPane.graph.zoom = zoom;
-            this._rightPane.graph.register();
-            this.target = this._rightPane.graph;
-            if (container) {
-                container.scrollLeft = scrollLeft;
-                container.scrollTop = scrollTop;
+        await this._withGraphBusy(async () => {
+            const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
+            const previous = this._rightPane.graph;
+            const zoom = previous ? previous.zoom : 1;
+            const container = this._rightPane.container;
+            const scrollLeft = container ? container.scrollLeft : 0;
+            const scrollTop = container ? container.scrollTop : 0;
+            if (previous && this._target === previous) {
+                previous.unregister();
             }
-        }
+            await this._rightPane.render(this._resolveModifiedTarget(this.activeTarget), this.activeSignature, state);
+            if (this._rightPane.graph) {
+                this._rightPane.graph.zoom = zoom;
+                this._rightPane.graph.register();
+                this.target = this._rightPane.graph;
+                if (container) {
+                    container.scrollLeft = scrollLeft;
+                    container.scrollTop = scrollTop;
+                }
+            }
+        });
     }
 
     _resolveGraphIndex(target) {
@@ -1702,6 +1784,39 @@ view.View = class {
     }
 
     async refresh(anchor, options = {}) {
+        if (this._refreshPromise) {
+            this._refreshQueued = { anchor, options: { ...options } };
+            return this._refreshPromise;
+        }
+        const run = async () => {
+            let current = { anchor, options: { ...options } };
+            const showBusy = current.options.busy !== false;
+            if (showBusy) {
+                this._beginGraphBusy();
+            }
+            try {
+                while (current) {
+                    const pending = current;
+                    current = null;
+                    await this._refreshImpl(pending.anchor, pending.options);
+                    if (this._refreshQueued) {
+                        current = this._refreshQueued;
+                        this._refreshQueued = null;
+                    }
+                }
+            } finally {
+                if (showBusy) {
+                    this._endGraphBusy();
+                }
+            }
+        };
+        this._refreshPromise = run().finally(() => {
+            this._refreshPromise = null;
+        });
+        return this._refreshPromise;
+    }
+
+    async _refreshImpl(anchor, options = {}) {
         if (options.skipShow) {
             this._ensureDefaultScreen();
         }
@@ -2021,9 +2136,11 @@ view.View = class {
             try {
                 this._editSession = ModelEditor.createSession(model);
                 this._editSessionError = null;
+                this._invalidateDisplayGraphCache();
             } catch (error) {
                 this._editSession = null;
                 this._editSessionError = error;
+                this._invalidateDisplayGraphCache();
             }
             this._initGraphPanes();
             this._bindEditorSession();

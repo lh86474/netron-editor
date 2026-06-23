@@ -26,6 +26,11 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .diff-container { display: flex; height: 100%; width: 100%; }
 .graph-pane { display: flex; flex: 1; height: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; position: relative; }
 .graph-pane-label { position: absolute; top: 0px; height: var(--chrome-height); display: flex; align-items: center; left: var(--chrome-inset); z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
+.graph-busy-overlay { position: absolute; inset: 0; z-index: 10; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background-color: rgba(236, 236, 236, 0.55); pointer-events: all; cursor: wait; opacity: 0; transition: opacity 0.12s ease; }
+.graph-busy-overlay.visible { display: flex; opacity: 1; }
+.graph-busy-spinner { width: 48px; height: 48px; -webkit-animation: orbit 0.5s infinite linear; animation: orbit 0.5s infinite linear; }
+.graph-busy-spinner-stroke { stroke: #444444; stroke-width: 24px; fill: none; }
+.graph-busy-label { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #666666; pointer-events: none; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .graph-pane-original { border-right: 1px solid #ccc; }
 .graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
@@ -255,6 +260,9 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .graph-pane { background-color: #404040; }
 .target { background-color: #404040; }
 .graph-pane-original { border-right-color: #555; }
+.graph-busy-overlay { background-color: rgba(64, 64, 64, 0.55); }
+.graph-busy-spinner-stroke { stroke: #ececec; }
+.graph-busy-label { color: #aaaaaa; }
 .merge-container { background-color: #404040; color: #e0e0e0; }
 .merge-header, .merge-toolbar, .merge-mapping-strip, .merge-footer { border-color: #555; }
 .merge-slot-name { color: #bbb; }
@@ -519,6 +527,14 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
     <div id="pane-divider" class="pane-divider"></div>
     <div id="target-modified" class="graph-pane graph-pane-modified target" tabindex="0">
         <div class="graph-pane-label">Modified</div>
+        <div id="graph-busy-overlay" class="graph-busy-overlay" aria-live="polite" aria-busy="false">
+            <svg class="graph-busy-spinner" viewBox="0 0 1024 1024" aria-hidden="true">
+                <g transform="translate(512, 512)">
+                    <path class="graph-busy-spinner-stroke" d="M-431,0 A-431,-431 0 0,1 0,-431"></path>
+                </g>
+            </svg>
+            <span class="graph-busy-label">Updating graph…</span>
+        </div>
     </div>
 </div>
 <div id="merge-container" class="merge-container">
