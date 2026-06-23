@@ -271,7 +271,8 @@ const cloneValue = (value, prefix, valueMap, nameMap) => {
     nameMap.set(value.name, cloned);
     return cloned;
 };
-
+// After clonNode, inlined nodes are already set with _inlineExpanded
+// WE add _sourceNode: null so they are explicitly view-only
 const cloneNode = (node, prefix, valueMap, nameMap) => {
     const cloneArgument = (argument) => ({
         name: argument.name,
@@ -289,7 +290,8 @@ const cloneNode = (node, prefix, valueMap, nameMap) => {
         })),
         inputs: (node.inputs || []).map((input) => cloneArgument(input)),
         outputs: (node.outputs || []).map((output) => cloneArgument(output)),
-        _inlineExpanded: true
+        _inlineExpanded: true,
+        _sourceNode: null
     };
 };
 // this is where the graph is actually build after we have cloned all inputs, attributes
@@ -459,6 +461,35 @@ const expandSingleBatchCall = (graph, batchCallName) => {
     };
 };
 
+const attachDisplayNodeSourceRefs = (displayGraph, sourceGraph) => {
+    // We use a hashmap to store the nodes of the source graph by name
+    const sourceByName = new Map();
+    for (const node of sourceGraph.nodes || []) {
+        sourceByName.set(node.name, node);
+    }
+    // displayGraph would be the cloned graph after we have to rerender it
+    for (const node of displayGraph.nodes || []) {
+        if (node._inlineExpanded) {
+            node._sourceNode = null;
+            continue;
+        }
+        node._sourceNode = sourceByName.get(node.name) || null;
+    }
+}
+
+export const sourceNodeForEntity = (displayNode) => {
+    if (!displayNode) {
+        return null;
+    }
+    if (displayNode._sourceNode === null) {
+        return null;
+    }
+    if (displayNode._sourceNode) {
+        return displayNode._sourceNode;
+    }
+    return displayNode;
+}
+
 // This is the main logic for the inline expansion. 
 export const applyBatchInlineExpansions = (graph, expandedBatchCallNames) => {
     if (!graph || !expandedBatchCallNames || expandedBatchCallNames.size === 0) {
@@ -476,6 +507,7 @@ export const applyBatchInlineExpansions = (graph, expandedBatchCallNames) => {
             inlinedNodeNames.push(...result.inlinedNodeNames);
         }
     }
+    attachDisplayNodeSourceRefs(displayGraph, graph);
     displayGraph._inlineExpandedNodeNames = inlinedNodeNames;
     return displayGraph;
 };

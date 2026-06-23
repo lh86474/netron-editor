@@ -27,7 +27,8 @@ import {
     applyBatchInlineExpansions,
     canExpandBatchCall,
     inlineExpansionBatchCallName,
-    isBatchCallNode
+    isBatchCallNode,
+    sourceNodeForEntity
 } from './ambapb-batch-inline.js';
 
 const view = {};
@@ -823,7 +824,11 @@ view.View = class {
         if (!this._editSession || !node) {
             return null;
         }
-        return locateNodeEntity(this._editSession.modified.model, node);
+        const modelNode = sourceNodeForEntity(node);
+        if (!modelNode) {
+            return null;
+        }
+        return locateNodeEntity(this._editSession.modified.model, modelNode);
     }
 
     _resolveValueEntity(value) {
@@ -3455,12 +3460,25 @@ view.Graph = class extends grapher.Graph {
         return this._selection;
     }
 
+    // Use model entity id, not the display graph index
     createNode(node) {
         const obj = new view.Node(this, node);
         obj.name = (this._nodeKey++).toString();
-        const nodes = this.target && this.target.nodes ? this.target.nodes : [];
-        const nodeIndex = nodes.indexOf(node);
-        obj._entityId = nodeIndex >= 0 ? `graph:${this.graphIndex}/node:${nodeIndex}` : null;
+        
+        let entityId = null;
+        if (this.view && this.view._editSession) {
+            const entity = this.view._resolveNodeEntity(node);
+            if (entity) {
+                entityId = entity.nodeId;
+            }
+        }
+        if (!entityId) {
+            const nodes = this.target && this.target.nodes ? this.target.nodes : [];
+            const nodeIndex = nodes.indexOf(node);
+            entityId = nodeIndex >= 0 ? 'graph:${this.graphIndex}/node:${nodeIndex}' : null;
+        }
+
+        obj._entityId = entityId;
         this._table.set(node, obj);
         return obj;
     }
