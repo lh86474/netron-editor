@@ -67,6 +67,7 @@ view.View = class {
         // arrays to support multiple begin and end marker
         this._rangeBegins = [];
         this._rangeEnds = [];
+        // expanded batch call names are here
         this._batchInlineExpanded = new Set();
         this._danglingNodeNames = new Set();
         this._applyingHistory = false;
@@ -1013,7 +1014,9 @@ view.View = class {
         }
         this._applyingHistory = true;
         try {
+            this._syncBatchInlineToSession();
             this._editSession.history.undo(this._editSession);
+            this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
             this._sidebar.close();
@@ -1032,7 +1035,9 @@ view.View = class {
         }
         this._applyingHistory = true;
         try {
+            this._syncBatchInlineToSession();
             this._editSession.history.redo(this._editSession);
+            this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
             this._sidebar.close();
@@ -1045,8 +1050,45 @@ view.View = class {
         }
     }
 
+    _reconcilePathTargets() {
+        if (!this._editSession || this._path.length === 0) {
+            return;
+        }
+        const resolveInGraph = (graph, segments) => {
+            let current = graph;
+            for (const segment of segments) {
+                if (!current) {
+                    return null;
+                }
+                if (segment.kind === 'module') {
+                    current = this._editSession.modified.getGraph(segment.index);
+                    continue;
+                }
+                const host = (current.nodes || [])[segment.nodeIndex];
+                if (!host) {
+                    return null;
+                }
+                const entry = [...(host.attributes || []), ...(host.blocks || [])]
+                    .find((item) => item.name === segment.attrName && item.type === 'graph' && item.value);
+                current = entry ? entry.value : null;
+            }
+            return current;
+        };
+
+        for (const entry of this._path) {
+            if (!entry._pathSegments) {
+                continue;
+            }
+            const resolved = resolveInGraph(null, entry._pathSegments);
+            if (resolved) {
+                entry.target = resolved;
+            }
+        }
+    }
+
     _checkpointEditHistory() {
         if (this._editSession && !this._applyingHistory) {
+            this._syncBatchInlineToSession();
             this._editSession.history.checkpoint(this._editSession);
         }
     }
@@ -1077,6 +1119,7 @@ view.View = class {
                 return null;
             }
         }
+        // edits must call checkpointedit history before applying any patches. 
         this._checkpointEditHistory();
         if (!(patch.entityType === 'node' && patch.changeType === 'delete' && patch.property === 'remove')) {
             this._danglingNodeNames.clear();
@@ -1135,17 +1178,36 @@ view.View = class {
     }
 
     _restoreBatchInlineState(state) {
+        if (this._editSession && Array.isArray(this._editSession.batchInlineExpanded)) {
+            this._batchInlineExpanded = new Set(this._editSession.batchInlineExpanded);
+            return;
+        }
         if (state && Array.isArray(state.batchInlineExpanded)) {
             this._batchInlineExpanded = new Set(state.batchInlineExpanded);
         }
     }
 
     _persistBatchInlineState() {
-        if (this._batchInlineExpanded.size > 0 && this._path.length > 0) {
+        // We don't have this._batchInlineExpanded.size > 0 so collapsing writes [] to path state
+        if (this._path.length > 0) {
             this._path[0].state = Object.assign(this._path[0].state || {}, {
                 batchInlineExpanded: Array.from(this._batchInlineExpanded)
             });
         }
+    }
+
+    _syncBatchInlineToSession() {
+        if (this._editSession) {
+            this._editSession.batchInlineExpanded = Array.from(this._batchInlineExpanded);
+        }
+    }
+
+    _syncBatchInlineFromSession() {
+        if (!this._editSession) {
+            return;
+        }
+        this._batchInlineExpanded = new Set(this._editSession.batchInlineExpanded || []);
+        this._persistBatchInlineState();
     }
 
     _refreshInlineExpandedStyles() {
@@ -1236,12 +1298,14 @@ view.View = class {
         if (!batchCallName) {
             return;
         }
+        this._checkpointEditHistory();
         if (this._batchInlineExpanded.has(batchCallName)) {
             this._batchInlineExpanded.delete(batchCallName);
         } else {
             this._batchInlineExpanded.add(batchCallName);
         }
         this._persistBatchInlineState();
+        this._updateUndoRedoButtons();
         await this.refresh();
         this._refreshInlineExpandedStyles();
     }

@@ -1487,6 +1487,7 @@ class EditorState {
         this._snapshot = buildOriginalSnapshot(normalized);
         this.delta = new DeltaTracker(this._snapshot);
         this.history = new EditHistory();
+        this.batchInlineExpanded = [];
     }
 
     get original() {
