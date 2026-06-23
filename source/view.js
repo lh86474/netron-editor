@@ -3469,6 +3469,7 @@ view.Graph = class extends grapher.Graph {
         this._canvas = null;
         this._origin = null;
         this._background = null;
+        this.entityIdPrefix = options.entityIdPrefix || null;
     }
 
     blockKey(hostEntityId, attrName) {
@@ -3571,11 +3572,11 @@ view.Graph = class extends grapher.Graph {
 
     // Use model entity id, not the display graph index
     createNode(node) {
-        const obj = new view.Node(this, node);
-        obj.name = (this._nodeKey++).toString();
-        
         let entityId = null;
-        if (this.view && this.view._editSession) {
+        if (this.entityIdPrefix) {
+            const nodeIndex = (this.target?.nodes || []).indexOf(node);
+            entityId = nodeIndex >= 0 ? `${this.entityIdPrefix}/node:${nodeIndex}` : null;
+        } else if (this.view && this.view._editSession) {
             const entity = this.view._resolveNodeEntity(node);
             if (entity) {
                 entityId = entity.nodeId;
@@ -3587,6 +3588,8 @@ view.Graph = class extends grapher.Graph {
             entityId = nodeIndex >= 0 ? `graph:${this.graphIndex}/node:${nodeIndex}` : null;
         }
 
+        const obj = new view.Node(this, node, undefined, null, entityId);
+        obj.name = (this._nodeKey++).toString();
         obj._entityId = entityId;
         this._table.set(node, obj);
         return obj;
@@ -4556,11 +4559,12 @@ view.Graph = class extends grapher.Graph {
 
 view.Node = class extends grapher.Node {
 
-    constructor(context, value, type, blockKey) {
+    constructor(context, value, type, blockKey, entityId) {
         super();
         this.context = context;
         this.value = value;
         this._blockKey = blockKey || null;
+        this._entityId = entityId || null;
         this.id = `node-${value.name ? `name-${value.name}` : `id-${(context.counter++)}`}`;
         this._add(value, type);
         const inputs = value.inputs;
@@ -4748,6 +4752,14 @@ view.Node = class extends grapher.Node {
         }
     }
 
+    _blockHostEntityId() {
+        const node = this.value;
+        if (node && node._inlineExpanded && node.name) {
+            return `display:${node.name}`;
+        }
+        return this._entityId;
+    }
+
     _populateArgumentList(node, list) {
         const options = this.context.options;
         let hiddenTensors = false;
@@ -4832,10 +4844,11 @@ view.Node = class extends grapher.Node {
         for (const argument of objects) {
             const type = argument.type;
             let content = null;
-            const blockKey = this.context.blockKey(this._entityId, argument.name);
+            const hostEntityId = this._blockHostEntityId();
+            const blockKey = this.context.blockKey(hostEntityId, argument.name);
             if (type === 'graph' && blockKey && this.context.isBlockExpanded(blockKey)) {
                 content = this.context.createGraph(argument.value, 'graph', blockKey);
-                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks));
+                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks, blockKey));
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
@@ -4846,7 +4859,7 @@ view.Node = class extends grapher.Node {
                 list().add(item);
             } else if (type === 'graph[]') {
                 content = argument.value.map((value, index) => {
-                    const itemKey = this.context.blockKey(this._entityId, `${argument.name}[${index}]`);
+                    const itemKey = this.context.blockKey(hostEntityId, `${argument.name}[${index}]`);
                     return this.context.createGraph(value, 'graph', itemKey);
                 });
                 const item = list().argument(argument.name, content);
@@ -4938,8 +4951,8 @@ view.Node = class extends grapher.Node {
 
 view.Block = class {
 
-    constructor(viewRef, target, blocks) {
-        this.target = new view.Graph(viewRef, false);
+    constructor(viewRef, target, blocks, entityIdPrefix) {
+        this.target = new view.Graph(viewRef, false, { entityIdPrefix });
         if (blocks) {
             this.target.blocks = blocks;
         }
