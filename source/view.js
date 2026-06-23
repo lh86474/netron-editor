@@ -3471,6 +3471,29 @@ view.Graph = class extends grapher.Graph {
         this._background = null;
     }
 
+    blockKey(hostEntityId, attrName) {
+        if (!hostEntityId || !attrName) {
+            return null;
+        }
+        return `${hostEntityId}/${attrName}`;
+    }
+
+    isBlockExpanded(blockKey) {
+        return Boolean(blockKey && this.blocks.has(blockKey));
+    }
+
+    toggleBlockExpanded(blockKey) {
+        if (!blockKey) {
+            return false;
+        }
+        if (this.blocks.has(blockKey)) {
+            this.blocks.delete(blockKey);
+            return false;
+        }
+        this.blocks.add(blockKey);
+        return true;
+    }
+
     _containerElement() {
         return this._container;
     }
@@ -3569,8 +3592,8 @@ view.Graph = class extends grapher.Graph {
         return obj;
     }
 
-    createGraph(graph, type) {
-        const obj = new view.Node(this, graph, type || 'graph');
+    createGraph(graph, type, blockKey) {
+        const obj = new view.Node(this, graph, type || 'graph', blockKey);
         obj.name = (this._nodeKey++).toString();
         this._table.set(graph, obj);
         return obj;
@@ -4533,10 +4556,11 @@ view.Graph = class extends grapher.Graph {
 
 view.Node = class extends grapher.Node {
 
-    constructor(context, value, type) {
+    constructor(context, value, type, blockKey) {
         super();
         this.context = context;
         this.value = value;
+        this._blockKey = blockKey || null;
         this.id = `node-${value.name ? `name-${value.name}` : `id-${(context.counter++)}`}`;
         this._add(value, type);
         const inputs = value.inputs;
@@ -4675,7 +4699,8 @@ view.Node = class extends grapher.Node {
             this.definition.tooltip = 'Show Graph';
             this.definition.padding = 4;
             this.definition.on('click', async () => await this.context.view.pushTarget(value, this.value));
-            const expanded = this.context.blocks.has(value);
+            const blockKey = this._blockKey;
+            const expanded = this.context.isBlockExpanded(blockKey);
             const icon = expanded ? '\u2212' : '+';
             const tooltip = expanded ? 'Collapse Graph' : 'Expand Graph';
             this.expander = header.add(null, styles);
@@ -4684,10 +4709,8 @@ view.Node = class extends grapher.Node {
             this.expander.padding = 6;
             this.expander.on('click', () => {
                 const rect = this.expander.element.getBoundingClientRect();
-                if (this.context.blocks.has(value)) {
-                    this.context.blocks.delete(value);
-                } else {
-                    this.context.blocks.add(value);
+                if (blockKey) {
+                    this.context.toggleBlockExpanded(blockKey);
                 }
                 this.context.view.refresh({ value: this.value, rect });
             });
@@ -4809,19 +4832,23 @@ view.Node = class extends grapher.Node {
         for (const argument of objects) {
             const type = argument.type;
             let content = null;
-            if (type === 'graph' && this.context.blocks.has(argument.value)) {
-                content = this.context.createGraph(argument.value);
+            const blockKey = this.context.blockKey(this._entityId, argument.name);
+            if (type === 'graph' && blockKey && this.context.isBlockExpanded(blockKey)) {
+                content = this.context.createGraph(argument.value, 'graph', blockKey);
                 content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks));
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else if (type === 'graph' || type === 'function') {
-                content = this.context.createGraph(argument.value, type);
+                content = this.context.createGraph(argument.value, type, blockKey);
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else if (type === 'graph[]') {
-                content = argument.value.map((value) => this.context.createGraph(value));
+                content = argument.value.map((value, index) => {
+                    const itemKey = this.context.blockKey(this._entityId, `${argument.name}[${index}]`);
+                    return this.context.createGraph(value, 'graph', itemKey);
+                });
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else {
