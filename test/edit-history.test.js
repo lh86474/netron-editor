@@ -71,4 +71,30 @@ describe('EditHistory', () => {
         assert.equal(editor.modified.getGraph().nodes.length, 3);
         assert.equal(editor.delta.getState(insertChange.entityId), 'unchanged');
     });
+    it('undo restores batchInlineExpanded view state', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        editor.batchInlineExpanded = [];
+        editor.history.checkpoint(editor);
+        editor.batchInlineExpanded = ['batch_call'];
+        assert.equal(editor.history.undo(editor), true);
+        assert.deepEqual(editor.batchInlineExpanded, []);
+    });
+    it('redo reapplies batchInlineExpanded view state', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        editor.batchInlineExpanded = [];
+        editor.history.checkpoint(editor);
+        editor.batchInlineExpanded = ['batch_call'];
+        editor.history.undo(editor);
+        assert.deepEqual(editor.batchInlineExpanded, []);
+        assert.equal(editor.history.redo(editor), true);
+        assert.deepEqual(editor.batchInlineExpanded, ['batch_call']);
+    });
+    it('undo collapse clears batchInlineExpanded in session', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        editor.batchInlineExpanded = [];
+        editor.history.checkpoint(editor);
+        editor.batchInlineExpanded = ['batch_call'];
+        assert.equal(editor.history.undo(editor), true);
+        assert.deepEqual(editor.batchInlineExpanded, []);
+    });
 });

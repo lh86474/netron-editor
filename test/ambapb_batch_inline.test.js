@@ -5,12 +5,16 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { locateNodeEntity } from '../source/model-editor.js';
 import {
     applyBatchInlineExpansions,
+    buildNestedCompiledNodeEntityId,
     canExpandBatchCall,
     inlineExpansionBatchCallName,
     parseMappingAttribute,
-    resolveBatchCallTarget
+    resolveBatchCallTarget,
+    sourceEntityIdForNode,
+    sourceNodeForEntity
 } from '../source/ambapb-batch-inline.js';
 
 const tensor = (name) => ({ name, type: 'float32' });
@@ -236,5 +240,75 @@ describe('ambapb batch inline expansion', () => {
         assert.equal(target.fragSubgraphNode.name, 'frag_with_graph_attr');
         assert.equal(target.subGraph.name, subgraphName);
         assert.equal(canExpandBatchCall(graph, batchCall), true);
+    });
+    it('links display nodes back to source model nodes', () => {
+        const graph = buildRuntimeGraph();
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+
+        const producer = expanded.nodes.find((node) => node.name === 'producer');
+        const consumer = expanded.nodes.find((node) => node.name === 'consumer');
+        const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
+        const sourceInner = graph.nodes
+            .find((node) => node.name === 'frag')
+            .attributes.find((entry) => entry.name === 'compiled_prim_graph')
+            .value.nodes.find((node) => node.name === 'inner_nvp');
+
+        assert.equal(producer._sourceNode, graph.nodes.find((node) => node.name === 'producer'));
+        assert.equal(consumer._sourceNode, graph.nodes.find((node) => node.name === 'consumer'));
+        assert.equal(inner._sourceNode, sourceInner);
+        assert.ok(inner._sourceEntityId.includes('/compiled_prim_graph/node:'));
+    });
+
+    it('resolves entity source for unchanged and inlined nodes', () => {
+        const graph = buildRuntimeGraph();
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+
+        const producer = expanded.nodes.find((node) => node.name === 'producer');
+        const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
+        const sourceInner = graph.nodes
+            .find((node) => node.name === 'frag')
+            .attributes.find((entry) => entry.name === 'compiled_prim_graph')
+            .value.nodes.find((node) => node.name === 'inner_nvp');
+
+        assert.equal(
+            sourceNodeForEntity(producer),
+            graph.nodes.find((node) => node.name === 'producer')
+        );
+        assert.equal(sourceNodeForEntity(inner), sourceInner);
+        assert.equal(sourceEntityIdForNode(inner), inner._sourceEntityId);
+        assert.equal(sourceNodeForEntity(graph.nodes[0]), graph.nodes[0]);
+    });
+
+    it('builds nested entity ids for inlined compiled nodes', () => {
+        assert.equal(
+            buildNestedCompiledNodeEntityId(0, 1, 'compiled_prim_graph', 0),
+            'graph:0/node:1/compiled_prim_graph/node:0'
+        );
+    });
+
+    it('locates nested compiled graph nodes in the model', () => {
+        const graph = buildRuntimeGraph();
+        const model = { modules: [graph] };
+        const inner = graph.nodes
+            .find((node) => node.name === 'frag')
+            .attributes.find((entry) => entry.name === 'compiled_prim_graph')
+            .value.nodes.find((node) => node.name === 'inner_nvp');
+        const entity = locateNodeEntity(model, inner);
+        assert.ok(entity);
+        assert.equal(entity.nodeId, 'graph:0/node:1/compiled_prim_graph/node:0');
+    });
+    // Make sure we get description from source model in cloneNode
+    it('preserves description on inlined nodes', () => {
+        const graph = buildRuntimeGraph();
+        const sourceInner = graph.nodes
+            .find((node) => node.name === 'frag')
+            .attributes.find((entry) => entry.name === 'compiled_prim_graph')
+            .value.nodes.find((node) => node.name === 'inner_nvp');
+        sourceInner.description = '{"coproc":{"payload-id":"test"}}';
+
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+        const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
+
+        assert.equal(inner.description, sourceInner.description);
     });
 });

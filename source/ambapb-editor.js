@@ -62,6 +62,27 @@ const resolvePatchNodeContext = (model, patch) => {
     if (!entityId) {
         return null;
     }
+    const nestedMatch = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)/.exec(entityId);
+    if (nestedMatch) {
+        const graphIndex = Number(nestedMatch[1]);
+        const hostNodeIndex = Number(nestedMatch[2]);
+        const graphAttrName = nestedMatch[3];
+        const subNodeIndex = Number(nestedMatch[4]);
+        const graph = model.modules[graphIndex];
+        const hostNode = graph && graph.nodes ? graph.nodes[hostNodeIndex] : null;
+        const graphEntry = hostNode &&
+            [...(hostNode.attributes || []), ...(hostNode.blocks || [])]
+                .find((entry) => entry.name === graphAttrName && entry.type === 'graph' && entry.value);
+        const subGraph = graphEntry ? graphEntry.value : null;
+        return {
+            graph: subGraph,
+            node: subGraph && Array.isArray(subGraph.nodes) ? subGraph.nodes[subNodeIndex] || null : null,
+            graphIndex,
+            nodeIndex: subNodeIndex,
+            nestedInlineCompiled: true,
+            hostNode
+        };
+    }
     const match = /^graph:(\d+)\/node:(\d+)/.exec(entityId);
     if (!match) {
         return null;
@@ -280,10 +301,20 @@ export function assertAmbapbAttributePatchAllowed(model, patch, options = {}) {
     if (!model || !model._ambapb || !model._ambapb.canEdit) {
         return;
     }
+    const context = resolvePatchNodeContext(model, patch);
+    if (context && context.nestedInlineCompiled) {
+        if (patch.entityType === 'node' && patch.property === 'name') {
+            throw new Error('Renaming inlined compiled nodes is not supported.');
+        }
+        if (patch.entityType === 'node' &&
+            (patch.property === 'insert' || patch.property === 'remove')) {
+            throw new Error('Checkpoint topology editing is not supported.');
+        }
+        return;
+    }
     if (options.viewingCompiledGraph === true) {
         throw new Error('Compiled graph nodes are read-only.');
     }
-    const context = resolvePatchNodeContext(model, patch);
     if (context && isCompiledAmbapbGraph(context.graph)) {
         throw new Error('Compiled graph nodes are read-only.');
     }
