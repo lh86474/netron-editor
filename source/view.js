@@ -2192,6 +2192,9 @@ view.View = class {
 
     async pushTarget(graph, context) {
         if (graph && graph !== this.activeTarget && Array.isArray(graph.nodes)) {
+            if (this._target) {
+                this._target.select(null);
+            }
             this._sidebar.close();
             if (context && this._path.length > 0) {
                 this._path[0].state = {
@@ -4702,7 +4705,7 @@ view.Node = class extends grapher.Node {
             this.definition.content = '\u25CB';
             this.definition.tooltip = 'Show Graph';
             this.definition.padding = 4;
-            this.definition.on('click', async () => await this.context.view.pushTarget(value, this.value));
+            this.definition.on('click', async () => await this.context.view.pushTarget(value, null));
             const blockKey = this._blockKey;
             const expanded = this.context.isBlockExpanded(blockKey);
             const icon = expanded ? '\u2212' : '+';
