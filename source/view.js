@@ -28,6 +28,7 @@ import {
     canExpandBatchCall,
     inlineExpansionBatchCallName,
     isBatchCallNode,
+    sourceEntityIdForNode,
     sourceNodeForEntity
 } from './ambapb-batch-inline.js';
 
@@ -824,11 +825,19 @@ view.View = class {
         if (!this._editSession || !node) {
             return null;
         }
+        const nestedEntityId = sourceEntityIdForNode(node);
         const modelNode = sourceNodeForEntity(node);
         if (!modelNode) {
             return null;
         }
-        return locateNodeEntity(this._editSession.modified.model, modelNode);
+        const entity = locateNodeEntity(this._editSession.modified.model, modelNode);
+        if (entity && nestedEntityId) {
+            return {
+                ...entity,
+                nodeId: nestedEntityId
+            };
+        }
+        return entity;
     }
 
     _resolveValueEntity(value) {
@@ -898,6 +907,14 @@ view.View = class {
         if (!change || !this._editSession) {
             return null;
         }
+        const nested = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)/.exec(change.entityId);
+        if (nested) {
+            const graph = this._editSession.modified.getGraph(Number(nested[1]));
+            const host = graph.nodes[Number(nested[2])];
+            const entry = [...(host.attributes || []), ...(host.blocks || [])]
+                .find((item) => item.name === nested[3] && item.type === 'graph' && item.value);
+            return entry && entry.value.nodes ? entry.value.nodes[Number(nested[4])] || null : null;
+        }
         const match = /^graph:(\d+)\/node:(\d+)/.exec(change.entityId);
         if (!match) {
             return null;
@@ -909,6 +926,10 @@ view.View = class {
     _editorChangeNeedsGraphRefresh(change) {
         if (!change) {
             return false;
+        }
+        if (change.entityType === 'node' && change.property === 'description' &&
+            this._batchInlineExpanded.size > 0) {
+            return true;
         }
         if (change.entityType === 'node' && change.property === 'name') {
             return true;
@@ -1109,7 +1130,8 @@ view.View = class {
         if (!graph || this._batchInlineExpanded.size === 0) {
             return graph;
         }
-        return applyBatchInlineExpansions(graph, this._batchInlineExpanded);
+        const graphIndex = this._resolveGraphIndex(this.activeTarget);
+        return applyBatchInlineExpansions(graph, this._batchInlineExpanded, graphIndex);
     }
 
     _restoreBatchInlineState(state) {
@@ -3475,7 +3497,7 @@ view.Graph = class extends grapher.Graph {
         if (!entityId) {
             const nodes = this.target && this.target.nodes ? this.target.nodes : [];
             const nodeIndex = nodes.indexOf(node);
-            entityId = nodeIndex >= 0 ? 'graph:${this.graphIndex}/node:${nodeIndex}' : null;
+            entityId = nodeIndex >= 0 ? `graph:${this.graphIndex}/node:${nodeIndex}` : null;
         }
 
         obj._entityId = entityId;

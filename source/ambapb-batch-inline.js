@@ -11,6 +11,8 @@ const BATCH_CALL_OP = 'BatchCall';
 const FRAG_SUBGRAPH_OP = 'FragSubgraph';
 const COMPILED_PRIM_GRAPH_ATTR = 'compiled_prim_graph';
 const FRAG_SUBGRAPH_GRAPH_ATTR = 'graph';
+// compiled_prim_graph_attr is equal to compiled_prim_graph in other modules
+const COMPILED_GRAPH_ATTRS = [COMPILED_PRIM_GRAPH_ATTR, FRAG_SUBGRAPH_GRAPH_ATTR];
 
 export class BatchCallInlineError extends Error {
     constructor(message) {
@@ -272,7 +274,6 @@ const cloneValue = (value, prefix, valueMap, nameMap) => {
     return cloned;
 };
 // After clonNode, inlined nodes are already set with _inlineExpanded
-// WE add _sourceNode: null so they are explicitly view-only
 const cloneNode = (node, prefix, valueMap, nameMap) => {
     const cloneArgument = (argument) => ({
         name: argument.name,
@@ -280,7 +281,7 @@ const cloneNode = (node, prefix, valueMap, nameMap) => {
             .map((entry) => cloneValue(entry, prefix, valueMap, nameMap))
             .filter((entry) => entry !== null)
     });
-    return {
+    const cloned = {
         name: `${prefix}${node.name}`,
         type: readType(node.type),
         attributes: (node.attributes || []).map((attribute) => ({
@@ -291,8 +292,17 @@ const cloneNode = (node, prefix, valueMap, nameMap) => {
         inputs: (node.inputs || []).map((input) => cloneArgument(input)),
         outputs: (node.outputs || []).map((output) => cloneArgument(output)),
         _inlineExpanded: true,
-        _sourceNode: null
     };
+    if (node.description !== undefined) {
+        cloned.description = node.description;
+    }
+    if (node.identifier !== undefined) {
+        cloned.identifier = node.identifier;
+    }
+    if (node.device !== undefined) {
+        cloned.device = node.device;
+    }
+    return cloned;
 };
 // this is where the graph is actually build after we have cloned all inputs, attributes
 // and outputs from the frag subgraph
@@ -460,38 +470,108 @@ const expandSingleBatchCall = (graph, batchCallName) => {
         inlinedNodeNames: clonedNodes.map((node) => node.name)
     };
 };
+const getCompiledGraphEntry = (hostNode) => {
+    for (const attrName of COMPILED_GRAPH_ATTRS) {
+        for (const entry of graphArguments(hostNode)) {
+            if (entry.name === attrName && entry.type === 'graph' && entry.value) {
+                return entry;
+            }
+        }
+    }
+    return null;
+};
 
-const attachDisplayNodeSourceRefs = (displayGraph, sourceGraph) => {
-    // We use a hashmap to store the nodes of the source graph by name
+export const buildNestedCompiledNodeEntityId = (graphIndex, fragNodeIndex, graphAttrName, subNodeIndex) => {
+    return `graph:${graphIndex}/node:${fragNodeIndex}/${graphAttrName}/node:${subNodeIndex}`;
+};
+
+export const resolveInlinedSourceContext = (sourceGraph, displayNode) => {
+    const batchCallName = inlineExpansionBatchCallName(displayNode);
+    if (!batchCallName) {
+        return null;
+    }
+    const prefix = `inline::${batchCallName}::`;
+    if (!displayNode.name.startsWith(prefix)) {
+        return null;
+    }
+    const innerName = displayNode.name.slice(prefix.length);
+    const batchCall = (sourceGraph.nodes || []).find((node) => node.name === batchCallName);
+    if (!batchCall) {
+        return null;
+    }
+    const target = resolveBatchCallTarget(sourceGraph, batchCall);
+    if (!target || !target.subGraph) {
+        return null;
+    }
+    const graphEntry = getCompiledGraphEntry(target.fragSubgraphNode);
+    if (!graphEntry) {
+        return null;
+    }
+    const subNodeIndex = (target.subGraph.nodes || []).findIndex((node) => node.name === innerName);
+    if (subNodeIndex < 0) {
+        return null;
+    }
+    return {
+        batchCallName,
+        fragSubgraphNode: target.fragSubgraphNode,
+        graphAttrName: graphEntry.name,
+        subGraph: target.subGraph,
+        subNode: target.subGraph.nodes[subNodeIndex],
+        subNodeIndex
+    };
+};
+
+const attachDisplayNodeSourceRefs = (displayGraph, sourceGraph, graphIndex = 0) => {
     const sourceByName = new Map();
     for (const node of sourceGraph.nodes || []) {
         sourceByName.set(node.name, node);
     }
-    // displayGraph would be the cloned graph after we have to rerender it
     for (const node of displayGraph.nodes || []) {
         if (node._inlineExpanded) {
-            node._sourceNode = null;
+            const context = resolveInlinedSourceContext(sourceGraph, node);
+            if (context) {
+                const fragNodeIndex = (sourceGraph.nodes || []).indexOf(context.fragSubgraphNode);
+                node._sourceNode = context.subNode;
+                node._inlineSourceContext = {
+                    graphIndex,
+                    fragNodeIndex,
+                    graphAttrName: context.graphAttrName,
+                    subNodeIndex: context.subNodeIndex
+                };
+                node._sourceEntityId = buildNestedCompiledNodeEntityId(
+                    graphIndex,
+                    fragNodeIndex,
+                    context.graphAttrName,
+                    context.subNodeIndex
+                );
+            } else {
+                node._sourceNode = null;
+            }
             continue;
         }
         node._sourceNode = sourceByName.get(node.name) || null;
     }
-}
+};
 
 export const sourceNodeForEntity = (displayNode) => {
     if (!displayNode) {
         return null;
     }
-    if (displayNode._sourceNode === null) {
-        return null;
-    }
     if (displayNode._sourceNode) {
         return displayNode._sourceNode;
+    }
+    if (displayNode._sourceNode === null) {
+        return null;
     }
     return displayNode;
 }
 
+export const sourceEntityIdForNode = (displayNode) => {
+    return displayNode && displayNode._sourceEntityId ? displayNode._sourceEntityId : null;
+};
+
 // This is the main logic for the inline expansion. 
-export const applyBatchInlineExpansions = (graph, expandedBatchCallNames) => {
+export const applyBatchInlineExpansions = (graph, expandedBatchCallNames, graphIndex = 0) => {
     if (!graph || !expandedBatchCallNames || expandedBatchCallNames.size === 0) {
         return graph;
     }
@@ -507,7 +587,7 @@ export const applyBatchInlineExpansions = (graph, expandedBatchCallNames) => {
             inlinedNodeNames.push(...result.inlinedNodeNames);
         }
     }
-    attachDisplayNodeSourceRefs(displayGraph, graph);
+    attachDisplayNodeSourceRefs(displayGraph, graph, graphIndex);
     displayGraph._inlineExpandedNodeNames = inlinedNodeNames;
     return displayGraph;
 };
