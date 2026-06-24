@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint } from './ambapb.js';
 import {
@@ -27,7 +27,10 @@ import {
     applyBatchInlineExpansions,
     canExpandBatchCall,
     inlineExpansionBatchCallName,
-    isBatchCallNode
+    isBatchCallNode,
+    sourceEntityIdForNode,
+    sourceNodeForEntity,
+    resolveBatchCallTarget
 } from './ambapb-batch-inline.js';
 import {
     buildExtractWorkingGraph,
@@ -70,7 +73,15 @@ view.View = class {
         // arrays to support multiple begin and end marker
         this._rangeBegins = [];
         this._rangeEnds = [];
+        // expanded batch call names are here
         this._batchInlineExpanded = new Set();
+        this._displayGraphCache = null;
+        this._displayGraphRevision = 0;
+        this._refreshPromise = null;
+        this._refreshQueued = null;
+        this._graphBusyCount = 0;
+        this._graphBusyShowTimer = null;
+        this._graphBusyOverlay = null;
         this._danglingNodeNames = new Set();
         this._applyingHistory = false;
         this._exportBasenameOverride = null;
@@ -430,6 +441,59 @@ view.View = class {
         const bar = this._element('progress-bar');
         if (bar) {
             bar.style.width = `${percent}%`;
+        }
+    }
+
+    _invalidateDisplayGraphCache() {
+        this._displayGraphRevision++;
+        this._displayGraphCache = null;
+    }
+
+    _graphBusyElement() {
+        if (!this._graphBusyOverlay) {
+            this._graphBusyOverlay = this._element('graph-busy-overlay');
+        }
+        return this._graphBusyOverlay;
+    }
+
+    _beginGraphBusy() {
+        this._graphBusyCount++;
+        if (this._graphBusyCount !== 1) {
+            return;
+        }
+        const overlay = this._graphBusyElement();
+        if (!overlay) {
+            return;
+        }
+        this._graphBusyShowTimer = this._host.window.setTimeout(() => {
+            this._graphBusyShowTimer = null;
+            overlay.classList.add('visible');
+            overlay.setAttribute('aria-busy', 'true');
+        }, 80);
+    }
+
+    _endGraphBusy() {
+        this._graphBusyCount = Math.max(0, this._graphBusyCount - 1);
+        if (this._graphBusyCount > 0) {
+            return;
+        }
+        if (this._graphBusyShowTimer) {
+            this._host.window.clearTimeout(this._graphBusyShowTimer);
+            this._graphBusyShowTimer = null;
+        }
+        const overlay = this._graphBusyElement();
+        if (overlay) {
+            overlay.classList.remove('visible');
+            overlay.setAttribute('aria-busy', 'false');
+        }
+    }
+
+    async _withGraphBusy(callback) {
+        this._beginGraphBusy();
+        try {
+            await callback();
+        } finally {
+            this._endGraphBusy();
         }
     }
 
@@ -828,7 +892,19 @@ view.View = class {
         if (!this._editSession || !node) {
             return null;
         }
-        return locateNodeEntity(this._editSession.modified.model, node);
+        const nestedEntityId = sourceEntityIdForNode(node);
+        const modelNode = sourceNodeForEntity(node);
+        if (!modelNode) {
+            return null;
+        }
+        const entity = locateNodeEntity(this._editSession.modified.model, modelNode);
+        if (entity && nestedEntityId) {
+            return {
+                ...entity,
+                nodeId: nestedEntityId
+            };
+        }
+        return entity;
     }
 
     _resolveValueEntity(value) {
@@ -898,6 +974,14 @@ view.View = class {
         if (!change || !this._editSession) {
             return null;
         }
+        const nested = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)/.exec(change.entityId);
+        if (nested) {
+            const graph = this._editSession.modified.getGraph(Number(nested[1]));
+            const host = graph.nodes[Number(nested[2])];
+            const entry = [...(host.attributes || []), ...(host.blocks || [])]
+                .find((item) => item.name === nested[3] && item.type === 'graph' && item.value);
+            return entry && entry.value.nodes ? entry.value.nodes[Number(nested[4])] || null : null;
+        }
         const match = /^graph:(\d+)\/node:(\d+)/.exec(change.entityId);
         if (!match) {
             return null;
@@ -909,6 +993,10 @@ view.View = class {
     _editorChangeNeedsGraphRefresh(change) {
         if (!change) {
             return false;
+        }
+        if (change.entityType === 'node' && change.property === 'description' &&
+            this._batchInlineExpanded.size > 0) {
+            return true;
         }
         if (change.entityType === 'node' && change.property === 'name') {
             return true;
@@ -992,7 +1080,10 @@ view.View = class {
         }
         this._applyingHistory = true;
         try {
+            this._syncBatchInlineToSession();
             this._editSession.history.undo(this._editSession);
+            this._invalidateDisplayGraphCache();
+            this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
             this._sidebar.close();
@@ -1011,7 +1102,10 @@ view.View = class {
         }
         this._applyingHistory = true;
         try {
+            this._syncBatchInlineToSession();
             this._editSession.history.redo(this._editSession);
+            this._invalidateDisplayGraphCache();
+            this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
             this._sidebar.close();
@@ -1024,8 +1118,45 @@ view.View = class {
         }
     }
 
+    _reconcilePathTargets() {
+        if (!this._editSession || this._path.length === 0) {
+            return;
+        }
+        const resolveInGraph = (graph, segments) => {
+            let current = graph;
+            for (const segment of segments) {
+                if (!current) {
+                    return null;
+                }
+                if (segment.kind === 'module') {
+                    current = this._editSession.modified.getGraph(segment.index);
+                    continue;
+                }
+                const host = (current.nodes || [])[segment.nodeIndex];
+                if (!host) {
+                    return null;
+                }
+                const entry = [...(host.attributes || []), ...(host.blocks || [])]
+                    .find((item) => item.name === segment.attrName && item.type === 'graph' && item.value);
+                current = entry ? entry.value : null;
+            }
+            return current;
+        };
+
+        for (const entry of this._path) {
+            if (!entry._pathSegments) {
+                continue;
+            }
+            const resolved = resolveInGraph(null, entry._pathSegments);
+            if (resolved) {
+                entry.target = resolved;
+            }
+        }
+    }
+
     _checkpointEditHistory() {
         if (this._editSession && !this._applyingHistory) {
+            this._syncBatchInlineToSession();
             this._editSession.history.checkpoint(this._editSession);
         }
     }
@@ -1056,6 +1187,7 @@ view.View = class {
                 return null;
             }
         }
+        // edits must call checkpointedit history before applying any patches. 
         this._checkpointEditHistory();
         if (!(patch.entityType === 'node' && patch.changeType === 'delete' && patch.property === 'remove')) {
             this._danglingNodeNames.clear();
@@ -1063,6 +1195,7 @@ view.View = class {
         let change = null;
         try {
             change = this._editSession.applyPatch(patch);
+            this._invalidateDisplayGraphCache();
         } catch (error) {
             this.error(error, 'Error applying edit.', null);
             return null;
@@ -1109,21 +1242,58 @@ view.View = class {
         if (!graph || this._batchInlineExpanded.size === 0) {
             return graph;
         }
-        return applyBatchInlineExpansions(graph, this._batchInlineExpanded);
+        const graphIndex = this._resolveGraphIndex(this.activeTarget);
+        const expandedKey = Array.from(this._batchInlineExpanded).sort().join('\0');
+        const cache = this._displayGraphCache;
+        if (cache &&
+            cache.sourceGraph === graph &&
+            cache.graphIndex === graphIndex &&
+            cache.expandedKey === expandedKey &&
+            cache.revision === this._displayGraphRevision) {
+            return cache.displayGraph;
+        }
+        const displayGraph = applyBatchInlineExpansions(graph, this._batchInlineExpanded, graphIndex);
+        this._displayGraphCache = {
+            sourceGraph: graph,
+            graphIndex,
+            expandedKey,
+            revision: this._displayGraphRevision,
+            displayGraph
+        };
+        return displayGraph;
     }
 
     _restoreBatchInlineState(state) {
+        if (this._editSession && Array.isArray(this._editSession.batchInlineExpanded)) {
+            this._batchInlineExpanded = new Set(this._editSession.batchInlineExpanded);
+            return;
+        }
         if (state && Array.isArray(state.batchInlineExpanded)) {
             this._batchInlineExpanded = new Set(state.batchInlineExpanded);
         }
     }
 
     _persistBatchInlineState() {
+        // We don't have this._batchInlineExpanded.size > 0 so collapsing writes [] to path state
         if (this._path.length > 0) {
             this._path[0].state = Object.assign(this._path[0].state || {}, {
                 batchInlineExpanded: Array.from(this._batchInlineExpanded)
             });
         }
+    }
+
+    _syncBatchInlineToSession() {
+        if (this._editSession) {
+            this._editSession.batchInlineExpanded = Array.from(this._batchInlineExpanded);
+        }
+    }
+
+    _syncBatchInlineFromSession() {
+        if (!this._editSession) {
+            return;
+        }
+        this._batchInlineExpanded = new Set(this._editSession.batchInlineExpanded || []);
+        this._persistBatchInlineState();
     }
 
     _refreshInlineExpandedStyles() {
@@ -1332,12 +1502,14 @@ view.View = class {
         if (!batchCallName) {
             return;
         }
+        this._checkpointEditHistory();
         if (this._batchInlineExpanded.has(batchCallName)) {
             this._batchInlineExpanded.delete(batchCallName);
         } else {
             this._batchInlineExpanded.add(batchCallName);
         }
         this._persistBatchInlineState();
+        this._updateUndoRedoButtons();
         await this.refresh();
         this._refreshInlineExpandedStyles();
     }
@@ -1459,6 +1631,65 @@ view.View = class {
             const beginNodes = resolveMarkedNodesByName(workingGraph, this._rangeBegins);
             const endNodes = resolveMarkedNodesByName(workingGraph, this._rangeEnds);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
+
+            const lostFragSubgraphs = [];
+            for (const node of extracted.nodes || []) {
+                if (node.type?.name === 'BatchCall') {
+                    const target = resolveBatchCallTarget(workingGraph, node);
+                    if (target && target.fragSubgraphNode) {
+                        const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
+                        if (!alreadyExtracted) {
+                            if (!lostFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
+                                lostFragSubgraphs.push(target.fragSubgraphNode);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (lostFragSubgraphs.length > 0) {
+                const names = lostFragSubgraphs.map((node) => node.name).join(', ');
+                const keep = await this._host.confirm(
+                    `The extracted subgraph contains BatchCall nodes whose referenced FragSubgraph definitions are not part of the extraction path:\n\n- ${names}\n\nIf you remove these FragSubgraph definitions, the BatchCall nodes will lose their underlying implementations, resulting in incomplete graph data.\n\nWould you like to keep the FragSubgraph definitions in the extracted subgraph?`,
+                    {
+                        title: 'Extract Subgraph Warning',
+                        confirmLabel: 'Keep',
+                        cancelLabel: 'Remove'
+                    }
+                );
+                if (keep) {
+                    for (const fragNode of lostFragSubgraphs) {
+                        const clonedFrag = {
+                            name: fragNode.name,
+                            type: fragNode.type ? Object.assign({}, fragNode.type) : null,
+                            attributes: (fragNode.attributes || []).map((attribute) => {
+                                if (attribute.type === 'graph' && attribute.value) {
+                                    return {
+                                        name: attribute.name,
+                                        type: attribute.type,
+                                        value: cloneGraph(attribute.value)
+                                    };
+                                }
+                                return {
+                                    name: attribute.name,
+                                    type: attribute.type,
+                                    value: attribute.value
+                                };
+                            }),
+                            inputs: (fragNode.inputs || []).map((input) => ({
+                                name: input.name,
+                                value: (input.value || []).map((val) => Object.assign({}, val))
+                            })),
+                            outputs: (fragNode.outputs || []).map((output) => ({
+                                name: output.name,
+                                value: (output.value || []).map((val) => Object.assign({}, val))
+                            }))
+                        };
+                        extracted.nodes.push(clonedFrag);
+                    }
+                }
+            }
+
             extracted = stripInlineExpansionPrefixes(extracted);
             this._checkpointEditHistory();
             this._editSession.replaceGraph(graphIndex, extracted);
@@ -1584,25 +1815,27 @@ view.View = class {
         if (!this._rightPane || !this.activeTarget) {
             return;
         }
-        const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
-        const previous = this._rightPane.graph;
-        const zoom = previous ? previous.zoom : 1;
-        const container = this._rightPane.container;
-        const scrollLeft = container ? container.scrollLeft : 0;
-        const scrollTop = container ? container.scrollTop : 0;
-        if (previous && this._target === previous) {
-            previous.unregister();
-        }
-        await this._rightPane.render(this._resolveModifiedTarget(this.activeTarget), this.activeSignature, state);
-        if (this._rightPane.graph) {
-            this._rightPane.graph.zoom = zoom;
-            this._rightPane.graph.register();
-            this.target = this._rightPane.graph;
-            if (container) {
-                container.scrollLeft = scrollLeft;
-                container.scrollTop = scrollTop;
+        await this._withGraphBusy(async () => {
+            const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
+            const previous = this._rightPane.graph;
+            const zoom = previous ? previous.zoom : 1;
+            const container = this._rightPane.container;
+            const scrollLeft = container ? container.scrollLeft : 0;
+            const scrollTop = container ? container.scrollTop : 0;
+            if (previous && this._target === previous) {
+                previous.unregister();
             }
-        }
+            await this._rightPane.render(this._resolveModifiedTarget(this.activeTarget), this.activeSignature, state);
+            if (this._rightPane.graph) {
+                this._rightPane.graph.zoom = zoom;
+                this._rightPane.graph.register();
+                this.target = this._rightPane.graph;
+                if (container) {
+                    container.scrollLeft = scrollLeft;
+                    container.scrollTop = scrollTop;
+                }
+            }
+        });
     }
 
     _resolveGraphIndex(target) {
@@ -1712,6 +1945,39 @@ view.View = class {
     }
 
     async refresh(anchor, options = {}) {
+        if (this._refreshPromise) {
+            this._refreshQueued = { anchor, options: { ...options } };
+            return this._refreshPromise;
+        }
+        const run = async () => {
+            let current = { anchor, options: { ...options } };
+            const showBusy = current.options.busy !== false;
+            if (showBusy) {
+                this._beginGraphBusy();
+            }
+            try {
+                while (current) {
+                    const pending = current;
+                    current = null;
+                    await this._refreshImpl(pending.anchor, pending.options);
+                    if (this._refreshQueued) {
+                        current = this._refreshQueued;
+                        this._refreshQueued = null;
+                    }
+                }
+            } finally {
+                if (showBusy) {
+                    this._endGraphBusy();
+                }
+            }
+        };
+        this._refreshPromise = run().finally(() => {
+            this._refreshPromise = null;
+        });
+        return this._refreshPromise;
+    }
+
+    async _refreshImpl(anchor, options = {}) {
         if (options.skipShow) {
             this._ensureDefaultScreen();
         }
@@ -2031,9 +2297,11 @@ view.View = class {
             try {
                 this._editSession = ModelEditor.createSession(model);
                 this._editSessionError = null;
+                this._invalidateDisplayGraphCache();
             } catch (error) {
                 this._editSession = null;
                 this._editSessionError = error;
+                this._invalidateDisplayGraphCache();
             }
             this._initGraphPanes();
             this._bindEditorSession();
@@ -2202,6 +2470,9 @@ view.View = class {
 
     async pushTarget(graph, context) {
         if (graph && graph !== this.activeTarget && Array.isArray(graph.nodes)) {
+            if (this._target) {
+                this._target.select(null);
+            }
             this._sidebar.close();
             if (context && this._path.length > 0) {
                 this._path[0].state = {
@@ -3485,6 +3756,30 @@ view.Graph = class extends grapher.Graph {
         this._canvas = null;
         this._origin = null;
         this._background = null;
+        this.entityIdPrefix = options.entityIdPrefix || null;
+    }
+
+    blockKey(hostEntityId, attrName) {
+        if (!hostEntityId || !attrName) {
+            return null;
+        }
+        return `${hostEntityId}/${attrName}`;
+    }
+
+    isBlockExpanded(blockKey) {
+        return Boolean(blockKey && this.blocks.has(blockKey));
+    }
+
+    toggleBlockExpanded(blockKey) {
+        if (!blockKey) {
+            return false;
+        }
+        if (this.blocks.has(blockKey)) {
+            this.blocks.delete(blockKey);
+            return false;
+        }
+        this.blocks.add(blockKey);
+        return true;
     }
 
     _containerElement() {
@@ -3562,18 +3857,33 @@ view.Graph = class extends grapher.Graph {
         return this._selection;
     }
 
+    // Use model entity id, not the display graph index
     createNode(node) {
-        const obj = new view.Node(this, node);
+        let entityId = null;
+        if (this.entityIdPrefix) {
+            const nodeIndex = (this.target?.nodes || []).indexOf(node);
+            entityId = nodeIndex >= 0 ? `${this.entityIdPrefix}/node:${nodeIndex}` : null;
+        } else if (this.view && this.view._editSession) {
+            const entity = this.view._resolveNodeEntity(node);
+            if (entity) {
+                entityId = entity.nodeId;
+            }
+        }
+        if (!entityId) {
+            const nodes = this.target && this.target.nodes ? this.target.nodes : [];
+            const nodeIndex = nodes.indexOf(node);
+            entityId = nodeIndex >= 0 ? `graph:${this.graphIndex}/node:${nodeIndex}` : null;
+        }
+
+        const obj = new view.Node(this, node, undefined, null, entityId);
         obj.name = (this._nodeKey++).toString();
-        const nodes = this.target && this.target.nodes ? this.target.nodes : [];
-        const nodeIndex = nodes.indexOf(node);
-        obj._entityId = nodeIndex >= 0 ? `graph:${this.graphIndex}/node:${nodeIndex}` : null;
+        obj._entityId = entityId;
         this._table.set(node, obj);
         return obj;
     }
 
-    createGraph(graph, type) {
-        const obj = new view.Node(this, graph, type || 'graph');
+    createGraph(graph, type, blockKey) {
+        const obj = new view.Node(this, graph, type || 'graph', blockKey);
         obj.name = (this._nodeKey++).toString();
         this._table.set(graph, obj);
         return obj;
@@ -4536,10 +4846,12 @@ view.Graph = class extends grapher.Graph {
 
 view.Node = class extends grapher.Node {
 
-    constructor(context, value, type) {
+    constructor(context, value, type, blockKey, entityId) {
         super();
         this.context = context;
         this.value = value;
+        this._blockKey = blockKey || null;
+        this._entityId = entityId || null;
         this.id = `node-${value.name ? `name-${value.name}` : `id-${(context.counter++)}`}`;
         this._add(value, type);
         const inputs = value.inputs;
@@ -4682,8 +4994,9 @@ view.Node = class extends grapher.Node {
             this.definition.content = '\u25CB';
             this.definition.tooltip = 'Show Graph';
             this.definition.padding = 4;
-            this.definition.on('click', async () => await this.context.view.pushTarget(value, this.value));
-            const expanded = this.context.blocks.has(value);
+            this.definition.on('click', async () => await this.context.view.pushTarget(value, null));
+            const blockKey = this._blockKey;
+            const expanded = this.context.isBlockExpanded(blockKey);
             const icon = expanded ? '\u2212' : '+';
             const tooltip = expanded ? 'Collapse Graph' : 'Expand Graph';
             this.expander = header.add(null, styles);
@@ -4692,10 +5005,8 @@ view.Node = class extends grapher.Node {
             this.expander.padding = 6;
             this.expander.on('click', () => {
                 const rect = this.expander.element.getBoundingClientRect();
-                if (this.context.blocks.has(value)) {
-                    this.context.blocks.delete(value);
-                } else {
-                    this.context.blocks.add(value);
+                if (blockKey) {
+                    this.context.toggleBlockExpanded(blockKey);
                 }
                 this.context.view.refresh({ value: this.value, rect });
             });
@@ -4731,6 +5042,14 @@ view.Node = class extends grapher.Node {
             this.context.createNode(node.inner);
             this._add(node.inner);
         }
+    }
+
+    _blockHostEntityId() {
+        const node = this.value;
+        if (node && node._inlineExpanded && node.name) {
+            return `display:${node.name}`;
+        }
+        return this._entityId;
     }
 
     _populateArgumentList(node, list) {
@@ -4817,19 +5136,24 @@ view.Node = class extends grapher.Node {
         for (const argument of objects) {
             const type = argument.type;
             let content = null;
-            if (type === 'graph' && this.context.blocks.has(argument.value)) {
-                content = this.context.createGraph(argument.value);
-                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks));
+            const hostEntityId = this._blockHostEntityId();
+            const blockKey = this.context.blockKey(hostEntityId, argument.name);
+            if (type === 'graph' && blockKey && this.context.isBlockExpanded(blockKey)) {
+                content = this.context.createGraph(argument.value, 'graph', blockKey);
+                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks, blockKey));
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else if (type === 'graph' || type === 'function') {
-                content = this.context.createGraph(argument.value, type);
+                content = this.context.createGraph(argument.value, type, blockKey);
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else if (type === 'graph[]') {
-                content = argument.value.map((value) => this.context.createGraph(value));
+                content = argument.value.map((value, index) => {
+                    const itemKey = this.context.blockKey(hostEntityId, `${argument.name}[${index}]`);
+                    return this.context.createGraph(value, 'graph', itemKey);
+                });
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else {
@@ -4919,8 +5243,8 @@ view.Node = class extends grapher.Node {
 
 view.Block = class {
 
-    constructor(viewRef, target, blocks) {
-        this.target = new view.Graph(viewRef, false);
+    constructor(viewRef, target, blocks, entityIdPrefix) {
+        this.target = new view.Graph(viewRef, false, { entityIdPrefix });
         if (blocks) {
             this.target.blocks = blocks;
         }

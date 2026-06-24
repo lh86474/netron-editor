@@ -1,5 +1,5 @@
 /* This file is used to track the history of edits made to the model.
- * Created mainly to support undo and redo so we can preserve snapshops of the graph
+ * Created mainly to support undo and redo so we can preserve snapshots of the graph
  * Author: Luray He
  */
 import { cloneGraphModules, stringifyEditorJSON } from './model-editor.js';
@@ -58,7 +58,10 @@ export class EditHistory {
     _capture(session) {
         const snapshot = {
             modules: cloneGraphModules(session.modified.model.modules),
-            delta: cloneData(session.delta.exportSnapshot())
+            delta: cloneData(session.delta.exportSnapshot()),
+            batchInlineExpanded: Array.isArray(session.batchInlineExpanded)
+                ? session.batchInlineExpanded.slice()
+                : []
         };
         if (session.modified.model._ambapb) {
             snapshot.ambapb = cloneAmbapbEditingState(session.modified.model._ambapb);
@@ -77,5 +80,8 @@ export class EditHistory {
             }
         }
         session.delta.restoreSnapshot(snapshot.delta);
+        session.batchInlineExpanded = Array.isArray(snapshot.batchInlineExpanded) 
+            ? snapshot.batchInlineExpanded.slice()
+            : [];
     }
 }
