@@ -25,6 +25,7 @@ import {
 import { buildMergeFilename } from './export-filename.js';
 import { onnx } from './onnx-proto.js';
 import './onnx-encode.js';
+import { isAmbapbCheckpoint, expandCheckpointModel } from './ambapb.js';
 
 // this wraps a browser File object
 class LocalFileContext {

@@ -1015,10 +1015,17 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
     const downstreamRaw = downstreamCheckpoint.primGraph.raw || {};
     const mergedRaw = {
         primitives: mergedPrims,
-        trackers: [...(upstreamRaw.trackers || []), ...(downstreamRaw.trackers || [])],
+        // make merger robust against non-array structures since spread looks for iterables
+        trackers: [
+            ...(Array.isArray(upstreamRaw.trackers) ? upstreamRaw.trackers : []),
+            ...(Array.isArray(downstreamRaw.trackers) ? downstreamRaw.trackers : [])
+        ],
         graph_input: upstreamRaw.graph_input || '',
         graph_output: renameMap.get(downstreamRaw.graph_output) || '',
-        subgraphs: [...(upstreamRaw.subgraphs || []), ...(downstreamRaw.subgraphs || [])]
+        subgraphs: [
+            ...(Array.isArray(upstreamRaw.subgraphs) ? upstreamRaw.subgraphs : []),
+            ...(Array.isArray(downstreamRaw.subgraphs) ? downstreamRaw.subgraphs : [])
+        ]
     };
     
     // 8. Build merged model proto (containing a single CVFlowNVP node)
