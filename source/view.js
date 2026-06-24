@@ -30,7 +30,8 @@ import {
     isBatchCallNode,
     sourceEntityIdForNode,
     sourceNodeForEntity,
-    resolveBatchCallTarget
+    resolveBatchCallTarget,
+    resolveInlinedSourceContext
 } from './ambapb-batch-inline.js';
 import {
     buildExtractWorkingGraph,
@@ -1632,62 +1633,70 @@ view.View = class {
             const endNodes = resolveMarkedNodesByName(workingGraph, this._rangeEnds);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
 
-            const lostFragSubgraphs = [];
+            const cloneFragSubgraph = (fragNode) => {
+                return {
+                    name: fragNode.name,
+                    type: fragNode.type ? Object.assign({}, fragNode.type) : null,
+                    attributes: (fragNode.attributes || []).map((attribute) => {
+                        if (attribute.type === 'graph' && attribute.value) {
+                            return {
+                                name: attribute.name,
+                                type: attribute.type,
+                                value: cloneGraph(attribute.value)
+                            };
+                        }
+                        return {
+                            name: attribute.name,
+                            type: attribute.type,
+                            value: attribute.value
+                        };
+                    }),
+                    inputs: (fragNode.inputs || []).map((input) => ({
+                        name: input.name,
+                        value: (input.value || []).map((val) => Object.assign({}, val))
+                    })),
+                    outputs: (fragNode.outputs || []).map((output) => ({
+                        name: output.name,
+                        value: (output.value || []).map((val) => Object.assign({}, val))
+                    }))
+                };
+            };
+
+            const keepFragSubgraphs = [];
+
+            // 1. Identify FragSubgraphs for non-inlined BatchCalls
             for (const node of extracted.nodes || []) {
                 if (node.type?.name === 'BatchCall') {
                     const target = resolveBatchCallTarget(workingGraph, node);
                     if (target && target.fragSubgraphNode) {
                         const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
-                        if (!alreadyExtracted) {
-                            if (!lostFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
-                                lostFragSubgraphs.push(target.fragSubgraphNode);
+                        if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
+                            keepFragSubgraphs.push(target.fragSubgraphNode);
+                        }
+                    }
+                }
+            }
+
+            // 2. Identify FragSubgraphs for already-inlined BatchCalls
+            for (const node of extracted.nodes || []) {
+                const batchCallName = inlineExpansionBatchCallName(node);
+                if (batchCallName) {
+                    const originalBatchCall = (sourceGraph.nodes || []).find((n) => n.name === batchCallName);
+                    if (originalBatchCall) {
+                        const target = resolveBatchCallTarget(sourceGraph, originalBatchCall);
+                        if (target && target.fragSubgraphNode) {
+                            const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
+                            if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
+                                keepFragSubgraphs.push(target.fragSubgraphNode);
                             }
                         }
                     }
                 }
             }
 
-            if (lostFragSubgraphs.length > 0) {
-                const names = lostFragSubgraphs.map((node) => node.name).join(', ');
-                const keep = await this._host.confirm(
-                    `The extracted subgraph contains BatchCall nodes whose referenced FragSubgraph definitions are not part of the extraction path:\n\n- ${names}\n\nIf you remove these FragSubgraph definitions, the BatchCall nodes will lose their underlying implementations, resulting in incomplete graph data.\n\nWould you like to keep the FragSubgraph definitions in the extracted subgraph?`,
-                    {
-                        title: 'Extract Subgraph Warning',
-                        confirmLabel: 'Keep',
-                        cancelLabel: 'Remove'
-                    }
-                );
-                if (keep) {
-                    for (const fragNode of lostFragSubgraphs) {
-                        const clonedFrag = {
-                            name: fragNode.name,
-                            type: fragNode.type ? Object.assign({}, fragNode.type) : null,
-                            attributes: (fragNode.attributes || []).map((attribute) => {
-                                if (attribute.type === 'graph' && attribute.value) {
-                                    return {
-                                        name: attribute.name,
-                                        type: attribute.type,
-                                        value: cloneGraph(attribute.value)
-                                    };
-                                }
-                                return {
-                                    name: attribute.name,
-                                    type: attribute.type,
-                                    value: attribute.value
-                                };
-                            }),
-                            inputs: (fragNode.inputs || []).map((input) => ({
-                                name: input.name,
-                                value: (input.value || []).map((val) => Object.assign({}, val))
-                            })),
-                            outputs: (fragNode.outputs || []).map((output) => ({
-                                name: output.name,
-                                value: (output.value || []).map((val) => Object.assign({}, val))
-                            }))
-                        };
-                        extracted.nodes.push(clonedFrag);
-                    }
-                }
+            // Automatically keep all identified FragSubgraphs
+            for (const fragNode of keepFragSubgraphs) {
+                extracted.nodes.push(cloneFragSubgraph(fragNode));
             }
 
             extracted = stripInlineExpansionPrefixes(extracted);
