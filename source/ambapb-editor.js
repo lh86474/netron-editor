@@ -301,6 +301,12 @@ export function assertAmbapbAttributePatchAllowed(model, patch, options = {}) {
     if (!model || !model._ambapb || !model._ambapb.canEdit) {
         return;
     }
+    const entityId = patch.entityId || patch.parentId;
+    // /value denotes connections, and we want to make sure that 
+    // we are allowed to edit them
+    if (entityId && entityId.includes('/value:')) {
+        return;
+    }
     const context = resolvePatchNodeContext(model, patch);
     if (context && context.nestedInlineCompiled) {
         if (patch.entityType === 'node' && patch.property === 'name') {
