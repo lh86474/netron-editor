@@ -1638,6 +1638,7 @@ view.View = class {
                     const target = resolveBatchCallTarget(workingGraph, node);
                     if (target && target.fragSubgraphNode) {
                         const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
+                        // we want to find the fragsubgraphs that were not inlined.
                         if (!alreadyExtracted) {
                             if (!lostFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
                                 lostFragSubgraphs.push(target.fragSubgraphNode);
