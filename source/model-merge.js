@@ -1027,6 +1027,30 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
             ...(Array.isArray(downstreamRaw.subgraphs) ? downstreamRaw.subgraphs : [])
         ]
     };
+
+    // We need to merge and preserve the compiled_prim_graph
+    // Merge/preserve compiled_prim_graph
+    let mergedCompiledGraph = null;
+    if (upstreamCheckpoint.compiledPrimGraphAttribute && downstreamCheckpoint.compiledPrimGraphAttribute) {
+        const upstreamCompiled = cloneGraph(upstreamCheckpoint.compiledPrimGraphAttribute.g);
+        const downstreamCompiled = cloneGraph(downstreamCheckpoint.compiledPrimGraphAttribute.g);
+        const reservedNames = collectAllGraphNames(upstreamCompiled);
+        const prefixMap = prefixDownstreamGraph(downstreamCompiled, prefix, reservedNames);
+        applyMappingRenames(downstreamCompiled, mapping, prefixMap);
+        removeMappedDownstreamInputs(downstreamCompiled, mapping);
+        mergedCompiledGraph = mergeGraphProtos(upstreamCompiled, downstreamCompiled);
+        normalizeGraphReferences(mergedCompiledGraph);
+    } else if (upstreamCheckpoint.compiledPrimGraphAttribute) {
+        mergedCompiledGraph = cloneGraph(upstreamCheckpoint.compiledPrimGraphAttribute.g);
+    } else if (downstreamCheckpoint.compiledPrimGraphAttribute) {
+        const downstreamCompiled = cloneGraph(downstreamCheckpoint.compiledPrimGraphAttribute.g);
+        const reservedNames = new Set();
+        const prefixMap = prefixDownstreamGraph(downstreamCompiled, prefix, reservedNames);
+        applyMappingRenames(downstreamCompiled, mapping, prefixMap);
+        removeMappedDownstreamInputs(downstreamCompiled, mapping);
+        mergedCompiledGraph = downstreamCompiled;
+        normalizeGraphReferences(mergedCompiledGraph);
+    }
     
     // 8. Build merged model proto (containing a single CVFlowNVP node)
     const mergedProto = new onnx.ModelProto();
@@ -1094,7 +1118,15 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
         immsAttr.tensors = [...upstreamTensors, ...downstreamTensors];
         attributesList.push(immsAttr);
     }
+    // append merged compiled graph to the attributes list of the CVFlowNVP node
     
+    if (mergedCompiledGraph) {
+        const compiledAttr = new onnx.AttributeProto();
+        compiledAttr.name = 'compiled_prim_graph';
+        compiledAttr.type = onnx.AttributeProto.AttributeType.GRAPH;
+        compiledAttr.g = mergedCompiledGraph;
+        attributesList.push(compiledAttr);
+    }
     wrapperNode.attribute = attributesList;
     mergedGraph.node = [wrapperNode];
     mergedProto.graph = mergedGraph;
