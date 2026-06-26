@@ -5158,7 +5158,7 @@ view.Node = class extends grapher.Node {
         if (!this.element) {
             return;
         }
-        const expanded = Boolean(this.value && this.value._inlineExpanded);
+        const expanded = Boolean(this.value && this.value._inlineExpanded && !this.value._inlineExpandedFromUserDef);
         this.element.classList.toggle('inline-expanded', expanded);
     }
 

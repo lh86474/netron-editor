@@ -375,10 +375,13 @@ describe('ambapb batch inline expansion', () => {
         const nodeNames = expanded.nodes.map((node) => node.name);
         assert.ok(!nodeNames.includes('user_def_call'));
         assert.ok(nodeNames.includes('inline::user_def_call::inner_nvp'));
+        // Verify that the UserDefSubgraph node itself is filtered out
+        assert.ok(!nodeNames.includes(subgraphName));
         
         const inner = expanded.nodes.find((node) => node.name === 'inline::user_def_call::inner_nvp');
         assert.ok(inner);
         assert.equal(inner.inputs[0].value[0].name, 'producer_out');
+        assert.equal(inner._inlineExpandedFromUserDef, true);
     });
 });
 

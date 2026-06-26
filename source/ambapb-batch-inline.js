@@ -468,7 +468,14 @@ const expandSingleBatchCall = (graph, batchCallName) => {
     const outMappings = parseMappingAttribute(getNodeAttribute(batchCallNode, 'out_mappings'));
     const externalInputs = buildExternalInputMap(batchCallNode, subGraph, srcMappings);
 
-    const clonedNodes = (subGraph.nodes || []).map((node) => cloneNode(node, prefix, valueMap, nameMap));
+    const isUserDef = batchCallNode.type?.name === 'UserDefCall';
+    const clonedNodes = (subGraph.nodes || []).map((node) => {
+        const cloned = cloneNode(node, prefix, valueMap, nameMap);
+        if (isUserDef) {
+            cloned._inlineExpandedFromUserDef = true;
+        }
+        return cloned;
+    });
     rewireExternalInputs(clonedNodes, externalInputs, prefix);
 
     const outputReplacements = buildOutputReplacementMap(batchCallNode, subGraph, outMappings, nameMap);
@@ -590,12 +597,26 @@ export const applyBatchInlineExpansions = (graph, expandedBatchCallNames, graphI
     const batchNames = Array.from(expandedBatchCallNames).filter((name) =>
         (displayGraph.nodes || []).some((node) => node.name === name && (node.type?.name === BATCH_CALL_OP || node.type?.name === 'UserDefCall'))
     );
+    const subgraphsToRemove = new Set();
     for (const batchName of batchNames) {
+        const node = (displayGraph.nodes || []).find((n) => n.name === batchName);
+        if (node && node.type?.name === 'UserDefCall') {
+            const graphIdAttr = getNodeAttribute(node, 'graph_id');
+            const graphId = normalizeGraphId(graphIdAttr ? graphIdAttr.value : null);
+            if (graphId) {
+                subgraphsToRemove.add(graphId);
+            }
+        }
         const result = expandSingleBatchCall(displayGraph, batchName);
         if (result) {
             displayGraph = result.graph;
             inlinedNodeNames.push(...result.inlinedNodeNames);
         }
+    }
+    if (subgraphsToRemove.size > 0) {
+        displayGraph.nodes = (displayGraph.nodes || []).filter(
+            (node) => !(node.type?.name === 'UserDefSubgraph' && subgraphsToRemove.has(node.name))
+        );
     }
     attachDisplayNodeSourceRefs(displayGraph, graph, graphIndex);
     displayGraph._inlineExpandedNodeNames = inlinedNodeNames;
