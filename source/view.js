@@ -1798,14 +1798,8 @@ view.View = class {
                         value: extracted
                     }
                 ],
-                inputs: extracted.inputs.map(input => ({
-                    name: input.name,
-                    value: input.value.map(val => Object.assign({}, val))
-                })),
-                outputs: extracted.outputs.map(output => ({
-                    name: output.name,
-                    value: output.value.map(val => Object.assign({}, val))
-                }))
+                inputs: [],
+                outputs: []
             };
             
             const src_mappings = [];
@@ -1887,7 +1881,14 @@ view.View = class {
                 }
             }
             
-            nextNodes.unshift(userDefSubgraphNode);
+            let insertIdx = 0;
+            for (let i = 0; i < nextNodes.length; i++) {
+                const node = nextNodes[i];
+                if (node && node.type && (node.type.name === 'FragSubgraph' || node.type.name === 'UserDefSubgraph')) {
+                    insertIdx = i + 1;
+                }
+            }
+            nextNodes.splice(insertIdx, 0, userDefSubgraphNode);
             
             const modifiedGraph = {
                 name: sourceGraph.name,
