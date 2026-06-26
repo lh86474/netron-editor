@@ -1030,7 +1030,7 @@ view.View = class {
                 if (modelNode && this._target) {
                     const rebuildResult = await this._target.refreshNodeArgumentList(modelNode);
                     if (rebuildResult === null || rebuildResult === true) {
-                        await this.refresh(null, { skipShow: true, skipAnimation: true});
+                        await this.refresh(null, { skipShow: true, skipAnimation: true });
                     }
                 }
             } else if (this._editorChangeNeedsGraphRefresh(change)) {
@@ -1053,7 +1053,7 @@ view.View = class {
             }
         } catch (error) {
             this.error(error, 'Error applying edit.', null);
-        } 
+        }
     }
 
     _canUndoEdit() {
@@ -1579,7 +1579,7 @@ view.View = class {
         ];
         this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, items);
         this._graphContextMenu.open();
-    } 
+    }
 
     // mark begin node for graph extraction
     _markRangeBegin(nodeView) {
@@ -1776,7 +1776,7 @@ view.View = class {
         if (selectedNodes.length === 0) {
             return;
         }
-        
+
         try {
             const { beginNodes, endNodes } = findBoundaryNodes(sourceGraph, selectedNodes);
             let extracted = extractSubgraph(sourceGraph, beginNodes, endNodes);
@@ -1784,7 +1784,7 @@ view.View = class {
             const subGraphId = genUniqueNodeName('userdefsubgraph', sourceGraph);
             extracted.name = subGraphId;
             const callNodeName = genUniqueNodeName('userDefCall', sourceGraph);
-            
+
             const userDefSubgraphNode = {
                 name: subGraphId,
                 type: {
@@ -1802,7 +1802,7 @@ view.View = class {
                 inputs: [],
                 outputs: []
             };
-            
+
             const src_mappings = [];
             const userDefCallInputs = [];
             for (let i = 0; i < extracted.inputs.length; i++) {
@@ -1817,7 +1817,7 @@ view.View = class {
                     value: input.value.map(val => Object.assign({}, val))
                 });
             }
-            
+
             const out_mappings = [];
             const userDefCallOutputs = [];
             for (let i = 0; i < extracted.outputs.length; i++) {
@@ -1832,7 +1832,7 @@ view.View = class {
                     value: output.value.map(val => Object.assign({}, val))
                 });
             }
-            
+
             const userDefCallNode = {
                 name: callNodeName,
                 type: {
@@ -1860,7 +1860,7 @@ view.View = class {
                 inputs: userDefCallInputs,
                 outputs: userDefCallOutputs
             };
-            
+
             let rootNodeIndex = -1;
             for (const node of selectedNodes) {
                 const idx = sourceGraph.nodes.indexOf(node);
@@ -1868,7 +1868,7 @@ view.View = class {
                     rootNodeIndex = idx;
                 }
             }
-            
+
             const keepSet = new Set(selectedNodes);
             const nextNodes = [];
             for (let i = 0; i < sourceGraph.nodes.length; i++) {
@@ -1881,7 +1881,7 @@ view.View = class {
                     nextNodes.push(node);
                 }
             }
-            
+
             let insertIdx = 0;
             for (let i = 0; i < nextNodes.length; i++) {
                 const node = nextNodes[i];
@@ -1890,7 +1890,7 @@ view.View = class {
                 }
             }
             nextNodes.splice(insertIdx, 0, userDefSubgraphNode);
-            
+
             const modifiedGraph = {
                 name: sourceGraph.name,
                 identifier: sourceGraph.identifier,
@@ -1898,14 +1898,14 @@ view.View = class {
                 outputs: sourceGraph.outputs,
                 nodes: nextNodes
             };
-            
+
             this._checkpointEditHistory();
             this._editSession.replaceGraph(graphIndex, modifiedGraph);
-            
+
             if (this._model && this._model.proto) {
                 this._model.proto.graph = rebuildGraphProtoFromModified(modifiedGraph, this._model.proto);
             }
-            
+
             this._userDefSelectedNodes.clear();
             this._sidebar.close();
             this._bindEditorSession();
@@ -2091,12 +2091,45 @@ view.View = class {
         if (name) {
             const modifiedModules = session.modified.model.modules || [];
             for (const graph of modifiedModules) {
-                if (graph.name === name || graph.identifier === name) {
-                    return graph;
+                const result = this._findGraphByName(graph, name);
+                if (result) {
+                    return result;
                 }
             }
         }
         return session.modified.getGraph(0);
+    }
+
+    _findGraphByName(graph, name) {
+        if (!graph) {
+            return null;
+        }
+        if (graph.name === name || graph.identifier === name) {
+            return graph;
+        }
+        if (Array.isArray(graph.nodes)) {
+            for (const node of graph.nodes) {
+                const items = [...(node.attributes || []), ...(node.blocks || [])];
+                for (const item of items) {
+                    if (item.value) {
+                        if (item.type === 'graph') {
+                            const result = this._findGraphByName(item.value, name);
+                            if (result) {
+                                return result;
+                            }
+                        } else if (item.type === 'graph[]' && Array.isArray(item.value)) {
+                            for (const subGraph of item.value) {
+                                const result = this._findGraphByName(subGraph, name);
+                                if (result) {
+                                    return result;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     // render the graph in the pane
@@ -2735,7 +2768,7 @@ view.View = class {
         if (!this._model || !this._editSession) {
             return false;
         }
-        if(canExportOnnx(this._model)) {
+        if (canExportOnnx(this._model)) {
             return true;
         }
         return isAmbapbCheckpoint(this._model) && canExportCheckpoint(this._model);
@@ -2930,7 +2963,7 @@ view.View = class {
             });
             await this._host.export(file, blob);
         }
-    } 
+    }
 
     showModelProperties() {
         if (!this._model) {
@@ -3007,7 +3040,7 @@ view.View = class {
         } catch (error) {
             this.error(error, 'Error showing target properties.', null);
         }
-    } 
+    }
 
     showNodeProperties(node, source) {
         if (node) {
@@ -3135,9 +3168,9 @@ view.Menu = class {
             ['Up', '&#x2191;'], ['Down', '&#x2193;'],
         ]);
         this._keydown = (e) => {
-             // fix to tell the menu not to handle backspace
-             // browser space is naturally to go to the previous tab. We usually override it by doing nothing, but now, 
-             // we make sure _keydown just returns and doesn't handle backspace
+            // fix to tell the menu not to handle backspace
+            // browser space is naturally to go to the previous tab. We usually override it by doing nothing, but now, 
+            // we make sure _keydown just returns and doesn't handle backspace
             const active = this._document.activeElement;
             const tag = active ? active.tagName : '';
             if (tag === 'INPUT' || tag === 'TEXTAREA' || (active && active.isContentEditable)) {
@@ -3175,7 +3208,7 @@ view.Menu = class {
                 } else {
                     this._stack = [this];
                     if (this._root.length > 1) {
-                        this._root =  [this];
+                        this._root = [this];
                         this._rebuild();
                     }
                     this._update();
@@ -4082,9 +4115,10 @@ view.Graph = class extends grapher.Graph {
         return obj;
     }
 
-    createGraph(graph, type, blockKey) {
+    createGraph(graph, type, blockKey, hostNodeValue) {
         const obj = new view.Node(this, graph, type || 'graph', blockKey);
         obj.name = (this._nodeKey++).toString();
+        obj.hostNodeValue = hostNodeValue || null;
         this._table.set(graph, obj);
         return obj;
     }
@@ -5183,7 +5217,7 @@ view.Node = class extends grapher.Node {
     _add(value, type) {
         const node = (type === 'graph' || type === 'function') ? { type: value } : value;
         const options = this.context.options;
-        const header =  this.header();
+        const header = this.header();
         const category = node.type && node.type.category ? node.type.category : '';
         if (node.type && typeof node.type.name !== 'string' || !node.type.name.split) { // #416
             const error = new view.Error(`Unsupported node type '${JSON.stringify(node.type.name)}'.`);
@@ -5212,7 +5246,7 @@ view.Node = class extends grapher.Node {
             this.definition.content = '\u25CB';
             this.definition.tooltip = 'Show Graph';
             this.definition.padding = 4;
-            this.definition.on('click', async () => await this.context.view.pushTarget(value, null));
+            this.definition.on('click', async () => await this.context.view.pushTarget(value, this.hostNodeValue));
             const blockKey = this._blockKey;
             const expanded = this.context.isBlockExpanded(blockKey);
             const icon = expanded ? '\u2212' : '+';
@@ -5304,10 +5338,10 @@ view.Node = class extends grapher.Node {
                 const type = argument.type;
                 if (argument.visible !== false &&
                     ((type === 'graph' && argument.value) ||
-                    (type === 'object' && isObject(argument.value)) ||
-                    (type === 'object[]' && Array.isArray(argument.value) && argument.value.length > 0) ||
-                    type === 'function' ||
-                    (type === 'function[]' && Array.isArray(argument.value) && argument.value.length > 0))) {
+                        (type === 'object' && isObject(argument.value)) ||
+                        (type === 'object[]' && Array.isArray(argument.value) && argument.value.length > 0) ||
+                        type === 'function' ||
+                        (type === 'function[]' && Array.isArray(argument.value) && argument.value.length > 0))) {
                     objects.push(argument);
                 } else if (options.weights && argument.visible !== false && argument.type !== 'attribute' && Array.isArray(argument.value) && argument.value.length === 1 && argument.value[0].initializer) {
                     const item = this.context.createArgument(argument);
@@ -5327,8 +5361,8 @@ view.Node = class extends grapher.Node {
                 const type = argument.type;
                 if (argument.visible !== false &&
                     ((type === 'graph' && argument.value) ||
-                    (type === 'object' && argument.value) ||
-                    ((type === 'object[]' || type === 'function' || type === 'function[]') && Array.isArray(argument.value) && argument.value.length > 0))) {
+                        (type === 'object' && argument.value) ||
+                        ((type === 'object[]' || type === 'function' || type === 'function[]') && Array.isArray(argument.value) && argument.value.length > 0))) {
                     objects.push(argument);
                 } else if (options.attributes && argument.visible !== false) {
                     const item = attribute(argument);
@@ -5341,8 +5375,8 @@ view.Node = class extends grapher.Node {
                 const type = argument.type;
                 if (argument.visible !== false &&
                     ((type === 'graph' && argument.value) ||
-                    (type === 'object' && isObject(argument.value)) ||
-                    ((type === 'object[]' || type === 'function' || type === 'function[]') && Array.isArray(argument.value) && argument.value.length > 0))) {
+                        (type === 'object' && isObject(argument.value)) ||
+                        ((type === 'object[]' || type === 'function' || type === 'function[]') && Array.isArray(argument.value) && argument.value.length > 0))) {
                     objects.push(argument);
                 }
             }
@@ -5357,20 +5391,20 @@ view.Node = class extends grapher.Node {
             const hostEntityId = this._blockHostEntityId();
             const blockKey = this.context.blockKey(hostEntityId, argument.name);
             if (type === 'graph' && blockKey && this.context.isBlockExpanded(blockKey)) {
-                content = this.context.createGraph(argument.value, 'graph', blockKey);
+                content = this.context.createGraph(argument.value, 'graph', blockKey, this.value);
                 content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks, blockKey));
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else if (type === 'graph' || type === 'function') {
-                content = this.context.createGraph(argument.value, type, blockKey);
+                content = this.context.createGraph(argument.value, type, blockKey, this.value);
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else if (type === 'graph[]') {
                 content = argument.value.map((value, index) => {
                     const itemKey = this.context.blockKey(hostEntityId, `${argument.name}[${index}]`);
-                    return this.context.createGraph(value, 'graph', itemKey);
+                    return this.context.createGraph(value, 'graph', itemKey, this.value);
                 });
                 const item = list().argument(argument.name, content);
                 list().add(item);
@@ -8024,7 +8058,7 @@ view.ModelSidebar = class extends view.ObjectSidebar {
                 this.addArgument(argument.name, argument, 'attribute');
             }
         }
-       
+
         if (this._view._canMergeOnnx()) {
             this.addSection('Actions');
             const item = this.addProperty('merge', 'Merge ONNX Graph…');
@@ -9558,7 +9592,7 @@ markdown.Generator = class {
             if (match) {
                 source = source.substring(match[0].length);
                 prevChar = match[0].slice(-1);
-                tokens.push({ type: 'text' , text: inRawBlock ? match[0] : this._escape(match[0]) });
+                tokens.push({ type: 'text', text: inRawBlock ? match[0] : this._escape(match[0]) });
                 continue;
             }
             throw new Error(`Unexpected '${source.charCodeAt(0)}'.`);
@@ -9572,7 +9606,7 @@ markdown.Generator = class {
                 case 'paragraph':
                 case 'text':
                 case 'heading': {
-                    token.tokens  = this._tokenizeInline(token.text, links, false, false, '');
+                    token.tokens = this._tokenizeInline(token.text, links, false, false, '');
                     break;
                 }
                 case 'table': {
@@ -10823,7 +10857,7 @@ view.ModelFactoryService = class {
                 throw new view.Error("Archive contains no model files.");
             }
         }
-        const regex = async() => {
+        const regex = async () => {
             if (stream) {
                 const entries = [
                     { name: 'Unity metadata', value: /fileFormatVersion:/ },
@@ -10872,7 +10906,7 @@ view.ModelFactoryService = class {
                     { name: 'ModelScope configuration', tags: ['framework', 'task'] }, // https://github.com/modelscope/modelscope
                     { name: 'Tokenizer data', tags: ['<eos>', '<bos>'] },
                     { name: 'Jupyter Notebook data', tags: ['cells', 'nbformat'] },
-                    { name: 'Kaggle credentials', tags: ['username','key'] },
+                    { name: 'Kaggle credentials', tags: ['username', 'key'] },
                     { name: '.NET runtime configuration', tags: ['runtimeOptions.configProperties'] },
                     { name: '.NET dependency manifest', tags: ['runtimeTarget', 'targets', 'libraries'] },
                     { name: 'GuitarML NeuralPi model data', tags: ['model_data', 'state_dict'] },
@@ -10957,16 +10991,16 @@ view.ModelFactoryService = class {
             const tags = await context.tags('pb+');
             if (Object.keys(tags).length > 0) {
                 const formats = [
-                    { name: 'sentencepiece.ModelProto data', tags: [[1,[[1,2],[2,5],[3,0]]],[2,[[1,2],[2,2],[3,0],[4,0],[5,2],[6,0],[7,2],[10,5],[16,0],[40,0],[41,0],[42,0],[43,0]]],[3,[]],[4,[]],[5,[]]] }, // https://github.com/google/sentencepiece/blob/master/src/sentencepiece_model.proto
-                    { name: 'mediapipe.BoxDetectorIndex data', tags: [[1,[[1,[[1,[[1,5],[2,5],[3,5],[4,5],[6,0],[7,5],[8,5],[10,5],[11,0],[12,0]]],[2,5],[3,[]]]],[2,false],[3,false],[4,false],[5,false]]],[2,false],[3,false]] }, // https://github.com/google-ai-edge/mediapipe/blob/2b5a50fff37f79db8103dbd88f552c1a9be31e51/mediapipe/util/tracking/box_detector.proto
-                    { name: 'third_party.tensorflow.python.keras.protobuf.SavedMetadata data', tags: [[1,[[1,[[1,0],[2,0]]],[2,0],[3,2],[4,2],[5,2]]]] },
-                    { name: 'pblczero.Net data', tags: [[1,5],[2,2],[3,[[1,0],[2,0],[3,0]],[10,[[1,[]],[2,[]],[3,[]],[4,[]],[5,[]],[6,[]]]],[11,[]]]] }, // https://github.com/LeelaChessZero/lczero-common/blob/master/proto/net.proto
-                    { name: 'chrome_browser_media.PreloadedData', tags: [[1,2]], identifier: 'preloaded_data.pb' }, // https://github.com/kiwibrowser/src/blob/86afd150b847c9dd6f9ad3faddee1a28b8c9b23b/chrome/browser/media/media_engagement_preload.proto#L9
-                    { name: 'mindspore.irpb.Checkpoint', tags: [[1,[[1,2],[2,[[1,0],[2,2],[3,2]]]]]] }, // https://github.com/mindspore-ai/mindspore/blob/master/mindspore/ccsrc/utils/checkpoint.proto
-                    { name: 'optimization_guide.proto.PageTopicsOverrideList data', tags: [[1,[[1,2],[2,[]]]]] }, // https://github.com/chromium/chromium/blob/main/components/optimization_guide/proto/page_topics_override_list.proto
-                    { name: 'optimization_guide.proto.ModelInfo data', tags: [[1,0],[2,0],[4,0],[6,false],[7,[]],[9,0]] }, // https://github.com/chromium/chromium/blob/22b0d711657b451b61d50dd2e242b3c6e38e6ef5/components/optimization_guide/proto/models.proto#L80
-                    { name: 'Horizon binary model', tags: [[1,0],[2,0],[5,[[7,2],[8,2]]],[6,[[1,[[1,2],[2,2]]]]]] }, // https://github.com/HorizonRDK/hobot_dnn
-                    { name: 'TensorFlow Profiler data', tags: [[1,[[2,2],[3,[]],[4,[]]]]] }, // https://github.com/tensorflow/tensorflow/blob/master/third_party/xla/third_party/tsl/tsl/profiler/protobuf/xplane.proto
+                    { name: 'sentencepiece.ModelProto data', tags: [[1, [[1, 2], [2, 5], [3, 0]]], [2, [[1, 2], [2, 2], [3, 0], [4, 0], [5, 2], [6, 0], [7, 2], [10, 5], [16, 0], [40, 0], [41, 0], [42, 0], [43, 0]]], [3, []], [4, []], [5, []]] }, // https://github.com/google/sentencepiece/blob/master/src/sentencepiece_model.proto
+                    { name: 'mediapipe.BoxDetectorIndex data', tags: [[1, [[1, [[1, [[1, 5], [2, 5], [3, 5], [4, 5], [6, 0], [7, 5], [8, 5], [10, 5], [11, 0], [12, 0]]], [2, 5], [3, []]]], [2, false], [3, false], [4, false], [5, false]]], [2, false], [3, false]] }, // https://github.com/google-ai-edge/mediapipe/blob/2b5a50fff37f79db8103dbd88f552c1a9be31e51/mediapipe/util/tracking/box_detector.proto
+                    { name: 'third_party.tensorflow.python.keras.protobuf.SavedMetadata data', tags: [[1, [[1, [[1, 0], [2, 0]]], [2, 0], [3, 2], [4, 2], [5, 2]]]] },
+                    { name: 'pblczero.Net data', tags: [[1, 5], [2, 2], [3, [[1, 0], [2, 0], [3, 0]], [10, [[1, []], [2, []], [3, []], [4, []], [5, []], [6, []]]], [11, []]]] }, // https://github.com/LeelaChessZero/lczero-common/blob/master/proto/net.proto
+                    { name: 'chrome_browser_media.PreloadedData', tags: [[1, 2]], identifier: 'preloaded_data.pb' }, // https://github.com/kiwibrowser/src/blob/86afd150b847c9dd6f9ad3faddee1a28b8c9b23b/chrome/browser/media/media_engagement_preload.proto#L9
+                    { name: 'mindspore.irpb.Checkpoint', tags: [[1, [[1, 2], [2, [[1, 0], [2, 2], [3, 2]]]]]] }, // https://github.com/mindspore-ai/mindspore/blob/master/mindspore/ccsrc/utils/checkpoint.proto
+                    { name: 'optimization_guide.proto.PageTopicsOverrideList data', tags: [[1, [[1, 2], [2, []]]]] }, // https://github.com/chromium/chromium/blob/main/components/optimization_guide/proto/page_topics_override_list.proto
+                    { name: 'optimization_guide.proto.ModelInfo data', tags: [[1, 0], [2, 0], [4, 0], [6, false], [7, []], [9, 0]] }, // https://github.com/chromium/chromium/blob/22b0d711657b451b61d50dd2e242b3c6e38e6ef5/components/optimization_guide/proto/models.proto#L80
+                    { name: 'Horizon binary model', tags: [[1, 0], [2, 0], [5, [[7, 2], [8, 2]]], [6, [[1, [[1, 2], [2, 2]]]]]] }, // https://github.com/HorizonRDK/hobot_dnn
+                    { name: 'TensorFlow Profiler data', tags: [[1, [[2, 2], [3, []], [4, []]]]] }, // https://github.com/tensorflow/tensorflow/blob/master/third_party/xla/third_party/tsl/tsl/profiler/protobuf/xplane.proto
                 ];
                 const match = (tags, schema) => {
                     for (const [key, inner] of schema) {
@@ -11225,8 +11259,8 @@ view.ModelFactoryService = class {
         let accept = false;
         for (const extension of this._patterns) {
             if ((typeof extension === 'string' &&
-                    ((extension !== '' && identifier.endsWith(extension)) ||
-                     (extension === '' && identifier.indexOf('.') === -1))) ||
+                ((extension !== '' && identifier.endsWith(extension)) ||
+                    (extension === '' && identifier.indexOf('.') === -1))) ||
                 (extension instanceof RegExp && extension.exec(identifier))) {
                 accept = true;
                 break;
@@ -11338,8 +11372,8 @@ view.ModelFactoryService = class {
             const modules = ['./message', './onnx', './pytorch', './tflite', './mlnet', './onnx-proto', './onnx-schema', './tflite-schema'];
             const assets = ['onnx-metadata.json', 'pytorch-metadata.json', 'tflite-metadata.json'];
             await Promise.all([
-                ...modules.map((module) => this._host.require(module).catch(() => {})),
-                ...assets.map((asset) => this._host.asset(asset).catch(() => {})),
+                ...modules.map((module) => this._host.require(module).catch(() => { })),
+                ...assets.map((asset) => this._host.asset(asset).catch(() => { })),
             ]);
         }
     }
@@ -11432,14 +11466,14 @@ const findBoundaryNodes = (graph, selectedNodes) => {
     const selectedNodesSet = new Set(selectedNodes);
     const beginNodes = [];
     const endNodes = [];
-    
+
     const argumentValues = (argument) => {
         if (!argument || argument.value === null || argument.value === undefined) {
             return [];
         }
         return Array.isArray(argument.value) ? argument.value : [argument.value];
     };
-    
+
     const internalValues = new Set();
     for (const node of selectedNodes) {
         for (const output of node.outputs || []) {
@@ -11450,7 +11484,7 @@ const findBoundaryNodes = (graph, selectedNodes) => {
             }
         }
     }
-    
+
     for (const node of selectedNodes) {
         let isBegin = false;
         for (const input of node.inputs || []) {
@@ -11465,12 +11499,12 @@ const findBoundaryNodes = (graph, selectedNodes) => {
         if (isBegin) {
             beginNodes.push(node);
         }
-        
+
         let isEnd = false;
         for (const output of node.outputs || []) {
             for (const val of argumentValues(output)) {
                 if (!val || !val.name) continue;
-                const isGraphOutput = (graph.outputs || []).some(o => 
+                const isGraphOutput = (graph.outputs || []).some(o =>
                     argumentValues(o).some(v => v && v.name === val.name)
                 );
                 if (isGraphOutput) {
@@ -11490,7 +11524,7 @@ const findBoundaryNodes = (graph, selectedNodes) => {
             endNodes.push(node);
         }
     }
-    
+
     if (beginNodes.length === 0 && selectedNodes.length > 0) {
         beginNodes.push(...selectedNodes);
     }
