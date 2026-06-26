@@ -115,6 +115,7 @@ describe('UserDefCall and boundary selection', () => {
         
         // Mock the UserDefSubgraph creation
         const subGraphId = genUniqueNodeName('userdefsubgraph', graph);
+        extracted.name = subGraphId;
         const callNodeName = genUniqueNodeName('userDefCall', graph);
         
         const userDefSubgraphNode = {

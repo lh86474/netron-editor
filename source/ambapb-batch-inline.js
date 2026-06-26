@@ -134,7 +134,7 @@ const getCompiledGraphFromNode = (node) => {
     if (!node) {
         return null;
     }
-    const attrNames = node.type?.name === FRAG_SUBGRAPH_OP
+    const attrNames = (node.type?.name === FRAG_SUBGRAPH_OP || node.type?.name === 'UserDefSubgraph')
         ? [COMPILED_PRIM_GRAPH_ATTR, FRAG_SUBGRAPH_GRAPH_ATTR]
         : [COMPILED_PRIM_GRAPH_ATTR];
     for (const name of attrNames) {
@@ -165,6 +165,16 @@ const graphIdMatches = (rootGraph, graphId) => {
 };
 
 const findBatchCallTargetInNode = (hostNode, graphId) => {
+    if (hostNode && hostNode.name === graphId) {
+        const compiled = getCompiledGraphFromNode(hostNode);
+        if (compiled) {
+            return {
+                fragSubgraphNode: hostNode,
+                subGraph: compiled,
+                graphId
+            };
+        }
+    }
     const compiled = getCompiledGraphFromNode(hostNode);
     if (!compiled) {
         return null;
@@ -183,7 +193,7 @@ const findBatchCallTargetInNode = (hostNode, graphId) => {
 // This is the lookup step
 // confirm node is batchcall, read graph_id, scan sibling nodes for frag subgraph
 export const resolveBatchCallTarget = (graph, batchCallNode) => {
-    if (!graph || !batchCallNode || batchCallNode.type?.name !== BATCH_CALL_OP) {
+    if (!graph || !batchCallNode || (batchCallNode.type?.name !== BATCH_CALL_OP && batchCallNode.type?.name !== 'UserDefCall')) {
         return null;
     }
     const graphIdAttr = getNodeAttribute(batchCallNode, 'graph_id');
@@ -192,7 +202,7 @@ export const resolveBatchCallTarget = (graph, batchCallNode) => {
         return null;
     }
     for (const node of graph.nodes || []) {
-        if (node.type?.name !== FRAG_SUBGRAPH_OP) {
+        if (node.type?.name !== FRAG_SUBGRAPH_OP && node.type?.name !== 'UserDefSubgraph') {
             continue;
         }
         const target = findBatchCallTargetInNode(node, graphId);
@@ -201,7 +211,7 @@ export const resolveBatchCallTarget = (graph, batchCallNode) => {
         }
     }
     for (const node of graph.nodes || []) {
-        if (node.type?.name === FRAG_SUBGRAPH_OP) {
+        if (node.type?.name === FRAG_SUBGRAPH_OP || node.type?.name === 'UserDefSubgraph') {
             continue;
         }
         const target = findBatchCallTargetInNode(node, graphId);
@@ -442,7 +452,7 @@ const expandSingleBatchCall = (graph, batchCallName) => {
         return null;
     }
     const batchCallNode = graph.nodes[batchIndex];
-    if (batchCallNode.type?.name !== BATCH_CALL_OP) {
+    if (batchCallNode.type?.name !== BATCH_CALL_OP && batchCallNode.type?.name !== 'UserDefCall') {
         return null;
     }
     const target = resolveBatchCallTarget(graph, batchCallNode);
@@ -578,7 +588,7 @@ export const applyBatchInlineExpansions = (graph, expandedBatchCallNames, graphI
     let displayGraph = cloneGraph(graph);
     const inlinedNodeNames = [];
     const batchNames = Array.from(expandedBatchCallNames).filter((name) =>
-        (displayGraph.nodes || []).some((node) => node.name === name && node.type?.name === BATCH_CALL_OP)
+        (displayGraph.nodes || []).some((node) => node.name === name && (node.type?.name === BATCH_CALL_OP || node.type?.name === 'UserDefCall'))
     );
     for (const batchName of batchNames) {
         const result = expandSingleBatchCall(displayGraph, batchName);
@@ -593,5 +603,5 @@ export const applyBatchInlineExpansions = (graph, expandedBatchCallNames, graphI
 };
 
 export const isBatchCallNode = (node) => {
-    return Boolean(node && node.type && node.type.name === BATCH_CALL_OP);
+    return Boolean(node && node.type && (node.type.name === BATCH_CALL_OP || node.type.name === 'UserDefCall'));
 };

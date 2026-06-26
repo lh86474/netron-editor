@@ -1387,7 +1387,7 @@ view.View = class {
         const node = nodeView.value;
 
         const isUserDefSelected = this._userDefSelectedNodes && this._userDefSelectedNodes.has(node.name);
-        if (node && node.type?.name !== 'BatchCall') {
+        if (node && node.type?.name !== 'BatchCall' && node.type?.name !== 'UserDefCall') {
             items.push({
                 label: isUserDefSelected ? 'Deselect Node' : 'Select Node',
                 action: () => {
@@ -1496,10 +1496,11 @@ view.View = class {
                 action: () => this._toggleBatchInlineExpansion(nodeName)
             });
         } else {
+            const noMatchLabel = node.type?.name === 'UserDefCall' ? 'UserDefSubgraph' : 'FragSubgraph';
             items.push({
                 label: canExpand
                     ? 'Expand Subgraph Inline'
-                    : 'Expand Subgraph Inline (no matching FragSubgraph)',
+                    : `Expand Subgraph Inline (no matching ${noMatchLabel})`,
                 enabled: canExpand,
                 action: () => this._toggleBatchInlineExpansion(nodeName)
             });
@@ -1699,7 +1700,7 @@ view.View = class {
 
             // 1. Identify FragSubgraphs for non-inlined BatchCalls
             for (const node of extracted.nodes || []) {
-                if (node.type?.name === 'BatchCall') {
+                if (node.type?.name === 'BatchCall' || node.type?.name === 'UserDefCall') {
                     const target = resolveBatchCallTarget(workingGraph, node);
                     if (target && target.fragSubgraphNode) {
                         const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
@@ -1780,8 +1781,8 @@ view.View = class {
             const { beginNodes, endNodes } = findBoundaryNodes(sourceGraph, selectedNodes);
             let extracted = extractSubgraph(sourceGraph, beginNodes, endNodes);
             extracted = stripInlineExpansionPrefixes(extracted);
-            
             const subGraphId = genUniqueNodeName('userdefsubgraph', sourceGraph);
+            extracted.name = subGraphId;
             const callNodeName = genUniqueNodeName('userDefCall', sourceGraph);
             
             const userDefSubgraphNode = {

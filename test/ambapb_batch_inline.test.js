@@ -311,4 +311,74 @@ describe('ambapb batch inline expansion', () => {
 
         assert.equal(inner.description, sourceInner.description);
     });
+
+    it('supports inline-expanding UserDefCall nodes referencing UserDefSubgraph', () => {
+        const subgraphName = 'userdefsubgraph_0';
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: subgraphName,
+                    type: { name: 'UserDefSubgraph' },
+                    attributes: [{
+                        name: 'graph',
+                        type: 'graph',
+                        value: {
+                            name: subgraphName,
+                            inputs: [{ name: 'sub_input_0', value: [tensor('sub_input_0')] }],
+                            outputs: [{ name: 'sub_output_0', value: [tensor('sub_output_0')] }],
+                            nodes: [{
+                                name: 'inner_nvp',
+                                type: { name: 'CVFlowNVP' },
+                                attributes: [],
+                                inputs: [{ name: 'input0', value: [tensor('sub_input_0')] }],
+                                outputs: [{ name: 'output', value: [tensor('sub_output_0')] }]
+                            }]
+                        }
+                    }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'user_def_call',
+                    type: { name: 'UserDefCall' },
+                    attributes: [
+                        { name: 'graph_id', type: 'string', value: subgraphName },
+                        {
+                            name: 'src_mappings',
+                            type: 'string',
+                            value: JSON.stringify([{ id: 'sub_input_0' }])
+                        },
+                        {
+                            name: 'out_mappings',
+                            type: 'string',
+                            value: JSON.stringify([{ id: 'sub_output_0' }])
+                        }
+                    ],
+                    inputs: [{ name: 'input0', value: [tensor('producer_out')] }],
+                    outputs: [{ name: 'output', value: [tensor('batch_out')] }]
+                }
+            ]
+        };
+
+        const userDefCall = graph.nodes.find((node) => node.name === 'user_def_call');
+        const target = resolveBatchCallTarget(graph, userDefCall);
+        assert.ok(target);
+        assert.equal(target.graphId, subgraphName);
+        assert.equal(target.fragSubgraphNode.name, subgraphName);
+        assert.equal(target.subGraph.name, subgraphName);
+        assert.equal(canExpandBatchCall(graph, userDefCall), true);
+
+        const expanded = applyBatchInlineExpansions(graph, new Set(['user_def_call']));
+        const nodeNames = expanded.nodes.map((node) => node.name);
+        assert.ok(!nodeNames.includes('user_def_call'));
+        assert.ok(nodeNames.includes('inline::user_def_call::inner_nvp'));
+        
+        const inner = expanded.nodes.find((node) => node.name === 'inline::user_def_call::inner_nvp');
+        assert.ok(inner);
+        assert.equal(inner.inputs[0].value[0].name, 'producer_out');
+    });
 });
+
