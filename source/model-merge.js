@@ -114,10 +114,10 @@ const convertOportToValueInfo = (name, oport) => {
     console.log('DEBUG OPORT:', JSON.stringify(oport, null, 2));
     const valueInfo = new onnx.ValueInfoProto();
     valueInfo.name = name;
-    
+
     const elemType = getElemType(oport && oport['data-format'] ? oport['data-format'] : (oport && oport.dataFormat));
     const dims = getDimensions(oport && oport.dimension);
-    
+
     const type = new onnx.TypeProto();
     const tensor = new onnx.TypeProto.Tensor();
     tensor.elem_type = elemType;
@@ -132,7 +132,7 @@ const convertOportToValueInfo = (name, oport) => {
     }
     type.tensor_type = tensor;
     valueInfo.type = type;
-    
+
     return valueInfo;
 };
 
@@ -157,7 +157,7 @@ const extractCheckpointIO = (modelProto) => {
     }
     const primitives = checkpoint.primGraph.primitives || [];
     const raw = checkpoint.primGraph.raw || {};
-    
+
     // Find inputs
     const inputFallbackId = (primitives.find((primitive) => primitive.type === 'input') || {}).id;
     const graphInputId = raw.graph_input || inputFallbackId;
@@ -168,7 +168,7 @@ const extractCheckpointIO = (modelProto) => {
             inputs.push(convertOportToValueInfo(inputPrim.id, inputPrim.oports[0]));
         }
     }
-    
+
     // Find outputs
     const outputFallbackId = (primitives.find((primitive) => primitive.type === 'output') || {}).id;
     const graphOutputId = raw.graph_output || outputFallbackId;
@@ -180,7 +180,7 @@ const extractCheckpointIO = (modelProto) => {
             outputs.push(convertOportToValueInfo(outputPrim.id, oport));
         }
     }
-    
+
     return { inputs, outputs };
 };
 
@@ -259,7 +259,7 @@ const inferTypeFromGraph = (graph, name, preferProducer) => {
                 }
             }
         }
-    // downstream
+        // downstream
     } else {
         for (const node of graph.node || []) {
             for (const inputName of node.input || []) {
@@ -918,25 +918,25 @@ export const mergeModelProtos = (upstreamProto, downstreamProto, options = {}) =
 export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = {}) => {
     const mapping = options.mapping || [];
     const prefix = options.downstreamPrefix || DEFAULT_DOWNSTREAM_PREFIX;
-    
+
     // Parse checkpoint data
     const upstreamCheckpoint = parseCheckpoint(upstreamProto);
     const downstreamCheckpoint = parseCheckpoint(downstreamProto);
-    
+
     if (!upstreamCheckpoint || !downstreamCheckpoint) {
         throw new Error('Both models must be valid Amba checkpoints to merge.');
     }
-    
+
     // Deep clone primitive graphs to avoid modifying original objects
     const upstreamPrims = JSON.parse(JSON.stringify(upstreamCheckpoint.primGraph.primitives || []));
     const downstreamPrims = JSON.parse(JSON.stringify(downstreamCheckpoint.primGraph.primitives || []));
-    
+
     // 1. Rename all downstream primitives to avoid collision with upstream primitives
     const renameMap = new Map();
     for (const p of downstreamPrims) {
         renameMap.set(p.id, `${prefix}${p.id}`);
     }
-    
+
     // 2. Resolve mapped connections
     const mappingConnections = new Map();
     for (const entry of mapping) {
@@ -949,7 +949,7 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
         }
         mappingConnections.set(entry.downstream, { id: actualUpstreamId, port: actualUpstreamPort });
     }
-    
+
     // 3. Process downstream primitives (renaming and applying mapped connections)
     for (const p of downstreamPrims) {
         // Rename primitive itself
@@ -960,7 +960,7 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
         if (p.mangledId) {
             p.mangledId = renameMap.get(p.mangledId) || p.mangledId;
         }
-        
+
         // Rewrite sources
         if (Array.isArray(p.sources)) {
             for (const source of p.sources) {
@@ -975,7 +975,7 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
                 }
             }
         }
-        
+
         // Rewrite additionalDepPrimIds in oports
         if (Array.isArray(p.oports)) {
             for (const oport of p.oports) {
@@ -988,17 +988,17 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
             }
         }
     }
-    
+
     // 4. Filter out mapped input/output primitives
     const mappedUpstreamOutputs = new Set(mapping.map((entry) => entry.upstream));
     const mappedDownstreamInputs = new Set(mapping.map((entry) => entry.downstream));
-    
+
     const filteredUpstreamPrims = upstreamPrims.filter((p) => !mappedUpstreamOutputs.has(p.id));
     const filteredDownstreamPrims = downstreamPrims.filter((p) => !mappedDownstreamInputs.has(p.id));
-    
+
     // 5. Combine primitives into merged list
     const mergedPrims = [...filteredUpstreamPrims, ...filteredDownstreamPrims];
-    
+
     // 6. Enforce correct order of vas-sequence-number
     let nextSeq = 1;
     for (const p of mergedPrims) {
@@ -1009,7 +1009,7 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
             p.vasSequenceNumber = nextSeq++;
         }
     }
-    
+
     // 7. Create raw combined primitive graph
     const upstreamRaw = upstreamCheckpoint.primGraph.raw || {};
     const downstreamRaw = downstreamCheckpoint.primGraph.raw || {};
@@ -1051,7 +1051,7 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
         mergedCompiledGraph = downstreamCompiled;
         normalizeGraphReferences(mergedCompiledGraph);
     }
-    
+
     // 8. Build merged model proto (containing a single CVFlowNVP node)
     const mergedProto = new onnx.ModelProto();
     mergedProto.ir_version = upstreamProto.ir_version > downstreamProto.ir_version ? upstreamProto.ir_version : downstreamProto.ir_version;
@@ -1064,17 +1064,17 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
         ...(upstreamProto.metadata_props || []).filter((prop) => prop && prop.key !== 'metagraph_type'),
         ...(downstreamProto.metadata_props || []).filter((prop) => prop && prop.key !== 'metagraph_type')
     ];
-    
+
     const mergedGraph = new onnx.GraphProto();
     mergedGraph.name = upstreamProto.graph.name || 'merged_checkpoint_graph';
-    
+
     // Set standard ONNX graph input and output matching the merged primitives
     const mergedInputs = [];
     const upstreamInputs = upstreamProto.graph.input || [];
     for (const input of upstreamInputs) {
         mergedInputs.push(input);
     }
-    
+
     const mergedOutputs = [];
     const downstreamOutputs = downstreamProto.graph.output || [];
     for (const output of downstreamOutputs) {
@@ -1083,17 +1083,17 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
         renamedOutput.type = output.type;
         mergedOutputs.push(renamedOutput);
     }
-    
+
     mergedGraph.input = mergedInputs;
     mergedGraph.output = mergedOutputs;
-    
+
     // Create the wrapper CVFlowNVP node
     const wrapperNode = new onnx.NodeProto();
     wrapperNode.op_type = 'CVFlowNVP';
     wrapperNode.name = 'ambapb-prim-graph';
     wrapperNode.input = mergedInputs.map((val) => val.name);
     wrapperNode.output = mergedOutputs.map((val) => val.name);
-    
+
     // Set attributes on the CVFlowNVP node
     const primGraphAttr = new onnx.AttributeProto();
     primGraphAttr.name = 'prim_graph';
@@ -1104,22 +1104,22 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
     tensor.dims = [BigInt(rawDataBytes.length)];
     tensor.raw_data = rawDataBytes;
     primGraphAttr.t = tensor;
-    
+
     const attributesList = [primGraphAttr];
-    
+
     // Optional: merge prim_graph_imms
     if (upstreamCheckpoint.primGraphImmsAttribute || downstreamCheckpoint.primGraphImmsAttribute) {
         const immsAttr = new onnx.AttributeProto();
         immsAttr.name = 'prim_graph_imms';
         immsAttr.type = onnx.AttributeProto.AttributeType.TENSORS;
-        
+
         const upstreamTensors = upstreamCheckpoint.primGraphImmsAttribute && Array.isArray(upstreamCheckpoint.primGraphImmsAttribute.tensors) ? upstreamCheckpoint.primGraphImmsAttribute.tensors : [];
         const downstreamTensors = downstreamCheckpoint.primGraphImmsAttribute && Array.isArray(downstreamCheckpoint.primGraphImmsAttribute.tensors) ? downstreamCheckpoint.primGraphImmsAttribute.tensors : [];
         immsAttr.tensors = [...upstreamTensors, ...downstreamTensors];
         attributesList.push(immsAttr);
     }
     // append merged compiled graph to the attributes list of the CVFlowNVP node
-    
+
     if (mergedCompiledGraph) {
         const compiledAttr = new onnx.AttributeProto();
         compiledAttr.name = 'compiled_prim_graph';
@@ -1130,14 +1130,14 @@ export const mergeCheckpointModels = (upstreamProto, downstreamProto, options = 
     wrapperNode.attribute = attributesList;
     mergedGraph.node = [wrapperNode];
     mergedProto.graph = mergedGraph;
-    
+
     return mergedProto;
 };
 
 export const tryMergeOnnxModels = (upstreamProto, downstreamProto, options = {}) => {
     const isUpstreamCheckpoint = detectCheckpoint(upstreamProto);
     const isDownstreamCheckpoint = detectCheckpoint(downstreamProto);
-    
+
     if (isUpstreamCheckpoint !== isDownstreamCheckpoint) {
         return {
             ok: false,
@@ -1145,7 +1145,7 @@ export const tryMergeOnnxModels = (upstreamProto, downstreamProto, options = {})
             warnings: []
         };
     }
-    
+
     const validation = validateMerge(upstreamProto, downstreamProto, options.mapping || [], options);
     if (!validation.ok) {
         return { ok: false, errors: validation.errors, warnings: validation.warnings };

@@ -21,7 +21,9 @@ export const READ_ONLY_SHELL_ATTRIBUTES = new Set([
 export const EDITABLE_SHELL_OP_TYPES = new Set([
     CVFLOW_NVP_OP_TYPE,
     'FragSubgraph',
-    'BatchCall'
+    'BatchCall',
+    'UserDefCall',
+    'UserDefSubgraph'
 ]);
 
 export function isCVFlowNVPNode(node) {

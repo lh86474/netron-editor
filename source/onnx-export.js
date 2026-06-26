@@ -37,7 +37,8 @@ const attributeTypeMap = {
     'float[]': { type: 6, field: 'floats' },
     'int64[]': { type: 7, field: 'ints' },
     'int[]': { type: 7, field: 'ints' },
-    'string[]': { type: 8, field: 'strings' }
+    'string[]': { type: 8, field: 'strings' },
+    'graph': { type: 5, field: 'g' }
 };
 
 // This function is a utility function that helps us get the name of some value
@@ -167,7 +168,7 @@ const encodeText = (value) => new TextEncoder().encode(value);
 // This builds the AttributeProto object
 // Refer to onnx docs for more info about attributeproto
 // We need to build this to match ONNX IR for export
-const buildAttributeProto = (name, type, value) => {
+const buildAttributeProto = (name, type, value, sourceProto) => {
     const mapping = attributeTypeMap[type] || attributeTypeMap['string'];
     const attribute = new onnx.AttributeProto();
     attribute.name = name;
@@ -185,6 +186,9 @@ const buildAttributeProto = (name, type, value) => {
         attribute.ints = Array.isArray(value) ? value.map((item) => typeof item === 'bigint' ? item : BigInt(item)) : [];
     } else if (mapping.field === 'strings') {
         attribute.strings = Array.isArray(value) ? value.map((item) => encodeText(String(item))) : [];
+    } else if (mapping.field === 'g') {
+        const nestedSourceProto = (sourceProto && sourceProto.graph) ? sourceProto : { graph: { name: (value && value.name) || '', node: [], input: [], output: [], initializer: [], value_info: [] } };
+        attribute.g = rebuildGraphProtoFromModified(value, nestedSourceProto);
     } else {
         throw new OnnxExportError(`Unsupported attribute type '${type}' for export.`);
     }
@@ -438,7 +442,7 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
         const modifiedNode = editSession.modified.getGraph(location.graphIndex).nodes[location.nodeIndex];
         const modifiedAttribute = (modifiedNode.attributes || [])[location.attributeIndex];
 
-        if (attribute.name === PRIM_GRAPH_ATTRIBUTE_NAME && typeof change.newValue ==='string') {
+        if (attribute.name === PRIM_GRAPH_ATTRIBUTE_NAME && typeof change.newValue === 'string') {
             const originalNode = originalProto.graph.node[location.nodeIndex];
             const originalAttribute = (originalNode.attribute || [])[location.attributeIndex];
             node.attribute[location.attributeIndex] =
@@ -489,7 +493,7 @@ const collectArgumentValueNames = (argument) => {
     return names;
 };
 
-const buildNodeProtoFromModified = (modifiedNode) => {
+const buildNodeProtoFromModified = (modifiedNode, sourceProto) => {
     const node = new onnx.NodeProto();
     node.name = modifiedNode.name || '';
     node.op_type = modifiedNode.type ? (modifiedNode.type.identifier || modifiedNode.type.name) : '';
@@ -505,7 +509,7 @@ const buildNodeProtoFromModified = (modifiedNode) => {
         node.output.push(...collectArgumentValueNames(output));
     }
     node.attribute = (modifiedNode.attributes || []).map((attribute) => (
-        buildAttributeProto(attribute.name, attribute.type, attribute.value)
+        buildAttributeProto(attribute.name, attribute.type, attribute.value, sourceProto)
     ));
     return node;
 };
@@ -521,7 +525,7 @@ const syncNodeInputsOutputs = (protoNode, modifiedNode) => {
     }
 };
 
-const syncNodeFromModified = (protoNode, modifiedNode) => {
+const syncNodeFromModified = (protoNode, modifiedNode, sourceProto) => {
     syncNodeInputsOutputs(protoNode, modifiedNode);
     protoNode.name = modifiedNode.name || '';
     protoNode.op_type = modifiedNode.type ? (modifiedNode.type.identifier || modifiedNode.type.name) : protoNode.op_type;
@@ -531,7 +535,7 @@ const syncNodeFromModified = (protoNode, modifiedNode) => {
         delete protoNode.domain;
     }
     protoNode.attribute = (modifiedNode.attributes || []).map((attribute) => (
-        buildAttributeProto(attribute.name, attribute.type, attribute.value)
+        buildAttributeProto(attribute.name, attribute.type, attribute.value, sourceProto)
     ));
 };
 
@@ -616,10 +620,10 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
     for (const modifiedNode of modifiedGraph.nodes || []) {
         const existing = originalByName.get(modifiedNode.name);
         if (existing) {
-            syncNodeFromModified(existing, modifiedNode);
+            syncNodeFromModified(existing, modifiedNode, sourceProto);
             nodes.push(existing);
         } else {
-            nodes.push(buildNodeProtoFromModified(modifiedNode));
+            nodes.push(buildNodeProtoFromModified(modifiedNode, sourceProto));
         }
     }
     const input = [];
@@ -678,7 +682,7 @@ const applyStructuralNodeChanges = (graph, originalProto, editSession) => {
             syncNodeInputsOutputs(existing, modifiedNode);
             rebuiltNodes.push(existing);
         } else {
-            rebuiltNodes.push(buildNodeProtoFromModified(modifiedNode));
+            rebuiltNodes.push(buildNodeProtoFromModified(modifiedNode, originalProto));
         }
     }
     graph.node = rebuiltNodes;

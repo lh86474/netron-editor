@@ -73,6 +73,7 @@
 .node-border-outer { fill: none; stroke: none; pointer-events: none; }
 
 .select > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
+.userdef-selected > .node.node-border { stroke: rgba(255, 140, 0, 0.95); stroke-width: 2px; }
 .edited:not(.range-begin):not(.range-end):not(.inline-expanded) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .range-begin:not(.edited) > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
 .range-end:not(.edited) > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
@@ -111,6 +112,7 @@
     .node line { stroke: #242424; }
 
     .select > .node.node-border { stroke: rgba(192, 0, 0, 0.8); }
+    .userdef-selected > .node.node-border { stroke: rgba(255, 140, 0, 0.95); stroke-width: 2px; }
     .edited:not(.range-begin):not(.range-end):not(.inline-expanded) > .node.node-border { stroke: rgba(192, 0, 0, 0.8); }
     .range-begin:not(.edited) > .node.node-border { stroke: rgba(80, 200, 80, 0.9); }
     .range-end:not(.edited) > .node.node-border { stroke: rgba(100, 160, 255, 0.9); }

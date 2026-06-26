@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, findValueConsumers } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint } from './ambapb.js';
 import {
@@ -76,6 +76,7 @@ view.View = class {
         this._rangeEnds = [];
         // expanded batch call names are here
         this._batchInlineExpanded = new Set();
+        this._userDefSelectedNodes = new Set();
         this._displayGraphCache = null;
         this._displayGraphRevision = 0;
         this._refreshPromise = null;
@@ -1384,6 +1385,30 @@ view.View = class {
             : 'Extract Subgraph';
         const items = [];
         const node = nodeView.value;
+
+        const isUserDefSelected = this._userDefSelectedNodes && this._userDefSelectedNodes.has(node.name);
+        if (node && node.type?.name !== 'BatchCall') {
+            items.push({
+                label: isUserDefSelected ? 'Deselect Node' : 'Select Node',
+                action: () => {
+                    if (isUserDefSelected) {
+                        this._userDefSelectedNodes.delete(node.name);
+                    } else {
+                        this._userDefSelectedNodes.add(node.name);
+                    }
+                    this._refreshUserDefSelectionStyles();
+                }
+            });
+            items.push({ separator: true });
+        }
+        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0) {
+            items.push({
+                label: 'Create UserDefCall',
+                action: () => this._createUserDefCall()
+            });
+            items.push({ separator: true });
+        }
+
         if (node._inlineExpanded) {
             const batchCallName = inlineExpansionBatchCallName(node);
             if (batchCallName) {
@@ -1438,6 +1463,14 @@ view.View = class {
     _batchCallContextMenuItems(nodeView) {
         const node = nodeView.value;
         const items = [];
+
+        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0) {
+            items.push({
+                label: 'Create UserDefCall',
+                action: () => this._createUserDefCall()
+            });
+            items.push({ separator: true });
+        }
 
         if (node._inlineExpanded) {
             const batchCallName = inlineExpansionBatchCallName(node);
@@ -1722,6 +1755,161 @@ view.View = class {
         } catch (error) {
             const message = error instanceof SubgraphExtractError ? error.message : (error && error.message ? error.message : error.toString());
             await this._host.message(message, true, 'OK');
+        }
+    }
+
+    _refreshUserDefSelectionStyles() {
+        const graph = this._activePaneGraph();
+        if (graph && graph.refreshUserDefSelectionStyles) {
+            graph.refreshUserDefSelectionStyles();
+        }
+    }
+
+    async _createUserDefCall() {
+        if (!this._editSession || !this._userDefSelectedNodes || this._userDefSelectedNodes.size === 0) {
+            return;
+        }
+        const graphIndex = 0;
+        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+        const selectedNodes = (sourceGraph.nodes || []).filter(node => node && node.name && this._userDefSelectedNodes.has(node.name));
+        if (selectedNodes.length === 0) {
+            return;
+        }
+        
+        try {
+            const { beginNodes, endNodes } = findBoundaryNodes(sourceGraph, selectedNodes);
+            let extracted = extractSubgraph(sourceGraph, beginNodes, endNodes);
+            extracted = stripInlineExpansionPrefixes(extracted);
+            
+            const subGraphId = genUniqueNodeName('userdefsubgraph', sourceGraph);
+            const callNodeName = genUniqueNodeName('userDefCall', sourceGraph);
+            
+            const userDefSubgraphNode = {
+                name: subGraphId,
+                type: {
+                    name: 'UserDefSubgraph',
+                    identifier: 'UserDefSubgraph',
+                    module: 'com.ambarella'
+                },
+                attributes: [
+                    {
+                        name: 'graph',
+                        type: 'graph',
+                        value: extracted
+                    }
+                ],
+                inputs: extracted.inputs.map(input => ({
+                    name: input.name,
+                    value: input.value.map(val => Object.assign({}, val))
+                })),
+                outputs: extracted.outputs.map(output => ({
+                    name: output.name,
+                    value: output.value.map(val => Object.assign({}, val))
+                }))
+            };
+            
+            const src_mappings = [];
+            const userDefCallInputs = [];
+            for (let i = 0; i < extracted.inputs.length; i++) {
+                const input = extracted.inputs[i];
+                const valName = input.value && input.value[0] ? input.value[0].name : '';
+                src_mappings.push({
+                    id: valName,
+                    index: i
+                });
+                userDefCallInputs.push({
+                    name: input.name,
+                    value: input.value.map(val => Object.assign({}, val))
+                });
+            }
+            
+            const out_mappings = [];
+            const userDefCallOutputs = [];
+            for (let i = 0; i < extracted.outputs.length; i++) {
+                const output = extracted.outputs[i];
+                const valName = output.value && output.value[0] ? output.value[0].name : '';
+                out_mappings.push({
+                    id: valName,
+                    index: i
+                });
+                userDefCallOutputs.push({
+                    name: output.name,
+                    value: output.value.map(val => Object.assign({}, val))
+                });
+            }
+            
+            const userDefCallNode = {
+                name: callNodeName,
+                type: {
+                    name: 'UserDefCall',
+                    identifier: 'UserDefCall',
+                    module: 'com.ambarella'
+                },
+                attributes: [
+                    {
+                        name: 'graph_id',
+                        type: 'string',
+                        value: subGraphId
+                    },
+                    {
+                        name: 'src_mappings',
+                        type: 'string',
+                        value: JSON.stringify(src_mappings)
+                    },
+                    {
+                        name: 'out_mappings',
+                        type: 'string',
+                        value: JSON.stringify(out_mappings)
+                    }
+                ],
+                inputs: userDefCallInputs,
+                outputs: userDefCallOutputs
+            };
+            
+            let rootNodeIndex = -1;
+            for (const node of selectedNodes) {
+                const idx = sourceGraph.nodes.indexOf(node);
+                if (idx > rootNodeIndex) {
+                    rootNodeIndex = idx;
+                }
+            }
+            
+            const keepSet = new Set(selectedNodes);
+            const nextNodes = [];
+            for (let i = 0; i < sourceGraph.nodes.length; i++) {
+                const node = sourceGraph.nodes[i];
+                if (keepSet.has(node)) {
+                    if (i === rootNodeIndex) {
+                        nextNodes.push(userDefCallNode);
+                    }
+                } else {
+                    nextNodes.push(node);
+                }
+            }
+            
+            nextNodes.unshift(userDefSubgraphNode);
+            
+            const modifiedGraph = {
+                name: sourceGraph.name,
+                identifier: sourceGraph.identifier,
+                inputs: sourceGraph.inputs,
+                outputs: sourceGraph.outputs,
+                nodes: nextNodes
+            };
+            
+            this._checkpointEditHistory();
+            this._editSession.replaceGraph(graphIndex, modifiedGraph);
+            
+            if (this._model && this._model.proto) {
+                this._model.proto.graph = rebuildGraphProtoFromModified(modifiedGraph, this._model.proto);
+            }
+            
+            this._userDefSelectedNodes.clear();
+            this._sidebar.close();
+            this._bindEditorSession();
+            await this._refreshModifiedPane();
+        } catch (error) {
+            await this._host.message(error.message || error.toString(), true, 'OK');
         }
     }
 
@@ -3807,6 +3995,7 @@ view.Graph = class extends grapher.Graph {
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
 .edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
 .node-border-outer { fill: none; stroke: none; pointer-events: none; }
+.userdef-selected > .node.node-border { stroke: rgba(255, 140, 0, 0.95); stroke-width: 2px; }
 .edited:not(.range-begin):not(.range-end) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .range-begin:not(.edited) > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
 .range-end:not(.edited) > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
@@ -3946,6 +4135,14 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyRangeMarkerStyle === 'function') {
                 obj.applyRangeMarkerStyle();
+            }
+        }
+    }
+
+    refreshUserDefSelectionStyles() {
+        for (const obj of this._table.values()) {
+            if (obj && typeof obj.applyUserDefSelectionStyle === 'function') {
+                obj.applyUserDefSelectionStyle();
             }
         }
     }
@@ -4946,6 +5143,15 @@ view.Node = class extends grapher.Node {
         this.element.classList.toggle('range-end', Boolean(isEnd));
     }
 
+    applyUserDefSelectionStyle() {
+        if (!this.element || !this.context.view || !this.value || !this.value.name) {
+            return;
+        }
+        const view = this.context.view;
+        const isSelected = view._userDefSelectedNodes && view._userDefSelectedNodes.has(this.value.name);
+        this.element.classList.toggle('userdef-selected', Boolean(isSelected));
+    }
+
     applyInlineExpandedStyle() {
         if (!this.element) {
             return;
@@ -4969,6 +5175,7 @@ view.Node = class extends grapher.Node {
         this.applyRangeMarkerStyle();
         this.applyInlineExpandedStyle();
         this.applyDanglingStyle();
+        this.applyUserDefSelectionStyle();
     }
 
     _add(value, type) {
@@ -11218,6 +11425,78 @@ view.Error = class extends Error {
 if (typeof window !== 'undefined' && window.exports) {
     window.exports.view = view;
 }
+
+const findBoundaryNodes = (graph, selectedNodes) => {
+    const selectedNodesSet = new Set(selectedNodes);
+    const beginNodes = [];
+    const endNodes = [];
+    
+    const argumentValues = (argument) => {
+        if (!argument || argument.value === null || argument.value === undefined) {
+            return [];
+        }
+        return Array.isArray(argument.value) ? argument.value : [argument.value];
+    };
+    
+    const internalValues = new Set();
+    for (const node of selectedNodes) {
+        for (const output of node.outputs || []) {
+            for (const val of argumentValues(output)) {
+                if (val && val.name) {
+                    internalValues.add(val.name);
+                }
+            }
+        }
+    }
+    
+    for (const node of selectedNodes) {
+        let isBegin = false;
+        for (const input of node.inputs || []) {
+            for (const val of argumentValues(input)) {
+                if (val && val.name && !val.initializer && !internalValues.has(val.name)) {
+                    isBegin = true;
+                    break;
+                }
+            }
+            if (isBegin) break;
+        }
+        if (isBegin) {
+            beginNodes.push(node);
+        }
+        
+        let isEnd = false;
+        for (const output of node.outputs || []) {
+            for (const val of argumentValues(output)) {
+                if (!val || !val.name) continue;
+                const isGraphOutput = (graph.outputs || []).some(o => 
+                    argumentValues(o).some(v => v && v.name === val.name)
+                );
+                if (isGraphOutput) {
+                    isEnd = true;
+                    break;
+                }
+                const consumers = findValueConsumers(graph, val);
+                const hasExternalConsumer = consumers.some(c => c.node && !selectedNodesSet.has(c.node));
+                if (hasExternalConsumer) {
+                    isEnd = true;
+                    break;
+                }
+            }
+            if (isEnd) break;
+        }
+        if (isEnd) {
+            endNodes.push(node);
+        }
+    }
+    
+    if (beginNodes.length === 0 && selectedNodes.length > 0) {
+        beginNodes.push(...selectedNodes);
+    }
+    if (endNodes.length === 0 && selectedNodes.length > 0) {
+        endNodes.push(...selectedNodes);
+    }
+    return { beginNodes, endNodes };
+};
 
 export const View = view.View;
 export const ModelFactoryService = view.ModelFactoryService;
