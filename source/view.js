@@ -4041,6 +4041,7 @@ view.Graph = class extends grapher.Graph {
         this.entityIdPrefix = options.entityIdPrefix || null;
     }
 
+    // added since we have more than one pane id
     get paneId() {
         return this._paneId;
     }
