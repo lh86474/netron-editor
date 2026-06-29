@@ -65,11 +65,11 @@ view.View = class {
         this._editSession = null;
         this._editSessionError = null;
         this._deltaUnsubscribe = null;
-        // new leftPane and rightPane fields for the two graph panes
         this._leftPane = null;
         this._rightPane = null;
-        this._activePane = 'modified';
-        this._path = [];
+        this.__activePane = 'modified';
+        this._leftPath = [];
+        this._rightPath = [];
         this._selection = [];
         // arrays to support multiple begin and end marker
         this._rangeBegins = [];
@@ -2213,12 +2213,12 @@ view.View = class {
         if (options.skipShow) {
             this._ensureDefaultScreen();
         }
-        // because right is modify pane
-        const pane = this._rightPane;
-        const origin = this._target ? this._target._origin : null;
+        const pane = options.paneId === 'original' ? this._leftPane : this._rightPane;
+        const targetGraph = pane ? pane.graph : this._target;
+        const origin = targetGraph ? targetGraph._origin : null;
         const snapshot = new Map();
-        if (this._target) {
-            for (const [key, entry] of this._target.nodes) {
+        if (targetGraph) {
+            for (const [key, entry] of targetGraph.nodes) {
                 const label = entry.label;
                 if (label && label.x !== undefined) {
                     snapshot.set(label.value || key, {
@@ -2229,8 +2229,8 @@ view.View = class {
             }
         }
         const container = pane ? pane.container : null;
-        const zoom = this._target ? this._target._zoom : 1;
-        const blocks = this._target ? this._target.blocks : null;
+        const zoom = targetGraph ? targetGraph._zoom : 1;
+        const blocks = targetGraph ? targetGraph.blocks : null;
         if (blocks && blocks.size > 0 && this._path.length > 0) {
             this._path[0].state = Object.assign(this._path[0].state || {}, { blocks });
         }
@@ -2243,10 +2243,7 @@ view.View = class {
             const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
-            const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
-            if (state && state.blocks) {
-                viewGraph.blocks = state.blocks;
-            }
+            viewGraph.blocks = targetGraph ? targetGraph.blocks : new Set();
             viewGraph.add(graph, this.activeSignature);
             viewGraph.addTunnels();
             viewGraph.build(this._host.document, origin);
@@ -2265,12 +2262,20 @@ view.View = class {
                     viewGraph._background.setAttribute('width', 0);
                     viewGraph._background.setAttribute('height', 0);
                 }
+                const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
                 viewGraph.restore(state);
                 viewGraph.refreshDeltaStyles();
                 viewGraph.refreshRangeMarkerStyles();
                 viewGraph.refreshInlineExpandedStyles();
                 pane._setGraph(viewGraph);
-                this.target = viewGraph;
+                if (!this._leftPane || pane.id === this._activePane) {
+                    this.target = viewGraph;
+                } else {
+                    if (targetGraph) {
+                        targetGraph.unregister();
+                    }
+                    viewGraph.register();
+                }
                 if (options.skipShow) {
                     this._ensureDefaultScreen();
                 }
@@ -2287,10 +2292,11 @@ view.View = class {
         if (!options.skipShow) {
             this.show(null);
         }
-        if (this._target) {
-            this._target.zoom = zoom;
+        const currentPaneGraph = pane ? pane.graph : this._target;
+        if (currentPaneGraph) {
+            currentPaneGraph.zoom = zoom;
             if (container && anchor) {
-                const anchorNode = this._target.find(anchor.value);
+                const anchorNode = currentPaneGraph.find(anchor.value);
                 if (anchorNode instanceof grapher.Node && anchorNode.element) {
                     let newRect = anchorNode.element.getBoundingClientRect();
                     if (anchorNode.definition && anchorNode.definition.element) {
@@ -2303,27 +2309,27 @@ view.View = class {
                         container.scrollTop += (newRect.top - anchor.rect.top);
                     }
                 }
-                delete this._target._scrollLeft;
-                delete this._target._scrollTop;
+                delete currentPaneGraph._scrollLeft;
+                delete currentPaneGraph._scrollTop;
             }
             const current = origin ? origin.getScreenCTM() : null;
             const ox = previous && current ? (previous.e - current.e) / current.a : 0;
             const oy = previous && current ? (previous.f - current.f) / current.d : 0;
             const animateTransition = (snapshot) => {
-                if (!this._target || snapshot.size === 0) {
+                if (!currentPaneGraph || snapshot.size === 0) {
                     return;
                 }
                 const duration = 300;
                 let startTime = 0;
                 const animations = [];
-                for (const [key, entry] of this._target.nodes) {
+                for (const [key, entry] of currentPaneGraph.nodes) {
                     const label = entry.label;
                     if (!label || !label.element) {
                         continue;
                     }
                     const modelKey = label.value || key;
                     const old = snapshot.get(modelKey);
-                    const isCluster = this._target.children(key).length > 0;
+                    const isCluster = currentPaneGraph.children(key).length > 0;
                     if (old) {
                         if (isCluster) {
                             animations.push({
@@ -2347,7 +2353,7 @@ view.View = class {
                         animations.push({ type: 'fadein', element: label.element });
                     }
                 }
-                for (const edge of this._target.edges.values()) {
+                for (const edge of currentPaneGraph.edges.values()) {
                     const label = edge.label;
                     if (!label || !label.element) {
                         continue;
@@ -2355,8 +2361,8 @@ view.View = class {
                     const fromNode = snapshot.get(label.from.value || edge.v);
                     const toNode = snapshot.get(label.to.value || edge.w);
                     if (fromNode && toNode) {
-                        const newFrom = this._target.node(edge.v);
-                        const newTo = this._target.node(edge.w);
+                        const newFrom = currentPaneGraph.node(edge.v);
+                        const newTo = currentPaneGraph.node(edge.w);
                         if (newFrom && newTo) {
                             const dfx = fromNode.x - newFrom.label.x;
                             const dfy = fromNode.y - newFrom.label.y;
@@ -2478,6 +2484,7 @@ view.View = class {
                 animateTransition(snapshot);
             }
         }
+    }
     }
 
     async error(error, name, screen) {
@@ -2611,34 +2618,40 @@ view.View = class {
         return null;
     }
 
-    async _updateTarget(model, path) {
-        const lastModel = this._model;
-        const lastPath = this._path;
-        try {
-            await this._updatePath(model, path);
-            return this._model;
-        } catch (error) {
-            await this._updatePath(lastModel, lastPath);
-            throw error;
+    get _activePane() {
+        return this.__activePane;
+    }
+
+    set _activePane(value) {
+        if (this.__activePane !== value) {
+            this.__activePane = value;
+            this._updateToolbarPath();
         }
     }
 
-    async _updatePath(model, stack) {
-        this.model = model;
-        this._path = stack;
-        const status = await this.render(this.activeTarget, this.activeSignature);
-        if (status === 'cancel') {
-            this.model = null;
-            this._path = [];
-            this._activeTarget = null;
+    get _path() {
+        return this._activePane === 'original' ? this._leftPath : this._rightPath;
+    }
+
+    set _path(value) {
+        if (Array.isArray(value) && value.length === 0) {
+            this._leftPath = [];
+            this._rightPath = [];
         }
-        this.show(null);
+        if (this._activePane === 'original') {
+            this._leftPath = value;
+        } else {
+            this._rightPath = value;
+        }
+    }
+
+    _updateToolbarPath() {
         const path = this._element('toolbar-path');
         const back = this._element('toolbar-path-back-button');
-        while (path.children.length > 1) {
-            path.removeChild(path.lastElementChild);
-        }
-        if (status === '') {
+        if (path && back) {
+            while (path.children.length > 1) {
+                path.removeChild(path.lastElementChild);
+            }
             if (this._path.length <= 1) {
                 back.style.opacity = 0;
             } else {
@@ -2687,10 +2700,10 @@ view.View = class {
                     path.appendChild(element);
                 }
             }
-            this._select.update(model, stack);
+            this._select.update(this._model, this._path);
             const button = this._element('sidebar-target-button');
-            if (stack.length > 0) {
-                const type = stack[stack.length - 1].type || 'graph';
+            if (this._path.length > 0) {
+                const type = this._path[this._path.length - 1].type || 'graph';
                 const name = type.charAt(0).toUpperCase() + type.slice(1);
                 button.setAttribute('title', `${name} Properties`);
                 button.style.display = 'block';
@@ -2700,17 +2713,51 @@ view.View = class {
         }
     }
 
-    async pushTarget(graph, context) {
+    async _updateTarget(model, path) {
+        const lastModel = this._model;
+        const lastPath = this._path;
+        try {
+            await this._updatePath(model, path);
+            return this._model;
+        } catch (error) {
+            await this._updatePath(lastModel, lastPath);
+            throw error;
+        }
+    }
+
+    async _updatePath(model, stack) {
+        this.model = model;
+        if (this._leftPath.length === 0 && this._rightPath.length === 0) {
+            this._leftPath = stack.slice();
+            this._rightPath = stack.slice();
+        } else {
+            this._path = stack;
+        }
+        const status = await this.render(this.activeTarget, this.activeSignature);
+        if (status === 'cancel') {
+            this.model = null;
+            this._path = [];
+            this._activeTarget = null;
+        }
+        this.show(null);
+        this._updateToolbarPath();
+    }
+
+    async pushTarget(graph, context, paneId) {
+        if (paneId) {
+            this._activePane = paneId;
+        }
         if (graph && graph !== this.activeTarget && Array.isArray(graph.nodes)) {
-            if (this._target) {
-                this._target.select(null);
+            const currentPaneGraph = (paneId === 'original' ? this._leftPane?.graph : this._rightPane?.graph) || this._target;
+            if (currentPaneGraph) {
+                currentPaneGraph.select(null);
             }
             this._sidebar.close();
             if (context && this._path.length > 0) {
                 this._path[0].state = {
                     context,
-                    zoom: this._target.zoom,
-                    blocks: this._target.blocks,
+                    zoom: currentPaneGraph ? currentPaneGraph.zoom : 1,
+                    blocks: currentPaneGraph ? currentPaneGraph.blocks : new Set(),
                     batchInlineExpanded: Array.from(this._batchInlineExpanded)
                 };
             }
@@ -2741,16 +2788,19 @@ view.View = class {
         this._initGraphPanes();
         let status = '';
         if (target && this._leftPane && this._rightPane) {
-            const nodes = target.nodes || [];
-            this._host.event('graph_view', {
-                graph_node_count: nodes.length,
-                graph_skip: 0
-            });
-            const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
-            const modifiedTarget = this._resolveModifiedTarget(target);
-            // doubles the status for the two panes
-            status = await this._rightPane.render(modifiedTarget, signature, state);
-            const leftStatus = await this._leftPane.render(target, signature, state);
+            const leftEntry = this._leftPath && this._leftPath.length > 0 ? this._leftPath[0] : { target };
+            const rightEntry = this._rightPath && this._rightPath.length > 0 ? this._rightPath[0] : { target };
+            const leftTarget = leftEntry.target;
+            const rightTarget = rightEntry.target;
+            const leftState = leftEntry.state || null;
+            const rightState = rightEntry.state || null;
+            const leftSignature = leftEntry.signature || signature;
+            const rightSignature = rightEntry.signature || signature;
+
+            const modifiedRightTarget = this._resolveModifiedTarget(rightTarget);
+
+            status = await this._rightPane.render(modifiedRightTarget, rightSignature, rightState);
+            const leftStatus = await this._leftPane.render(leftTarget, leftSignature, leftState);
             if (status === '') {
                 status = leftStatus;
             }
@@ -5246,7 +5296,7 @@ view.Node = class extends grapher.Node {
             this.definition.content = '\u25CB';
             this.definition.tooltip = 'Show Graph';
             this.definition.padding = 4;
-            this.definition.on('click', async () => await this.context.view.pushTarget(value, this.hostNodeValue));
+            this.definition.on('click', async () => await this.context.view.pushTarget(value, this.hostNodeValue, this.context.paneId));
             const blockKey = this._blockKey;
             const expanded = this.context.isBlockExpanded(blockKey);
             const icon = expanded ? '\u2212' : '+';
@@ -5260,7 +5310,7 @@ view.Node = class extends grapher.Node {
                 if (blockKey) {
                     this.context.toggleBlockExpanded(blockKey);
                 }
-                this.context.view.refresh({ value: this.value, rect });
+                this.context.view.refresh({ value: this.value, rect }, { paneId: this.context.paneId });
             });
         } else if (node.type.type || (Array.isArray(node.type.nodes) && node.type.nodes.length > 0)) {
             let icon = '\u0192';
@@ -5272,7 +5322,7 @@ view.Node = class extends grapher.Node {
             this.definition = header.add(null, styles);
             this.definition.content = icon;
             this.definition.tooltip = tooltip;
-            this.definition.on('click', async () => await this.context.view.pushTarget(node.type, this.value));
+            this.definition.on('click', async () => await this.context.view.pushTarget(node.type, this.value, this.context.paneId));
         }
         let current = null;
         const list = () => {
