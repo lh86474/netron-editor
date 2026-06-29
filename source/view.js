@@ -4813,9 +4813,9 @@ view.Graph = class extends grapher.Graph {
         canvas.setAttribute('height', height);
         this._zoom = state ? state.zoom : 1;
         this._updateZoom(this._zoom);
-        const context = state ? this.select([state.context]) : [];
-        if (context.length > 0) {
-            this.scrollTo(context, 'instant');
+        const contextNode = state && state.context ? this._table.get(state.context) : null;
+        if (contextNode && contextNode.element) {
+            this.scrollTo([contextNode.element], 'instant');
         } else if (elements && elements.length > 0) {
             // Center view based on input elements
             const bounds = container.getBoundingClientRect();
