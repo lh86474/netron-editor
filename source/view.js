@@ -1536,6 +1536,7 @@ view.View = class {
             this._batchInlineExpanded.add(batchCallName);
         }
         this._persistBatchInlineState();
+        this._syncBatchInlineToSession();
         this._updateUndoRedoButtons();
         await this.refresh();
         this._refreshInlineExpandedStyles();
