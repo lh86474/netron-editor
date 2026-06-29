@@ -35,10 +35,8 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-readonly { cursor: default; }
-.pane-divider { width: 6px; cursor: col-resize; z-index: 10; flex-shrink: 0; margin: 0 -3px; background-color: #ccc; background-clip: padding-box; border-left: 2px solid transparent; border-right: 3px solid transparent; transition: background-color 0.15s; }
-.pane-divider:hover, .pane-divider.dragging { background-color: #007acc; }
-.pane-divider-vertical { display: none; height: 6px; cursor: row-resize; z-index: 10; flex-shrink: 0; margin: -3px 0; background-color: #ccc; background-clip: padding-box; border-top: 2px solid transparent; border-bottom: 3px solid transparent; transition: background-color 0.15s; }
-.pane-divider-vertical:hover, .pane-divider-vertical.dragging { background-color: #007acc; }
+.pane-divider { width: 6px; cursor: col-resize; z-index: 10; flex-shrink: 0; margin: 0 -3px; background-color: #ccc; background-clip: padding-box; border-left: 2px solid transparent; border-right: 3px solid transparent; }
+.pane-divider-vertical { display: none; height: 6px; cursor: row-resize; z-index: 10; flex-shrink: 0; margin: -3px 0; background-color: #ccc; background-clip: padding-box; border-top: 2px solid transparent; border-bottom: 3px solid transparent; }
 .merge-container { display: none; flex-direction: column; height: 100%; width: 100%; overflow: hidden; }
 .merge-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #ccc; flex-shrink: 0; }
 .merge-title { font-size: 14px; font-weight: 600; margin-left: 36px; position: relative; top: -5.5px;}
@@ -265,9 +263,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .target { background-color: #404040; }
 .graph-pane-original { }
 .pane-divider { background-color: #555; }
-.pane-divider:hover, .pane-divider.dragging { background-color: #007acc; }
 .pane-divider-vertical { background-color: #555; }
-.pane-divider-vertical:hover, .pane-divider-vertical.dragging { background-color: #007acc; }
 .graph-busy-overlay { background-color: rgba(64, 64, 64, 0.55); }
 .graph-busy-spinner-stroke { stroke: #ececec; }
 .graph-busy-label { color: #aaaaaa; }
