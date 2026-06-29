@@ -2525,6 +2525,9 @@ view.View = class {
 
     async open(context) {
         this._sidebar.close();
+        this._leftPath = [];
+        this._rightPath = [];
+        this._activePane = 'modified';
         this._exportBasenameOverride = null;
         await this._timeout(2);
         try {
@@ -4035,6 +4038,10 @@ view.Graph = class extends grapher.Graph {
         this._origin = null;
         this._background = null;
         this.entityIdPrefix = options.entityIdPrefix || null;
+    }
+
+    get paneId() {
+        return this._paneId;
     }
 
     blockKey(hostEntityId, attrName) {
