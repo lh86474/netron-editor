@@ -678,6 +678,7 @@ view.View = class {
         return this._host.document.getElementById(id);
     }
 
+    // logic for resizable panes
     _setupResizablePanes(containerId, firstPaneId, dividerId, isVertical) {
         const container = this._element(containerId);
         const firstPane = this._element(firstPaneId);
@@ -697,7 +698,12 @@ view.View = class {
             const onPointerMove = (moveEvent) => {
                 const containerRect = container.getBoundingClientRect();
                 if (isVertical) {
+                    // containerRect is not codebase-specific, it is part of 
+                    // DOMRect
+                    // .clientY is a standard JS property of MouseEvent
                     let height = moveEvent.clientY - containerRect.top;
+                    // make sure that we make a pane completely disappear
+                    // this would lead to overlapping borders, so 100px is safe
                     const minHeight = 100;
                     const maxHeight = containerRect.height - 100;
                     if (maxHeight > minHeight) {
@@ -706,6 +712,7 @@ view.View = class {
                         firstPane.style.flex = `0 0 ${percentage}%`;
                     }
                 } else {
+                    // This is for expanding left and right. 
                     let width = moveEvent.clientX - containerRect.left;
                     const minWidth = 100;
                     const maxWidth = containerRect.width - 100;
@@ -717,6 +724,7 @@ view.View = class {
                 }
             };
 
+            // just change the styles of the cursor and event listener
             const onPointerUp = () => {
                 divider.classList.remove('dragging');
                 this._host.document.body.style.cursor = '';
