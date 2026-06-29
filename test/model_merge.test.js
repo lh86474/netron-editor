@@ -10,7 +10,9 @@ import {
     formatMergeWarnings,
     buildAutomaticMapping,
     buildAutomaticMappingBidirectional,
-    detectMergeRoles
+    detectMergeRoles,
+    extractGraphInputs,
+    extractGraphOutputs
 } from '../source/model-merge.js';
 import { validateGraphForMerge as validateGraph } from '../source/onnx-export.js';
 
@@ -482,5 +484,279 @@ describe('detectMergeRoles', () => {
         assert.equal(result.upstreamProto, modelA);
         assert.equal(result.downstreamProto, modelB);
         assert.deepEqual(result.mapping, [{ upstream: 'b', downstream: 'b' }]);
+    });
+});
+
+describe('amba-checkpoint-merge', () => {
+    const makeCheckpointModel = (primitives, rawFields = {}) => {
+        const model = new onnx.ModelProto();
+        model.producer_name = 'cvflowbackend';
+        model.metadata_props = [{ key: 'metagraph_type', value: 'checkpoint' }];
+        const graph = new onnx.GraphProto();
+        
+        const raw = {
+            primitives: primitives,
+            ...rawFields
+        };
+        
+        const node = new onnx.NodeProto();
+        node.op_type = 'CVFlowNVP';
+        const attr = new onnx.AttributeProto();
+        attr.name = 'prim_graph';
+        attr.type = onnx.AttributeProto.AttributeType.TENSOR;
+        const tensor = new onnx.TensorProto();
+        tensor.data_type = onnx.TensorProto.DataType.UINT8;
+        const rawDataBytes = new TextEncoder().encode(JSON.stringify(raw));
+        tensor.dims = [BigInt(rawDataBytes.length)];
+        tensor.raw_data = rawDataBytes;
+        attr.t = tensor;
+        node.attribute = [attr];
+        
+        const inputs = primitives.filter((p) => p.type === 'input');
+        const outputs = primitives.filter((p) => p.type === 'output');
+        
+        graph.input = inputs.map((p) => {
+            const val = new onnx.ValueInfoProto();
+            val.name = p.id;
+            const type = new onnx.TypeProto();
+            const tensorProto = new onnx.TypeProto.Tensor();
+            tensorProto.elem_type = 2; // uint8
+            type.tensor_type = tensorProto;
+            val.type = type;
+            return val;
+        });
+        
+        graph.output = outputs.map((p) => {
+            const val = new onnx.ValueInfoProto();
+            val.name = p.id;
+            const type = new onnx.TypeProto();
+            const tensorProto = new onnx.TypeProto.Tensor();
+            tensorProto.elem_type = 2; // uint8
+            type.tensor_type = tensorProto;
+            val.type = type;
+            return val;
+        });
+        
+        graph.node = [node];
+        model.graph = graph;
+        return model;
+    };
+
+    it('extractCheckpointIO extracts inputs and outputs with correct shapes and formats', () => {
+        const prims = [
+            {
+                id: 'input_data',
+                type: 'input',
+                oports: [{
+                    dimension: { w: 224, h: 224, d: 3, p: 1 },
+                    'data-format': { sign: 0, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'conv',
+                type: 'conv',
+                sources: [{ id: 'input_data', port: 0 }],
+                oports: [{
+                    dimension: { w: 112, h: 112, d: 32, p: 1 },
+                    'data-format': { sign: 1, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'output_data',
+                type: 'output',
+                sources: [{ id: 'conv', port: 0 }]
+            }
+        ];
+        const model = makeCheckpointModel(prims, { graph_input: 'input_data', graph_output: 'output_data' });
+        console.log('DETECT:', detectCheckpoint({ graph: model.graph }));
+        console.log('PARSE:', parseCheckpoint({ graph: model.graph, metadata_props: model.metadata_props }));
+        const inputs = extractGraphInputs(model.graph);
+        const outputs = extractGraphOutputs(model.graph);
+        
+        assert.equal(inputs.length, 1);
+        assert.equal(inputs[0].name, 'input_data');
+        assert.equal(inputs[0].type.tensor_type.elem_type, 2); // uint8
+        assert.equal(inputs[0].type.tensor_type.shape.dim.length, 4);
+        assert.equal(inputs[0].type.tensor_type.shape.dim[0].dim_value, 1n); // p
+        assert.equal(inputs[0].type.tensor_type.shape.dim[1].dim_value, 3n); // d
+        assert.equal(inputs[0].type.tensor_type.shape.dim[2].dim_value, 224n); // h
+        assert.equal(inputs[0].type.tensor_type.shape.dim[3].dim_value, 224n); // w
+        
+        assert.equal(outputs.length, 1);
+        assert.equal(outputs[0].name, 'output_data');
+        assert.equal(outputs[0].type.tensor_type.elem_type, 3); // int8 (conv product)
+    });
+
+    it('validates type compatibility between checkpoint models', () => {
+        const upstreamPrims = [
+            {
+                id: 'input_data',
+                type: 'input',
+                oports: [{
+                    dimension: { w: 224, h: 224, d: 3, p: 1 },
+                    'data-format': { sign: 0, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'output_data',
+                type: 'output',
+                sources: [{ id: 'input_data', port: 0 }]
+            }
+        ];
+        const downstreamPrims1 = [
+            {
+                id: 'input_features',
+                type: 'input',
+                oports: [{
+                    dimension: { w: 224, h: 224, d: 3, p: 1 },
+                    'data-format': { sign: 0, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'output_data',
+                type: 'output',
+                sources: [{ id: 'input_features', port: 0 }]
+            }
+        ];
+        const downstreamPrims2 = [
+            {
+                id: 'input_features',
+                type: 'input',
+                oports: [{
+                    dimension: { w: 112, h: 112, d: 3, p: 1 }, // Dimension mismatch
+                    'data-format': { sign: 0, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'output_data',
+                type: 'output',
+                sources: [{ id: 'input_features', port: 0 }]
+            }
+        ];
+        
+        const upstream = makeCheckpointModel(upstreamPrims, { graph_input: 'input_data', graph_output: 'output_data' });
+        const downstreamCompatible = makeCheckpointModel(downstreamPrims1, { graph_input: 'input_features', graph_output: 'output_data' });
+        const downstreamIncompatible = makeCheckpointModel(downstreamPrims2, { graph_input: 'input_features', graph_output: 'output_data' });
+        
+        const mapCompatible = buildAutomaticMapping(upstream, downstreamCompatible);
+        assert.equal(mapCompatible.ok, true);
+        assert.deepEqual(mapCompatible.mapping, [{ upstream: 'output_data', downstream: 'input_features' }]);
+        
+        const mapIncompatible = buildAutomaticMapping(upstream, downstreamIncompatible);
+        assert.equal(mapIncompatible.ok, false);
+    });
+
+    it('successfully merges two checkpoint models', () => {
+        const upstreamPrims = [
+            {
+                id: 'input_data',
+                type: 'input',
+                oports: [{
+                    dimension: { w: 224, h: 224, d: 3, p: 1 },
+                    'data-format': { sign: 0, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'conv1',
+                type: 'conv',
+                sources: [{ id: 'input_data', port: 0 }],
+                oports: [{
+                    dimension: { w: 112, h: 112, d: 32, p: 1 },
+                    'data-format': { sign: 1, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'output_data',
+                type: 'output',
+                sources: [{ id: 'conv1', port: 0 }]
+            }
+        ];
+        const downstreamPrims = [
+            {
+                id: 'input_features',
+                type: 'input',
+                oports: [{
+                    dimension: { w: 112, h: 112, d: 32, p: 1 },
+                    'data-format': { sign: 1, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'conv2',
+                type: 'conv2',
+                sources: [{ id: 'input_features', port: 0 }],
+                oports: [{
+                    dimension: { w: 56, h: 56, d: 64, p: 1 },
+                    'data-format': { sign: 1, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'output1',
+                type: 'output',
+                sources: [
+                    { id: 'conv2', port: 0 }
+                ]
+            }
+        ];
+        
+        const upstream = makeCheckpointModel(upstreamPrims, { graph_input: 'input_data', graph_output: 'output_data' });
+        const downstream = makeIdentityModel({
+            name: 'downstream_shell',
+            inputs: [{ name: 'input_features', elemType: 3, dims: [1, 32, 112, 112] }],
+            outputs: [{ name: 'y', elemType: 3, dims: [1, 64, 56, 56] }],
+            nodes: [{ name: 'down_shell', input: ['input_features'], output: ['y'], op_type: 'CVFlowNVP' }]
+        });
+        downstream.producer_name = 'cvflowbackend';
+        downstream.metadata_props = [{ key: 'metagraph_type', value: 'checkpoint' }];
+        
+        // Let's add the prim_graph attribute to downstream shell
+        const primGraphAttr = new onnx.AttributeProto();
+        primGraphAttr.name = 'prim_graph';
+        primGraphAttr.type = onnx.AttributeProto.AttributeType.TENSOR;
+        const tensor = new onnx.TensorProto();
+        tensor.data_type = onnx.TensorProto.DataType.UINT8;
+        const rawBytes = new TextEncoder().encode(JSON.stringify({ primitives: downstreamPrims, graph_input: 'input_features', graph_output: 'output1' }));
+        tensor.dims = [BigInt(rawBytes.length)];
+        tensor.raw_data = rawBytes;
+        primGraphAttr.t = tensor;
+        downstream.graph.node[0].attribute = [primGraphAttr];
+        
+        const result = tryMergeOnnxModels(upstream, downstream, {
+            mapping: [{ upstream: 'output_data', downstream: 'input_features' }]
+        });
+        
+        assert.equal(result.ok, true);
+        assert.ok(result.mergedProto);
+        
+        // Verify merged primitive graph structure
+        const mergedNode = result.mergedProto.graph.node[0];
+        assert.equal(mergedNode.op_type, 'CVFlowNVP');
+        const attr = mergedNode.attribute.find((a) => a.name === 'prim_graph');
+        assert.ok(attr);
+        
+        const parsedRaw = JSON.parse(new TextDecoder().decode(attr.t.raw_data));
+        const primitives = parsedRaw.primitives;
+        
+        // Output0 (mapped upstream output) and Input_features (mapped downstream input) should be removed
+        assert.equal(primitives.length, 4); // data, conv1, downstream_conv2, downstream_output1
+        
+        const conv2Prim = primitives.find((p) => p.id === 'downstream_conv2');
+        assert.ok(conv2Prim);
+        // Source should now point directly to conv1 (upstream producer) instead of input_features!
+        assert.equal(conv2Prim.sources[0].id, 'conv1');
+        assert.equal(conv2Prim.sources[0].port, 0);
+    });
+
+    it('refuses to merge mixed model types', () => {
+        const onnxModel = makeIdentityModel({
+            name: 'onnx',
+            inputs: [{ name: 'x', elemType: 1, dims: [1, 3] }],
+            outputs: [{ name: 'y', elemType: 1, dims: [1, 3] }],
+            nodes: [{ name: 'n', input: ['x'], output: ['y'] }]
+        });
+        const checkpoint = makeCheckpointModel([{ id: 'data', type: 'input', oports: [{ dimension: { w: 224, h: 224 }, 'data-format': { sign: 0, bits: 8 } }] }]);
+        
+        const result = tryMergeOnnxModels(onnxModel, checkpoint);
+        assert.equal(result.ok, false);
+        assert.ok(result.errors.some((err) => err.code === 'INCOMPATIBLE_MODELS'));
     });
 });

@@ -1,7 +1,13 @@
 /*
  * This file is for parsing, serializing, and validating the prim_graph JSON
+ * Also includes tensor encoding helpers
+ * reuse validatePrimGraph, parseGraphJson to export fails on bad JSON
  * Author: Luray He
  */
+// 
+import { onnx } from './onnx-proto.js';
+
+export const PRIM_GRAPH_ATTRIBUTE_NAME = 'prim_graph';
 export class AmbapbParseError extends Error {
 
     constructor(message) {
@@ -137,6 +143,56 @@ export const serializePrimGraphJson = (primGraph) => {
         throw new AmbapbParseError('primGraph.raw is required for serialization.');
     }
     return JSON.stringify(primGraph.raw);
+};
+
+export const cloneDims = (dims) => { 
+    if (!Array.isArray(dims) || dims.length === 0) {
+        return [];
+    }
+    return dims.map((dim) => typeof dim === 'bigint' ? dim: BigInt(dim));
+};
+
+export const encodePrimGraphTensor = (jsonText, originalTensor = null) => {
+    const bytes = new TextEncoder().encode(jsonText);
+    const tensor = new onnx.TensorProto();
+    if (originalTensor) {
+        tensor.data_type = originalTensor.data_type ?? onnx.TensorProto.DataType.UINT8;
+        tensor.data_location = originalTensor.data_location ?? 0;
+        if (originalTensor.name) {
+            tensor.name = originalTensor.name;
+        }
+        if (originalTensor.doc_string) {
+            tensor.doc_string = originalTensor.doc_string;
+        }
+        const dims = cloneDims(originalTensor.dims);
+        if (dims.length === 1) {
+            tensor.dims = [BigInt(bytes.length)];
+        } else if (dims.length > 0) {
+            tensor.dims = dims;
+        } else {
+            tensor.dims = [BigInt(bytes.length)];
+        }
+    } else {
+        tensor.data_type = onnx.TensorProto.DataType.UINT8;
+        tensor.data_location = 0;
+        tensor.dims = [BigInt(bytes.length)];
+    }
+    tensor.raw_data = bytes;
+    return tensor;
+};
+export const buildPrimGraphAttributeProto = (jsonText, originalAttribute = null) => {
+    const primGraph = parsePrimGraphJson(jsonText);
+    const validation = validatePrimGraph(primGraph.primitives);
+    if (!validation.ok) {
+        throw new AmbapbParseError(validation.errors.join('\n'));
+    }
+    const canonicalJson = JSON.stringify(primGraph.raw);
+    const attribute = new onnx.AttributeProto();
+    attribute.name = PRIM_GRAPH_ATTRIBUTE_NAME;
+    attribute.type = onnx.AttributeProto.AttributeType.TENSOR;
+    const originalTensor = originalAttribute && originalAttribute.t ? originalAttribute.t : null;
+    attribute.t = encodePrimGraphTensor(canonicalJson, originalTensor);
+    return attribute;
 };
 
 const copyTensorEntry = (tensor) => {
