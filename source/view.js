@@ -1536,6 +1536,8 @@ view.View = class {
             this._batchInlineExpanded.add(batchCallName);
         }
         this._persistBatchInlineState();
+        // Very important. Guarantees that edit session state stays perfectly in sync
+        // with the active satte before any navigation or re-rendering occurs
         this._syncBatchInlineToSession();
         this._updateUndoRedoButtons();
         await this.refresh();
