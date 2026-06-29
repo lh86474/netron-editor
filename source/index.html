@@ -24,6 +24,12 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .center { position: absolute; margin: auto; top: 0; right: 0; bottom: 0; left: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .select { user-select: text; -webkit-user-select: text; -moz-user-select: text; }
 .diff-container { display: flex; height: 100%; width: 100%; }
+.diff-container.hide-original #target-original { display: none; }
+.diff-container.hide-original #pane-divider { display: none; }
+.diff-container.hide-original #target-modified { flex: 1 1 100% !important; }
+.diff-container.hide-modified #target-modified { display: none; }
+.diff-container.hide-modified #pane-divider { display: none; }
+.diff-container.hide-modified #target-original { flex: 1 1 100% !important; }
 .graph-pane { display: flex; flex: 1; min-width: 100px; height: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; position: relative; }
 .graph-pane-label { position: absolute; top: 0px; height: var(--chrome-height); display: flex; align-items: center; left: var(--chrome-inset); z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
 .graph-busy-overlay { position: absolute; inset: 0; z-index: 10; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background-color: rgba(236, 236, 236, 0.55); pointer-events: all; cursor: wait; opacity: 0; transition: opacity 0.12s ease; }
@@ -73,6 +79,8 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .merge-graph-area.show-source-graphs .pane-divider-vertical { display: block; }
 .merge-source-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; user-select: none; }
 .merge-source-toggle input { margin: 0; }
+.toolbar-toggle { display: flex; align-items: center; gap: 6px; font-size: 11px; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; color: #444444; user-select: none; -webkit-user-select: none; -moz-user-select: none; margin-left: 8px; margin-right: 8px; }
+.toolbar-toggle input { margin: 0; cursor: pointer; }
 .merge-footer { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 12px; border-top: 1px solid #ccc; flex-shrink: 0; }
 .merge-workspace .diff-container { display: none !important; opacity: 0; }
 .merge-workspace .toolbar { display: none; }
@@ -285,6 +293,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .merge-preview-pane { background-color: #404040; }
 .merge-source-pane { background-color: #404040; }
 .merge-source-toggle { color: #ccc; }
+.toolbar-toggle { color: #ccc; }
 .welcome { background-color: #1e1e1e; color: #888888; }
 .alert { background-color: #1e1e1e; color: #888888; }
 .confirm { background-color: #1e1e1e; color: #888888; }
@@ -663,6 +672,14 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
             <polyline class="stroke" points="60,50 52,44 52,56" stroke-width="3" stroke-linejoin="round" fill="none"></polyline>
         </svg>
     </button>
+    <label id="toolbar-show-original-label" class="toolbar-toggle">
+        <input type="checkbox" id="toolbar-show-original" checked>
+        Show original
+    </label>
+    <label id="toolbar-show-modified-label" class="toolbar-toggle">
+        <input type="checkbox" id="toolbar-show-modified" checked>
+        Show modified
+    </label>
     <button id="undo-button" class="toolbar-button toolbar-edit-button" type="button" hidden>
         <span class="toolbar-edit-label">Undo</span>
         <span id="undo-shortcut" class="toolbar-edit-shortcut"></span>

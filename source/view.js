@@ -55,7 +55,9 @@ view.View = class {
             names: false,
             direction: 'vertical',
             mousewheel: 'scroll',
-            syncScroll: false
+            syncScroll: false,
+            showOriginal: true,
+            showModified: true
         };
         this._options = { ...this._defaultOptions };
         this._syncApplying = false;
@@ -123,6 +125,25 @@ view.View = class {
                 this.toggle('syncScroll');
             });
             this._updateSyncScrollButton();
+            const showOriginal = this._element('toolbar-show-original');
+            const showModified = this._element('toolbar-show-modified');
+            if (showOriginal) {
+                showOriginal.checked = this._options.showOriginal;
+                showOriginal.addEventListener('change', () => {
+                    this._options.showOriginal = showOriginal.checked;
+                    this._updateDiffPanesVisibility();
+                    this._saveOptions();
+                });
+            }
+            if (showModified) {
+                showModified.checked = this._options.showModified;
+                showModified.addEventListener('change', () => {
+                    this._options.showModified = showModified.checked;
+                    this._updateDiffPanesVisibility();
+                    this._saveOptions();
+                });
+            }
+            this._updateDiffPanesVisibility();
             this._mergeWorkspace.bindEvents();
             this._setupResizablePanes('diff-container', 'target-original', 'pane-divider', false);
             this._setupResizablePanes('merge-source-row', 'merge-upstream-pane', 'merge-source-divider', false);
@@ -621,6 +642,10 @@ view.View = class {
             default:
                 throw new view.Error(`Unsupported toggle '${name}'.`);
         }
+        this._saveOptions();
+    }
+
+    _saveOptions() {
         const options = {};
         for (const [name, value] of Object.entries(this._options)) {
             if (this._defaultOptions[name] !== value) {
@@ -821,6 +846,34 @@ view.View = class {
         const active = Boolean(this._options.syncScroll);
         button.classList.toggle('active', active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+
+    _updateDiffPanesVisibility() {
+        const showOriginalEl = this._element('toolbar-show-original');
+        const showModifiedEl = this._element('toolbar-show-modified');
+        if (!showOriginalEl || !showModifiedEl) {
+            return;
+        }
+        const originalChecked = Boolean(this._options.showOriginal);
+        const modifiedChecked = Boolean(this._options.showModified);
+
+        // Prevent hiding both by disabling the remaining checked box
+        showOriginalEl.disabled = originalChecked && !modifiedChecked;
+        showModifiedEl.disabled = modifiedChecked && !originalChecked;
+
+        // Apply classes to diff-container to hide/show panes
+        const container = this._element('diff-container');
+        if (container) {
+            container.classList.toggle('hide-original', !originalChecked);
+            container.classList.toggle('hide-modified', !modifiedChecked);
+        }
+
+        // Sync the active pane if the currently active one is now hidden
+        if (!originalChecked && this._activePane === 'original') {
+            this._activePane = 'modified';
+        } else if (!modifiedChecked && this._activePane === 'modified') {
+            this._activePane = 'original';
+        }
     }
 
     _setupUndoRedoToolbar(platform) {
