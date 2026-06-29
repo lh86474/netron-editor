@@ -124,6 +124,9 @@ view.View = class {
             });
             this._updateSyncScrollButton();
             this._mergeWorkspace.bindEvents();
+            this._setupResizablePanes('diff-container', 'target-original', 'pane-divider', false);
+            this._setupResizablePanes('merge-source-row', 'merge-upstream-pane', 'merge-source-divider', false);
+            this._setupResizablePanes('merge-graph-area', 'merge-source-row', 'merge-row-divider', true);
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget();
             });
@@ -673,6 +676,60 @@ view.View = class {
 
     _element(id) {
         return this._host.document.getElementById(id);
+    }
+
+    _setupResizablePanes(containerId, firstPaneId, dividerId, isVertical) {
+        const container = this._element(containerId);
+        const firstPane = this._element(firstPaneId);
+        const divider = this._element(dividerId);
+
+        if (!container || !firstPane || !divider) {
+            return;
+        }
+
+        const onPointerDown = (e) => {
+            e.preventDefault();
+            divider.classList.add('dragging');
+
+            this._host.document.body.style.cursor = isVertical ? 'row-resize' : 'col-resize';
+            this._host.document.body.style.userSelect = 'none';
+
+            const onPointerMove = (moveEvent) => {
+                const containerRect = container.getBoundingClientRect();
+                if (isVertical) {
+                    let height = moveEvent.clientY - containerRect.top;
+                    const minHeight = 100;
+                    const maxHeight = containerRect.height - 100;
+                    if (maxHeight > minHeight) {
+                        height = Math.max(minHeight, Math.min(height, maxHeight));
+                        const percentage = (height / containerRect.height) * 100;
+                        firstPane.style.flex = `0 0 ${percentage}%`;
+                    }
+                } else {
+                    let width = moveEvent.clientX - containerRect.left;
+                    const minWidth = 100;
+                    const maxWidth = containerRect.width - 100;
+                    if (maxWidth > minWidth) {
+                        width = Math.max(minWidth, Math.min(width, maxWidth));
+                        const percentage = (width / containerRect.width) * 100;
+                        firstPane.style.flex = `0 0 ${percentage}%`;
+                    }
+                }
+            };
+
+            const onPointerUp = () => {
+                divider.classList.remove('dragging');
+                this._host.document.body.style.cursor = '';
+                this._host.document.body.style.userSelect = '';
+                this._host.document.removeEventListener('pointermove', onPointerMove);
+                this._host.document.removeEventListener('pointerup', onPointerUp);
+            };
+
+            this._host.document.addEventListener('pointermove', onPointerMove);
+            this._host.document.addEventListener('pointerup', onPointerUp);
+        };
+
+        divider.addEventListener('pointerdown', onPointerDown);
     }
 
     zoomIn() {
