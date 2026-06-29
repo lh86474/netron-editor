@@ -2,10 +2,29 @@
  * Created mainly to support undo and redo so we can preserve snapshots of the graph
  * Author: Luray He
  */
-import { cloneGraphModules, stringifyEditorJSON } from './model-editor.js';
+import { cloneGraphModules } from './model-editor.js';
 import { cloneAmbapbEditingState } from './ambapb-editor.js';
 
-const cloneData = (value) => JSON.parse(stringifyEditorJSON(value));
+const cloneDeltaSnapshot = (snapshot) => {
+    if (!snapshot) {
+        return null;
+    }
+    return {
+        original: Array.isArray(snapshot.original) ? snapshot.original.map(([key, value]) => {
+            if (Array.isArray(value)) {
+                return [key, value.slice()];
+            }
+            return [key, value];
+        }) : [],
+        changes: Array.isArray(snapshot.changes) ? snapshot.changes.map((change) => {
+            const cloned = { ...change };
+            if (Array.isArray(change.newValue)) {
+                cloned.newValue = change.newValue.slice();
+            }
+            return cloned;
+        }) : []
+    };
+};
 
 export class EditHistory {
 
@@ -58,7 +77,7 @@ export class EditHistory {
     _capture(session) {
         const snapshot = {
             modules: cloneGraphModules(session.modified.model.modules),
-            delta: cloneData(session.delta.exportSnapshot()),
+            delta: cloneDeltaSnapshot(session.delta.exportSnapshot()),
             batchInlineExpanded: Array.isArray(session.batchInlineExpanded)
                 ? session.batchInlineExpanded.slice()
                 : []
