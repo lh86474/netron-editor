@@ -3,7 +3,7 @@ import * as base from './base.js';
 import * as grapher from './grapher.js';
 import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, findValueConsumers } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
-import { canEditCheckpoint, isAmbapbCheckpoint } from './ambapb.js';
+import { canEditCheckpoint, isAmbapbCheckpoint, canExportCheckpoint } from './ambapb.js';
 import {
     buildPrimGraphJsonAfterAttributeEdit,
     ensureAmbapbUiState,
@@ -2477,7 +2477,6 @@ view.View = class {
             }
         }
     }
-    }
 
     async error(error, name, screen) {
         if (this._sidebar) {
@@ -2840,7 +2839,7 @@ view.View = class {
             }
             // export the modified model as ONNX
             const bytes = exportModifiedOnnx(this._model, this._editSession);
-            const blob = new Blob([bytes], { type: 'application/octet-stream' });
+            const blob = new window.Blob([bytes], { type: 'application/octet-stream' });
             await this._host.export(filename, blob);
         } catch (error) {
             const message = error instanceof OnnxExportError ? error.message : (error && error.message ? error.message : error.toString());
