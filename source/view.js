@@ -2223,20 +2223,25 @@ view.View = class {
         const container = pane ? pane.container : null;
         const zoom = targetGraph ? targetGraph._zoom : 1;
         const blocks = targetGraph ? targetGraph.blocks : null;
-        if (blocks && blocks.size > 0 && this._path.length > 0) {
-            this._path[0].state = Object.assign(this._path[0].state || {}, { blocks });
+
+        const panePath = options.paneId === 'original' ? this._leftPath : this._rightPath;
+        const paneTarget = panePath && panePath.length > 0 ? panePath[0].target : this.activeTarget;
+        const paneSignature = panePath && panePath.length > 0 ? panePath[0].signature : this.activeSignature;
+
+        if (blocks && blocks.size > 0 && panePath.length > 0) {
+            panePath[0].state = Object.assign(panePath[0].state || {}, { blocks });
         }
         this._persistBatchInlineState();
         let previous = null;
-        if (origin && this.activeTarget && pane) {
+        if (origin && paneTarget && pane) {
             previous = origin.getScreenCTM();
             const oldChildren = Array.from(origin.children);
-            const sourceGraph = this._resolveModifiedTarget(this.activeTarget);
+            const sourceGraph = pane.readOnly ? paneTarget : this._resolveModifiedTarget(paneTarget);
             const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
             viewGraph.blocks = targetGraph ? targetGraph.blocks : new Set();
-            viewGraph.add(graph, this.activeSignature);
+            viewGraph.add(graph, paneSignature);
             viewGraph.addTunnels();
             viewGraph.build(this._host.document, origin);
             await viewGraph.measure();
@@ -2254,7 +2259,7 @@ view.View = class {
                     viewGraph._background.setAttribute('width', 0);
                     viewGraph._background.setAttribute('height', 0);
                 }
-                const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
+                const state = panePath && panePath.length > 0 ? panePath[0].state : null;
                 viewGraph.restore(state);
                 viewGraph.refreshDeltaStyles();
                 viewGraph.refreshRangeMarkerStyles();
