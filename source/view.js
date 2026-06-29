@@ -1389,7 +1389,7 @@ view.View = class {
         const isUserDefSelected = this._userDefSelectedNodes && this._userDefSelectedNodes.has(node.name);
         if (node && node.type?.name !== 'BatchCall' && node.type?.name !== 'UserDefCall') {
             items.push({
-                label: isUserDefSelected ? 'Deselect Node' : 'Select Node',
+                label: isUserDefSelected ? 'Deselect Node for UserCallDef' : 'Select Node for UserCallDef',
                 action: () => {
                     if (isUserDefSelected) {
                         this._userDefSelectedNodes.delete(node.name);
@@ -1401,7 +1401,7 @@ view.View = class {
             });
             items.push({ separator: true });
         }
-        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0) {
+        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0 &&node.type?.name !== 'BatchCall') {
             items.push({
                 label: 'Create UserDefCall',
                 action: () => this._createUserDefCall()
@@ -1464,14 +1464,6 @@ view.View = class {
         const node = nodeView.value;
         const items = [];
 
-        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0) {
-            items.push({
-                label: 'Create UserDefCall',
-                action: () => this._createUserDefCall()
-            });
-            items.push({ separator: true });
-        }
-
         if (node._inlineExpanded) {
             const batchCallName = inlineExpansionBatchCallName(node);
             if (batchCallName) {
@@ -1496,7 +1488,7 @@ view.View = class {
                 action: () => this._toggleBatchInlineExpansion(nodeName)
             });
         } else {
-            const noMatchLabel = node.type?.name === 'UserDefCall' ? 'UserDefSubgraph' : 'FragSubgraph';
+            const noMatchLabel = node.type?.name === 'FragSubgraph';
             items.push({
                 label: canExpand
                     ? 'Expand Subgraph Inline'
