@@ -2728,8 +2728,8 @@ view.View = class {
     async _updatePath(model, stack) {
         this.model = model;
         if (this._leftPath.length === 0 && this._rightPath.length === 0) {
-            this._leftPath = stack.slice();
-            this._rightPath = stack.slice();
+            this._leftPath = stack.map((entry) => ({ ...entry, state: entry.state ? { ...entry.state } : null }));
+            this._rightPath = stack.map((entry) => ({ ...entry, state: entry.state ? { ...entry.state } : null }));
         } else {
             this._path = stack;
         }
