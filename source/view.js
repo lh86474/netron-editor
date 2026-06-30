@@ -2016,12 +2016,66 @@ view.View = class {
             }
             nextNodes.splice(insertIdx, 0, userDefSubgraphNode);
 
+            // Strip prefix of dissolved calls from nodes and value references in the rest of the graph
+            const stripCallPrefixes = (name, calls) => {
+                if (!name || typeof name !== 'string' || calls.size === 0) {
+                    return name;
+                }
+                let current = name;
+                let changed = true;
+                while (changed) {
+                    changed = false;
+                    for (const callName of calls) {
+                        const prefix = `inline::${callName}::`;
+                        if (current.startsWith(prefix)) {
+                            current = current.slice(prefix.length);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+                return current;
+            };
+
+            const remapValue = (value) => {
+                if (!value || !value.name) {
+                    return value;
+                }
+                const nextName = stripCallPrefixes(value.name, callsToInline);
+                if (nextName === value.name) {
+                    return value;
+                }
+                return Object.assign({}, value, { name: nextName });
+            };
+
+            const remapArgument = (argument) => {
+                if (!argument) {
+                    return argument;
+                }
+                const values = argument.value;
+                const mappedValues = Array.isArray(values) ? values.map((val) => remapValue(val)) : remapValue(values);
+                return Object.assign({}, argument, { value: mappedValues });
+            };
+
+            const stripNodePrefixes = (node) => {
+                if (!node) {
+                    return node;
+                }
+                return Object.assign({}, node, {
+                    name: stripCallPrefixes(node.name, callsToInline),
+                    inputs: (node.inputs || []).map((input) => remapArgument(input)),
+                    outputs: (node.outputs || []).map((output) => remapArgument(output))
+                });
+            };
+
+            const finalNodes = nextNodes.map(node => stripNodePrefixes(node));
+
             const modifiedGraph = {
                 name: workingGraph.name,
                 identifier: workingGraph.identifier,
-                inputs: workingGraph.inputs,
-                outputs: workingGraph.outputs,
-                nodes: nextNodes
+                inputs: (workingGraph.inputs || []).map((input) => remapArgument(input)),
+                outputs: (workingGraph.outputs || []).map((output) => remapArgument(output)),
+                nodes: finalNodes
             };
 
             this._checkpointEditHistory();
