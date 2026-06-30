@@ -1879,6 +1879,7 @@ view.View = class {
         }
     }
 
+    // before, only resolved selections from sourceGraph. Now, we resolve selections from workingGraph.
     async _createUserDefCall() {
         if (!this._editSession || !this._userDefSelectedNodes || this._userDefSelectedNodes.size === 0) {
             return;
@@ -1887,6 +1888,7 @@ view.View = class {
         const sourceGraph = this._editSession.modified.getGraph(graphIndex);
 
         const callsToInline = new Set();
+        // We scan selection to detect any inline prefixes
         const inlineRegex = /inline::([^:]+)::/g;
         for (const nodeName of this._userDefSelectedNodes) {
             let match;
@@ -1895,6 +1897,7 @@ view.View = class {
                 callsToInline.add(match[1]);
             }
         }
+        // make sure to build a workinggraph by inlining only the calls that contain the selected nodes
         const workingGraph = buildExtractWorkingGraph(sourceGraph, callsToInline);
         const selectedNodes = (workingGraph.nodes || []).filter(node => node && node.name && this._userDefSelectedNodes.has(node.name));
 
@@ -6680,6 +6683,7 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
             this.addSection('Attributes');
             for (let index = 0; index < attributes.length; index++) {
                 const attribute = attributes[index];
+                // WE check for attribute type
                 if (nodeId && attribute.type !== 'graph' && attribute.type !== 'function') {
                     const attributeId = `${nodeId}/attr:${index}`;
                     this.addEditableAttribute(attribute, attributeId, (patch) => {
