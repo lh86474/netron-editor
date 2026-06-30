@@ -6601,7 +6601,7 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
             this.addSection('Attributes');
             for (let index = 0; index < attributes.length; index++) {
                 const attribute = attributes[index];
-                if (nodeId) {
+                if (nodeId && attribute.type !== 'graph' && attribute.type !== 'function') {
                     const attributeId = `${nodeId}/attr:${index}`;
                     this.addEditableAttribute(attribute, attributeId, (patch) => {
                         this._view.applyEditorPatch(patch);
