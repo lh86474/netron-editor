@@ -727,23 +727,30 @@ describe('amba-checkpoint-merge', () => {
         assert.equal(result.ok, true);
         assert.ok(result.mergedProto);
         
-        // Verify merged primitive graph structure
-        const mergedNode = result.mergedProto.graph.node[0];
-        assert.equal(mergedNode.op_type, 'CVFlowNVP');
-        const attr = mergedNode.attribute.find((a) => a.name === 'prim_graph');
-        assert.ok(attr);
+        // Verify we have two separate CVFlowNVP nodes connected to each other
+        const nodes = result.mergedProto.graph.node;
+        assert.equal(nodes.length, 2);
         
-        const parsedRaw = JSON.parse(new TextDecoder().decode(attr.t.raw_data));
-        const primitives = parsedRaw.primitives;
+        const upstreamNode = nodes.find((n) => n.name === 'ambapb-prim-graph');
+        const downstreamNode = nodes.find((n) => n.name === 'downstream_down_shell');
         
-        // Output0 (mapped upstream output) and Input_features (mapped downstream input) should be removed
-        assert.equal(primitives.length, 4); // data, conv1, downstream_conv2, downstream_output1
+        assert.ok(upstreamNode);
+        assert.ok(downstreamNode);
         
-        const conv2Prim = primitives.find((p) => p.id === 'downstream_conv2');
-        assert.ok(conv2Prim);
-        // Source should now point directly to conv1 (upstream producer) instead of input_features!
-        assert.equal(conv2Prim.sources[0].id, 'conv1');
-        assert.equal(conv2Prim.sources[0].port, 0);
+        assert.equal(upstreamNode.op_type, 'CVFlowNVP');
+        assert.equal(downstreamNode.op_type, 'CVFlowNVP');
+        
+        // Verify connections
+        assert.deepEqual(Array.from(upstreamNode.input), ['input_data']);
+        assert.deepEqual(Array.from(upstreamNode.output), ['output_data']);
+        assert.deepEqual(Array.from(downstreamNode.input), ['output_data']);
+        assert.deepEqual(Array.from(downstreamNode.output), ['downstream_y']);
+        
+        // Verify attributes are preserved
+        const upstreamAttr = upstreamNode.attribute.find((a) => a.name === 'prim_graph');
+        const downstreamAttr = downstreamNode.attribute.find((a) => a.name === 'prim_graph');
+        assert.ok(upstreamAttr);
+        assert.ok(downstreamAttr);
     });
 
     it('refuses to merge mixed model types', () => {
