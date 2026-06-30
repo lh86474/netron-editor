@@ -1725,6 +1725,238 @@ view.View = class {
         }
     }
 
+    _refreshUserDefSelectionStyles() {
+        const graph = this._activePaneGraph();
+        if (graph && graph.refreshUserDefSelectionStyles) {
+            graph.refreshUserDefSelectionStyles();
+        }
+    }
+
+    // before, only resolved selections from sourceGraph. Now, we resolve selections from workingGraph.
+    async _createUserDefCall() {
+        if (!this._editSession || !this._userDefSelectedNodes || this._userDefSelectedNodes.size === 0) {
+            return;
+        }
+        const graphIndex = 0;
+        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+
+        const callsToInline = new Set();
+        // We scan selection to detect any inline prefixes
+        const inlineRegex = /inline::([^:]+)::/g;
+        for (const nodeName of this._userDefSelectedNodes) {
+            let match;
+            inlineRegex.lastIndex = 0;
+            while ((match = inlineRegex.exec(nodeName)) !== null) {
+                callsToInline.add(match[1]);
+            }
+        }
+        // make sure to build a workinggraph by inlining only the calls that contain the selected nodes
+        const workingGraph = buildExtractWorkingGraph(sourceGraph, callsToInline);
+        const selectedNodes = (workingGraph.nodes || []).filter(node => node && node.name && this._userDefSelectedNodes.has(node.name));
+
+        if (selectedNodes.length === 0) {
+            return;
+        }
+
+        try {
+            const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
+            let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
+            extracted = stripInlineExpansionPrefixes(extracted);
+            const subGraphId = genUniqueNodeName('userdefsubgraph', workingGraph);
+            extracted.name = subGraphId;
+            const callNodeName = genUniqueNodeName('userDefCall', workingGraph);
+
+            const userDefSubgraphNode = {
+                name: subGraphId,
+                type: {
+                    name: 'UserDefSubgraph',
+                    identifier: 'UserDefSubgraph',
+                    module: 'com.ambarella'
+                },
+                attributes: [
+                    {
+                        name: 'graph',
+                        type: 'graph',
+                        value: extracted
+                    }
+                ],
+                inputs: [],
+                outputs: []
+            };
+
+            const src_mappings = [];
+            const userDefCallInputs = [];
+            for (let i = 0; i < extracted.inputs.length; i++) {
+                const input = extracted.inputs[i];
+                const valName = input.value && input.value[0] ? input.value[0].name : '';
+                src_mappings.push({
+                    id: valName,
+                    index: i
+                });
+                userDefCallInputs.push({
+                    name: input.name,
+                    value: input.value.map(val => Object.assign({}, val))
+                });
+            }
+
+            const out_mappings = [];
+            const userDefCallOutputs = [];
+            for (let i = 0; i < extracted.outputs.length; i++) {
+                const output = extracted.outputs[i];
+                const valName = output.value && output.value[0] ? output.value[0].name : '';
+                out_mappings.push({
+                    id: valName,
+                    index: i
+                });
+                userDefCallOutputs.push({
+                    name: output.name,
+                    value: output.value.map(val => Object.assign({}, val))
+                });
+            }
+
+            const userDefCallNode = {
+                name: callNodeName,
+                type: {
+                    name: 'UserDefCall',
+                    identifier: 'UserDefCall',
+                    module: 'com.ambarella'
+                },
+                attributes: [
+                    {
+                        name: 'graph_id',
+                        type: 'string',
+                        value: subGraphId
+                    },
+                    {
+                        name: 'src_mappings',
+                        type: 'string',
+                        value: JSON.stringify(src_mappings)
+                    },
+                    {
+                        name: 'out_mappings',
+                        type: 'string',
+                        value: JSON.stringify(out_mappings)
+                    }
+                ],
+                inputs: userDefCallInputs,
+                outputs: userDefCallOutputs
+            };
+
+            let rootNodeIndex = -1;
+            for (const node of selectedNodes) {
+                const idx = workingGraph.nodes.indexOf(node);
+                if (idx > rootNodeIndex) {
+                    rootNodeIndex = idx;
+                }
+            }
+
+            const keepSet = new Set(selectedNodes);
+            const nextNodes = [];
+            for (let i = 0; i < workingGraph.nodes.length; i++) {
+                const node = workingGraph.nodes[i];
+                if (keepSet.has(node)) {
+                    if (i === rootNodeIndex) {
+                        nextNodes.push(userDefCallNode);
+                    }
+                } else {
+                    nextNodes.push(node);
+                }
+            }
+
+            let insertIdx = 0;
+            for (let i = 0; i < nextNodes.length; i++) {
+                const node = nextNodes[i];
+                if (node && node.type && (node.type.name === 'FragSubgraph' || node.type.name === 'UserDefSubgraph')) {
+                    insertIdx = i + 1;
+                }
+            }
+            nextNodes.splice(insertIdx, 0, userDefSubgraphNode);
+
+            // Strip prefix of dissolved calls from nodes and value references in the rest of the graph
+            // If we do not, mappings and connectoins are ruined since downstream nodes were still referencing prefixed value names
+            const stripCallPrefixes = (name, calls) => {
+                if (!name || typeof name !== 'string' || calls.size === 0) {
+                    return name;
+                }
+                let current = name;
+                let changed = true;
+                while (changed) {
+                    changed = false;
+                    for (const callName of calls) {
+                        const prefix = `inline::${callName}::`;
+                        if (current.startsWith(prefix)) {
+                            current = current.slice(prefix.length);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+                return current;
+            };
+
+            const remapValue = (value) => {
+                if (!value || !value.name) {
+                    return value;
+                }
+                const nextName = stripCallPrefixes(value.name, callsToInline);
+                if (nextName === value.name) {
+                    return value;
+                }
+                return Object.assign({}, value, { name: nextName });
+            };
+
+            const remapArgument = (argument) => {
+                if (!argument) {
+                    return argument;
+                }
+                const values = argument.value;
+                const mappedValues = Array.isArray(values) ? values.map((val) => remapValue(val)) : remapValue(values);
+                return Object.assign({}, argument, { value: mappedValues });
+            };
+
+            const stripNodePrefixes = (node) => {
+                if (!node) {
+                    return node;
+                }
+                return Object.assign({}, node, {
+                    name: stripCallPrefixes(node.name, callsToInline),
+                    inputs: (node.inputs || []).map((input) => remapArgument(input)),
+                    outputs: (node.outputs || []).map((output) => remapArgument(output))
+                });
+            };
+
+            const finalNodes = nextNodes.map(node => stripNodePrefixes(node));
+
+            const modifiedGraph = {
+                name: workingGraph.name,
+                identifier: workingGraph.identifier,
+                inputs: (workingGraph.inputs || []).map((input) => remapArgument(input)),
+                outputs: (workingGraph.outputs || []).map((output) => remapArgument(output)),
+                nodes: finalNodes
+            };
+
+            this._checkpointEditHistory();
+            this._editSession.replaceGraph(graphIndex, modifiedGraph);
+
+            if (this._model && this._model.proto) {
+                this._model.proto.graph = rebuildGraphProtoFromModified(modifiedGraph, this._model.proto);
+            }
+
+            for (const callName of callsToInline) {
+                this._batchInlineExpanded.delete(callName);
+            }
+            this._persistBatchInlineState();
+            this._syncBatchInlineToSession();
+
+            this._userDefSelectedNodes.clear();
+            this._sidebar.close();
+            this._bindEditorSession();
+            await this._refreshModifiedPane();
+        } catch (error) {
+            await this._host.message(error.message || error.toString(), true, 'OK');
+        }
+    }
+
     _openOperatorPicker(nodeView, position, x, y) {
         this._closeGraphOverlays();
         this._operatorPicker = new view.OperatorPicker(this, nodeView, position, x, y);
