@@ -1507,7 +1507,7 @@ view.View = class {
         const isUserDefSelected = this._userDefSelectedNodes && this._userDefSelectedNodes.has(node.name);
         if (node && node.type?.name !== 'BatchCall' && node.type?.name !== 'UserDefCall') {
             items.push({
-                label: isUserDefSelected ? 'Deselect Node for UserCallDef' : 'Select Node for UserCallDef',
+                label: isUserDefSelected ? 'Deselect Node for UserDefCall' : 'Select Node for UserDefCall',
                 action: () => {
                     if (isUserDefSelected) {
                         this._userDefSelectedNodes.delete(node.name);
@@ -2650,6 +2650,18 @@ view.View = class {
         this._rightPath = [];
         this._activePane = 'modified';
         this._exportBasenameOverride = null;
+        this._options.showOriginal = true;
+        this._options.showModified = true;
+        const showOriginalEl = this._element('toolbar-show-original');
+        const showModifiedEl = this._element('toolbar-show-modified');
+        if (showOriginalEl) {
+            showOriginalEl.checked = true;
+        }
+        if (showModifiedEl) {
+            showModifiedEl.checked = true;
+        }
+        this._updateDiffPanesVisibility();
+        this._saveOptions();
         await this._timeout(2);
         try {
             const model = await this._modelFactoryService.open(context);
