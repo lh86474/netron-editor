@@ -5140,6 +5140,13 @@ view.Graph = class extends grapher.Graph {
         }
         const document = this.host.document;
         const container = this._containerElement();
+        const isBackground = e.target === this._canvas || e.target === this._background || e.target === container ||
+            (e.target && e.target.classList && (e.target.classList.contains('node-block-background') || e.target.classList.contains('canvas'))) ||
+            (e.target && e.target.parentNode && e.target.parentNode.classList && e.target.parentNode.classList.contains('cluster'));
+        if (isBackground) {
+            this.view._sidebar.close();
+            this.select(null);
+        }
         e.target.setPointerCapture(e.pointerId);
         this._mousePosition = {
             left: container.scrollLeft,
