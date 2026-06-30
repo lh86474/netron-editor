@@ -2020,6 +2020,7 @@ view.View = class {
             nextNodes.splice(insertIdx, 0, userDefSubgraphNode);
 
             // Strip prefix of dissolved calls from nodes and value references in the rest of the graph
+            // If we do not, mappings and connectoins are ruined since downstream nodes were still referencing prefixed value names
             const stripCallPrefixes = (name, calls) => {
                 if (!name || typeof name !== 'string' || calls.size === 0) {
                     return name;
@@ -5143,13 +5144,6 @@ view.Graph = class extends grapher.Graph {
         }
         const document = this.host.document;
         const container = this._containerElement();
-        const isBackground = e.target === this._canvas || e.target === this._background || e.target === container ||
-            (e.target && e.target.classList && (e.target.classList.contains('node-block-background') || e.target.classList.contains('canvas'))) ||
-            (e.target && e.target.parentNode && e.target.parentNode.classList && e.target.parentNode.classList.contains('cluster'));
-        if (isBackground) {
-            this.view._sidebar.close();
-            this.select(null);
-        }
         e.target.setPointerCapture(e.pointerId);
         this._mousePosition = {
             left: container.scrollLeft,
