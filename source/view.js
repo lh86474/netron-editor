@@ -1511,6 +1511,9 @@ view.View = class {
                 action: () => {
                     if (isUserDefSelected) {
                         this._userDefSelectedNodes.delete(node.name);
+                        if (nodeView.context && nodeView.context.select) {
+                            nodeView.context.select(null);
+                        }
                     } else {
                         this._userDefSelectedNodes.add(node.name);
                     }
@@ -4427,6 +4430,13 @@ view.Graph = class extends grapher.Graph {
             if (obj && typeof obj.applyDeltaStyle === 'function') {
                 obj.applyDeltaStyle();
             }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshDeltaStyles) {
+                        block.target.refreshDeltaStyles();
+                    }
+                }
+            }
         }
     }
 
@@ -4434,6 +4444,13 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyRangeMarkerStyle === 'function') {
                 obj.applyRangeMarkerStyle();
+            }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshRangeMarkerStyles) {
+                        block.target.refreshRangeMarkerStyles();
+                    }
+                }
             }
         }
     }
@@ -4443,6 +4460,13 @@ view.Graph = class extends grapher.Graph {
             if (obj && typeof obj.applyUserDefSelectionStyle === 'function') {
                 obj.applyUserDefSelectionStyle();
             }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshUserDefSelectionStyles) {
+                        block.target.refreshUserDefSelectionStyles();
+                    }
+                }
+            }
         }
     }
 
@@ -4451,6 +4475,13 @@ view.Graph = class extends grapher.Graph {
             if (obj && typeof obj.applyInlineExpandedStyle === 'function') {
                 obj.applyInlineExpandedStyle();
             }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshInlineExpandedStyles) {
+                        block.target.refreshInlineExpandedStyles();
+                    }
+                }
+            }
         }
     }
 
@@ -4458,6 +4489,13 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyDanglingStyle === 'function') {
                 obj.applyDanglingStyle();
+            }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshDanglingStyles) {
+                        block.target.refreshDanglingStyles();
+                    }
+                }
             }
         }
     }
@@ -5144,6 +5182,19 @@ view.Graph = class extends grapher.Graph {
         }
         const document = this.host.document;
         const container = this._containerElement();
+        const isBackground = e.target === this._canvas || e.target === this._background || e.target === container ||
+            (e.target && e.target.classList && (e.target.classList.contains('node-block-background') || e.target.classList.contains('canvas'))) ||
+            (e.target && e.target.parentNode && e.target.parentNode.classList && e.target.parentNode.classList.contains('cluster'));
+        if (isBackground) {
+            this.view._sidebar.close();
+            if (this.view._leftPane && this.view._leftPane.graph) {
+                this.view._leftPane.graph.select(null);
+            }
+            if (this.view._rightPane && this.view._rightPane.graph) {
+                this.view._rightPane.graph.select(null);
+            }
+            this.select(null);
+        }
         e.target.setPointerCapture(e.pointerId);
         this._mousePosition = {
             left: container.scrollLeft,
