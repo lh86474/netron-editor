@@ -1831,7 +1831,7 @@ view.View = class {
                     const originalBatchCall = (sourceGraph.nodes || []).find((n) => n.name === batchCallName);
                     if (originalBatchCall) {
                         const target = resolveBatchCallTarget(sourceGraph, originalBatchCall);
-                        if (target && target.fragSubgraphNode) {
+                        if (target && target.fragSubgraphNode && target.fragSubgraphNode.type?.name !== 'UserDefSubgraph') {
                             const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
                             if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
                                 keepFragSubgraphs.push(target.fragSubgraphNode);
