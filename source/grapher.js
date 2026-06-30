@@ -986,7 +986,10 @@ grapher.Edge = class {
         const edgePath = curvePath(this, this.from, this.to);
         this.element.setAttribute('d', edgePath);
         this.hitTest.setAttribute('d', edgePath);
-        if (this.labelElement) {
+        if (this.labelElement &&
+            typeof this.x === 'number' && typeof this.y === 'number' &&
+            typeof this.width === 'number' && typeof this.height === 'number' &&
+            !isNaN(this.x) && !isNaN(this.y) && !isNaN(this.width) && !isNaN(this.height)) {
             this.labelElement.setAttribute('transform', `translate(${this.x - (this.width / 2)},${this.y - (this.height / 2)})`);
             this.labelElement.style.opacity = 1;
         }

@@ -1,4 +1,18 @@
-
+/* 
+ * Contains the core logic for editing the model. 
+ * Includes logic for:
+ * 1. Reading and writing the model
+ * 2. Validating and applying patches
+ * 3. Tracking changes
+ * 4. Undo and redo
+ * 5. Merging workspaces
+ * 6. Extracting subgraphs
+ * 7. Building nodes from metadata
+ * 8. Validating node insertions
+ * 9. Validating node deletions
+ * 10. Validating node modifications
+ * Author: Luray He
+ */
 import { DeltaTracker } from './delta-tracker.js';
 import { EditHistory } from './edit-history.js';
 import {
