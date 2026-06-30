@@ -1885,18 +1885,30 @@ view.View = class {
         }
         const graphIndex = 0;
         const sourceGraph = this._editSession.modified.getGraph(graphIndex);
-        const selectedNodes = (sourceGraph.nodes || []).filter(node => node && node.name && this._userDefSelectedNodes.has(node.name));
+
+        const callsToInline = new Set();
+        const inlineRegex = /inline::([^:]+)::/g;
+        for (const nodeName of this._userDefSelectedNodes) {
+            let match;
+            inlineRegex.lastIndex = 0;
+            while ((match = inlineRegex.exec(nodeName)) !== null) {
+                callsToInline.add(match[1]);
+            }
+        }
+        const workingGraph = buildExtractWorkingGraph(sourceGraph, callsToInline);
+        const selectedNodes = (workingGraph.nodes || []).filter(node => node && node.name && this._userDefSelectedNodes.has(node.name));
+
         if (selectedNodes.length === 0) {
             return;
         }
 
         try {
-            const { beginNodes, endNodes } = findBoundaryNodes(sourceGraph, selectedNodes);
-            let extracted = extractSubgraph(sourceGraph, beginNodes, endNodes);
+            const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
+            let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
             extracted = stripInlineExpansionPrefixes(extracted);
-            const subGraphId = genUniqueNodeName('userdefsubgraph', sourceGraph);
+            const subGraphId = genUniqueNodeName('userdefsubgraph', workingGraph);
             extracted.name = subGraphId;
-            const callNodeName = genUniqueNodeName('userDefCall', sourceGraph);
+            const callNodeName = genUniqueNodeName('userDefCall', workingGraph);
 
             const userDefSubgraphNode = {
                 name: subGraphId,
@@ -1976,7 +1988,7 @@ view.View = class {
 
             let rootNodeIndex = -1;
             for (const node of selectedNodes) {
-                const idx = sourceGraph.nodes.indexOf(node);
+                const idx = workingGraph.nodes.indexOf(node);
                 if (idx > rootNodeIndex) {
                     rootNodeIndex = idx;
                 }
@@ -1984,8 +1996,8 @@ view.View = class {
 
             const keepSet = new Set(selectedNodes);
             const nextNodes = [];
-            for (let i = 0; i < sourceGraph.nodes.length; i++) {
-                const node = sourceGraph.nodes[i];
+            for (let i = 0; i < workingGraph.nodes.length; i++) {
+                const node = workingGraph.nodes[i];
                 if (keepSet.has(node)) {
                     if (i === rootNodeIndex) {
                         nextNodes.push(userDefCallNode);
@@ -2005,10 +2017,10 @@ view.View = class {
             nextNodes.splice(insertIdx, 0, userDefSubgraphNode);
 
             const modifiedGraph = {
-                name: sourceGraph.name,
-                identifier: sourceGraph.identifier,
-                inputs: sourceGraph.inputs,
-                outputs: sourceGraph.outputs,
+                name: workingGraph.name,
+                identifier: workingGraph.identifier,
+                inputs: workingGraph.inputs,
+                outputs: workingGraph.outputs,
                 nodes: nextNodes
             };
 
@@ -2018,6 +2030,12 @@ view.View = class {
             if (this._model && this._model.proto) {
                 this._model.proto.graph = rebuildGraphProtoFromModified(modifiedGraph, this._model.proto);
             }
+
+            for (const callName of callsToInline) {
+                this._batchInlineExpanded.delete(callName);
+            }
+            this._persistBatchInlineState();
+            this._syncBatchInlineToSession();
 
             this._userDefSelectedNodes.clear();
             this._sidebar.close();
