@@ -1,10 +1,30 @@
 /* This file is used to track the history of edits made to the model.
- * Created mainly to support undo and redo so we can preserve snapshops of the graph
+ * Created mainly to support undo and redo so we can preserve snapshots of the graph
  * Author: Luray He
  */
-import { cloneGraphModules, stringifyEditorJSON } from './model-editor.js';
+import { cloneGraphModules } from './model-editor.js';
+import { cloneAmbapbEditingState } from './ambapb-editor.js';
 
-const cloneData = (value) => JSON.parse(stringifyEditorJSON(value));
+const cloneDeltaSnapshot = (snapshot) => {
+    if (!snapshot) {
+        return null;
+    }
+    return {
+        original: Array.isArray(snapshot.original) ? snapshot.original.map(([key, value]) => {
+            if (Array.isArray(value)) {
+                return [key, value.slice()];
+            }
+            return [key, value];
+        }) : [],
+        changes: Array.isArray(snapshot.changes) ? snapshot.changes.map((change) => {
+            const cloned = { ...change };
+            if (Array.isArray(change.newValue)) {
+                cloned.newValue = change.newValue.slice();
+            }
+            return cloned;
+        }) : []
+    };
+};
 
 export class EditHistory {
 
@@ -55,15 +75,32 @@ export class EditHistory {
     }
 
     _capture(session) {
-        return {
+        const snapshot = {
             modules: cloneGraphModules(session.modified.model.modules),
-            delta: cloneData(session.delta.exportSnapshot())
+            delta: cloneDeltaSnapshot(session.delta.exportSnapshot()),
+            batchInlineExpanded: Array.isArray(session.batchInlineExpanded)
+                ? session.batchInlineExpanded.slice()
+                : []
         };
+        if (session.modified.model._ambapb) {
+            snapshot.ambapb = cloneAmbapbEditingState(session.modified.model._ambapb);
+        }
+        return snapshot;
     }
 
     // restore the session to the previous snapshot
     _restore(session, snapshot) {
         session.modified.model.modules = cloneGraphModules(snapshot.modules);
+        if (snapshot.ambapb) {
+            const ambapb = cloneAmbapbEditingState(snapshot.ambapb);
+            session.modified.model._ambapb = ambapb;
+            if (session.original._ambapb) {
+                session.original._ambapb.primGraph = ambapb.primGraph;
+            }
+        }
         session.delta.restoreSnapshot(snapshot.delta);
+        session.batchInlineExpanded = Array.isArray(snapshot.batchInlineExpanded) 
+            ? snapshot.batchInlineExpanded.slice()
+            : [];
     }
 }

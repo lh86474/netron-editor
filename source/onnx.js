@@ -1,6 +1,7 @@
 
 import * as protobuf from './protobuf.js';
 import './onnx-encode.js';
+import * as ambapb from './ambapb.js';
 
 const onnx = {};
 
@@ -57,8 +58,10 @@ onnx.Model = class {
         } else {
             this._proto = model;
         }
-        // Only exportable for ONNX files. 
+        // Only exportable for ONNX files.
         this._exportable = target.name === 'onnx.proto' && target.encoding === 'binary' && target.type === 'model' && !target.offset;
+        // new _kind field to track if the model is an ambapb checkpoint
+        this._kind = 'onnx';
         this._modules = [];
         this._format = target.format;
         this._producer = model.producer_name && model.producer_name.length > 0 ? model.producer_name + (model.producer_version && model.producer_version.length > 0 ? ` ${model.producer_version}` : '') : null;
@@ -120,6 +123,9 @@ onnx.Model = class {
                 this._metadata.push(argument);
             }
         }
+        if (ambapb.attachCheckpoint(this, this._proto)) {
+            this._metadata.unshift(new onnx.Argument('editor', 'Amba checkpoint: edit CVFlowNVP attributes in the modified pane.'));
+        }
         const context = new onnx.Context.Model(metadata, target.locations, imports, model.graph, model.functions);
         const graph = context.graph(null);
         if (graph) {
@@ -139,6 +145,10 @@ onnx.Model = class {
 
     get exportable() {
         return this._exportable;
+    }
+
+    get kind() {
+        return this._kind || 'onnx';
     }
 
     get version() {
@@ -872,6 +882,9 @@ onnx.Context = class {
                     break;
                 case onnx.AttributeType.GRAPH:
                     value = attribute.g ? this.graph(attribute.g) : null;
+                    if (value && name === 'compiled_prim_graph') {
+                        value._ambapbCompiledGraph = true;
+                    }
                     type = 'graph';
                     break;
                 case onnx.AttributeType.FLOATS:

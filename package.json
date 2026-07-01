@@ -23,7 +23,7 @@
         "publish": "node package.js publish",
         "release": "node package.js release",
         "test": "node package.js test",
-        "test:editor": "node --test test/editor_state.test.js",
+        "test:editor": "node --test test/editor_state.test.js test/userdef_extract.test.js",
         "validate": "node package.js validate",
         "coverage": "node package.js coverage",
         "analyze": "node package.js analyze",

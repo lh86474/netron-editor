@@ -1,0 +1,90 @@
+{
+  "primitives": [
+    {
+      "id": "data",
+      "mangled-id": "data",
+      "type": "input",
+      "vas-sequence-number": 1,
+      "fragment-id": "",
+      "oports": [
+        {
+          "id": "data",
+          "data-format": {
+            "sign": 0,
+            "bits": 8,
+            "expoff": 0,
+            "expbits": 0
+          },
+          "dimension": {
+            "w": 224,
+            "h": 224,
+            "d": 3,
+            "p": 1
+          },
+          "additional-dep-prim-ids": []
+        }
+      ],
+      "attributes": {
+        "w": "224",
+        "h": "224",
+        "d": "3"
+      }
+    },
+    {
+      "id": "conv0",
+      "mangled-id": "conv0",
+      "type": "conv2ibesbcp",
+      "vas-sequence-number": 2,
+      "fragment-id": "",
+      "sources": [
+        {
+          "id": "data",
+          "port": 0
+        }
+      ],
+      "oports": [
+        {
+          "id": "conv0",
+          "data-format": {
+            "sign": 0,
+            "bits": 8,
+            "expoff": 6,
+            "expbits": 0
+          },
+          "dimension": {
+            "w": 112,
+            "h": 112,
+            "d": 32,
+            "p": 1
+          },
+          "additional-dep-prim-ids": []
+        }
+      ],
+      "attributes": {
+        "w": "112",
+        "h": "112",
+        "stride": "2"
+      }
+    },
+    {
+      "id": "output0",
+      "mangled-id": "output0",
+      "type": "output",
+      "vas-sequence-number": 3,
+      "fragment-id": "",
+      "sources": [
+        {
+          "id": "conv0",
+          "port": 0
+        }
+      ],
+      "attributes": {
+        "dram_format": "-1"
+      }
+    }
+  ],
+  "trackers": [],
+  "graph_input": "data",
+  "graph_output": "output0",
+  "subgraphs": []
+}

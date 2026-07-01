@@ -1,6 +1,29 @@
-
+/* 
+ * Contains the core logic for editing the model. 
+ * Includes logic for:
+ * 1. Reading and writing the model
+ * 2. Validating and applying patches
+ * 3. Tracking changes
+ * 4. Undo and redo
+ * 5. Merging workspaces
+ * 6. Extracting subgraphs
+ * 7. Building nodes from metadata
+ * 8. Validating node insertions
+ * 9. Validating node deletions
+ * 10. Validating node modifications
+ * Author: Luray He
+ */
 import { DeltaTracker } from './delta-tracker.js';
 import { EditHistory } from './edit-history.js';
+import {
+    assertAmbapbAttributePatchAllowed,
+    attachAmbapbEditingState,
+    getPrimGraphSnapshotValue,
+    isAmbapbShellNode,
+    PRIM_GRAPH_ATTRIBUTE,
+    syncShellAttribute,
+    validateAmbapbPatch
+} from './ambapb-editor.js';
 
 const readType = (type) => {
     if (!type) {
@@ -145,23 +168,98 @@ const readModel = (model) => {
             value: readArgumentValues(argument)
         };
     };
-    const readNode = (node) => ({
-        name: node.name,
-        type: readType(node.type),
-        attributes: (node.attributes || []).map((attribute) => readAttribute(attribute)),
-        inputs: (node.inputs || []).map((input) => readArgument(input)),
-        outputs: (node.outputs || []).map((output) => readArgument(output))
-    });
-    const readGraph = (graph) => ({
-        name: graph.name,
-        identifier: graph.identifier,
-        inputs: (graph.inputs || []).map((input) => readArgument(input)),
-        outputs: (graph.outputs || []).map((output) => readArgument(output)),
-        nodes: (graph.nodes || []).map((node) => readNode(node))
-    });
+    const readNode = (node) => {
+        const result = {
+            name: node.name,
+            type: readType(node.type),
+            attributes: (node.attributes || []).map((attribute) => readAttribute(attribute)),
+            inputs: (node.inputs || []).map((input) => readArgument(input)),
+            outputs: (node.outputs || []).map((output) => readArgument(output))
+        };
+        if (node.description !== undefined) {
+            result.description = node.description;
+        }
+        if (node._primitiveId !== undefined) {
+            result._primitiveId = node._primitiveId;
+        }
+        if (node._primitiveIndex !== undefined) {
+            result._primitiveIndex = node._primitiveIndex;
+        }
+        return result;
+    };
+    const readGraph = (graph) => {
+        const result = {
+            name: graph.name,
+            identifier: graph.identifier,
+            inputs: (graph.inputs || []).map((input) => readArgument(input)),
+            outputs: (graph.outputs || []).map((output) => readArgument(output)),
+            nodes: (graph.nodes || []).map((node) => readNode(node))
+        };
+        if (graph._ambapb) {
+            result._ambapb = true;
+        }
+        if (graph._ambapbCompiledGraph) {
+            result._ambapbCompiledGraph = true;
+        }
+        return result;
+    };
     return {
         format: model.format,
         modules: (model.modules || []).map((graph) => readGraph(graph))
+    };
+};
+
+const NESTED_COMPILED_NODE_ENTITY_RE =
+    /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)(?:\/attr:(\d+))?$/;
+
+const NESTED_COMPILED_VALUE_ENTITY_RE =
+    /^graph:(\d+)\/node:(\d+)\/([^/]+)\/value:(\d+)(?:\/attr:(\d+))?$/;
+
+export const isNestedCompiledValueEntityId = (entityId) => {
+    return Boolean(entityId && NESTED_COMPILED_VALUE_ENTITY_RE.test(entityId));
+};
+
+const nodeGraphArguments = (node) => {
+    if (!node) {
+        return [];
+    }
+    return (node.attributes || []).concat(node.blocks || []);
+};
+
+export const isNestedCompiledNodeEntityId = (entityId) => {
+    return Boolean(entityId && NESTED_COMPILED_NODE_ENTITY_RE.test(entityId));
+};
+
+const parseNestedCompiledNodeEntityId = (entityId) => {
+    const match = NESTED_COMPILED_NODE_ENTITY_RE.exec(entityId);
+    if (!match) {
+        return null;
+    }
+    return {
+        graphIndex: Number(match[1]),
+        hostNodeIndex: Number(match[2]),
+        graphAttrName: match[3],
+        subNodeIndex: Number(match[4]),
+        attributeIndex: match[5] !== undefined ? Number(match[5]) : null
+    };
+};
+
+const getNestedCompiledGraphNode = (model, location) => {
+    const graph = model.modules[location.graphIndex];
+    const hostNode = graph && graph.nodes ? graph.nodes[location.hostNodeIndex] : null;
+    if (!hostNode) {
+        return null;
+    }
+    const graphEntry = nodeGraphArguments(hostNode).find(
+        (entry) => entry.name === location.graphAttrName && entry.type === 'graph' && entry.value
+    );
+    if (!graphEntry || !Array.isArray(graphEntry.value.nodes)) {
+        return null;
+    }
+    return {
+        hostNode,
+        subGraph: graphEntry.value,
+        node: graphEntry.value.nodes[location.subNodeIndex] || null
     };
 };
 
@@ -177,7 +275,40 @@ const parseNodeEntityId = (entityId) => {
     };
 };
 
+const getNestedCompiledGraphValue = (model, location) => {
+    const graph = model.modules[location.graphIndex];
+    const hostNode = graph && graph.nodes ? graph.nodes[location.hostNodeIndex] : null;
+    if (!hostNode) {
+        return null;
+    }
+    const graphEntry = nodeGraphArguments(hostNode).find(
+        (entry) => entry.name === location.graphAttrName && entry.type === 'graph' && entry.value
+    );
+    if (!graphEntry) {
+        return null;
+    }
+    const subGraph = graphEntry.value;
+    for (const [value, id] of enumerateGraphValues(subGraph, location.graphIndex)) {
+        const expectedId = `graph:${location.graphIndex}/value:${location.valueIndex}`;
+        if (id === expectedId) {
+            return value;
+        }
+    }
+    return null;
+};
+
 const parseValueEntityId = (entityId) => {
+    const nestedMatch = NESTED_COMPILED_VALUE_ENTITY_RE.exec(entityId);
+    if (nestedMatch) {
+        return {
+            graphIndex: Number(nestedMatch[1]),
+            target: 'nested-value',
+            hostNodeIndex: Number(nestedMatch[2]),
+            graphAttrName: nestedMatch[3],
+            valueIndex: Number(nestedMatch[4]),
+            attributeIndex: nestedMatch[5] !== undefined ? Number(nestedMatch[5]) : null
+        };
+    }
     const match = /^graph:(\d+)\/value:(\d+)$/.exec(entityId);
     if (!match) {
         throw new Error(`Invalid value entityId: ${entityId}`);
@@ -189,6 +320,28 @@ const parseValueEntityId = (entityId) => {
 };
 
 const parseAttributeEntityId = (entityId) => {
+    const nestedMatch = NESTED_COMPILED_NODE_ENTITY_RE.exec(entityId);
+    if (nestedMatch) {
+        return {
+            graphIndex: Number(nestedMatch[1]),
+            target: 'nested-node',
+            hostNodeIndex: Number(nestedMatch[2]),
+            graphAttrName: nestedMatch[3],
+            targetIndex: Number(nestedMatch[4]),
+            attributeIndex: nestedMatch[5] !== undefined ? Number(nestedMatch[5]) : null
+        };
+    }
+    const nestedValueMatch = NESTED_COMPILED_VALUE_ENTITY_RE.exec(entityId);
+    if (nestedValueMatch) {
+        return {
+            graphIndex: Number(nestedValueMatch[1]),
+            target: 'nested-value',
+            hostNodeIndex: Number(nestedValueMatch[2]),
+            graphAttrName: nestedValueMatch[3],
+            targetIndex: Number(nestedValueMatch[4]),
+            attributeIndex: nestedValueMatch[5] !== undefined ? Number(nestedValueMatch[5]) : null
+        };
+    }
     const nodeMatch = /^graph:(\d+)\/node:(\d+)(?:\/attr:(\d+))?$/.exec(entityId);
     if (nodeMatch) {
         return {
@@ -211,6 +364,26 @@ const parseAttributeEntityId = (entityId) => {
 };
 
 const parseAttributeParentId = (parentId) => {
+    const nestedMatch = NESTED_COMPILED_NODE_ENTITY_RE.exec(parentId);
+    if (nestedMatch && nestedMatch[5] === undefined) {
+        return {
+            graphIndex: Number(nestedMatch[1]),
+            target: 'nested-node',
+            hostNodeIndex: Number(nestedMatch[2]),
+            graphAttrName: nestedMatch[3],
+            targetIndex: Number(nestedMatch[4])
+        };
+    }
+    const nestedValueMatch = NESTED_COMPILED_VALUE_ENTITY_RE.exec(parentId);
+    if (nestedValueMatch && nestedValueMatch[5] === undefined) {
+        return {
+            graphIndex: Number(nestedValueMatch[1]),
+            target: 'nested-value',
+            hostNodeIndex: Number(nestedValueMatch[2]),
+            graphAttrName: nestedValueMatch[3],
+            targetIndex: Number(nestedValueMatch[4])
+        };
+    }
     const nodeMatch = /^graph:(\d+)\/node:(\d+)$/.exec(parentId);
     if (nodeMatch) {
         return {
@@ -231,6 +404,26 @@ const parseAttributeParentId = (parentId) => {
 };
 
 const getAttributeTarget = (model, location) => {
+    if (location.target === 'nested-node') {
+        const resolved = getNestedCompiledGraphNode(model, {
+            graphIndex: location.graphIndex,
+            hostNodeIndex: location.hostNodeIndex,
+            graphAttrName: location.graphAttrName,
+            subNodeIndex: location.targetIndex
+        });
+        if (!resolved || !resolved.node) {
+            throw new Error(`Nested node not found for attribute target.`);
+        }
+        return resolved.node;
+    }
+    if (location.target === 'nested-value') {
+        const valueId = `graph:${location.graphIndex}/node:${location.hostNodeIndex}/${location.graphAttrName}/value:${location.targetIndex}`;
+        const value = getValueByEntityId(model, valueId);
+        if (!value) {
+            throw new Error(`Nested value not found for attribute target.`);
+        }
+        return value;
+    }
     if (location.target === 'node') {
         const graph = model.modules[location.graphIndex];
         return graph.nodes[location.targetIndex];
@@ -253,6 +446,9 @@ const attributeNameFromProperty = (property) => {
 
 const getValueByEntityId = (model, entityId) => {
     const location = parseValueEntityId(entityId);
+    if (location.target === 'nested-value') {
+        return getNestedCompiledGraphValue(model, location);
+    }
     const graph = model.modules[location.graphIndex];
     if (!graph) {
         return null;
@@ -554,14 +750,14 @@ export const validateMarkedRangeNodes = (graph, beginNodes, endNodes) => {
     if (begins.length === 0 || ends.length === 0) {
         throw new SubgraphExtractError('At least one begin and one end node are required.');
     }
-    const levels = computeNodeLevels(graph);
-    assertSameLevel(begins, levels, 'Begin');
-    assertSameLevel(ends, levels, 'End');
-    const beginLevel = levels.get(begins[0]);
-    const endLevel = levels.get(ends[0]);
-    if (beginLevel > endLevel) {
-        throw new SubgraphExtractError('Begin nodes must not be deeper than end nodes.');
-    }
+    // const levels = computeNodeLevels(graph);
+    // assertSameLevel(begins, levels, 'Begin');
+    // assertSameLevel(ends, levels, 'End');
+    // const beginLevel = levels.get(begins[0]);
+    // const endLevel = levels.get(ends[0]);
+    // if (beginLevel > endLevel) {
+    //     throw new SubgraphExtractError('Begin nodes must not be deeper than end nodes.');
+    // }
     for (const end of ends) {
         if (!begins.some((begin) => isNodeReachable(graph, begin, end))) {
             throw new SubgraphExtractError(`End node '${nodeDisplayName(end)}' is not reachable from any marked begin node.`);
@@ -1263,7 +1459,11 @@ const buildOriginalSnapshot = (model) => {
             snapshot.set(nodeId, node.name);
             node.attributes.forEach((attribute, attributeIndex) => {
                 const attributeId = `${nodeId}/attr:${attributeIndex}`;
-                snapshot.set(attributeId, cloneAttributeValue(attribute.value));
+                let snapshotValue = cloneAttributeValue(attribute.value);
+                if (model._ambapb && isAmbapbShellNode(node) && attribute.name === PRIM_GRAPH_ATTRIBUTE) {
+                    snapshotValue = getPrimGraphSnapshotValue(model._ambapb);
+                }
+                snapshot.set(attributeId, snapshotValue);
             });
         });
         for (const [value, valueId] of enumerateGraphValues(graph, graphIndex)) {
@@ -1366,10 +1566,14 @@ class EditorState {
     constructor(original) {
         this._original = original;
         const normalized = readModel(original);
+        if (original._ambapb) {
+            attachAmbapbEditingState(normalized, original._ambapb);
+        }
         this.modified = new EditableModel(normalized);
         this._snapshot = buildOriginalSnapshot(normalized);
         this.delta = new DeltaTracker(this._snapshot);
         this.history = new EditHistory();
+        this.batchInlineExpanded = [];
     }
 
     get original() {
@@ -1385,6 +1589,8 @@ class EditorState {
     applyPatch(patch) {
         let entityId = patch.entityId;
         let changeType = patch.changeType;
+        let newValueForDelta = patch.newValue;
+        validateAmbapbPatch(this.modified.model, patch);
 
         if (patch.changeType === 'add' && patch.entityType === 'attribute') {
             const location = parseAttributeParentId(patch.parentId);
@@ -1427,6 +1633,27 @@ class EditorState {
             const target = getAttributeTarget(this.modified.model, location);
             const attribute = target.attributes[location.attributeIndex];
             attribute.value = Array.isArray(patch.newValue) ? patch.newValue.slice() : patch.newValue;
+            if (location.target === 'node' && this.modified.model._ambapb) {
+                syncShellAttribute(
+                    this.modified.model,
+                    location.graphIndex,
+                    location.targetIndex,
+                    attribute.name,
+                    patch.newValue
+                );
+                if (this._original._ambapb) {
+                    syncShellAttribute(
+                        { modules: this.modified.model.modules, _ambapb: this._original._ambapb },
+                        location.graphIndex,
+                        location.targetIndex,
+                        attribute.name,
+                        patch.newValue
+                    );
+                }
+                if (attribute.name === PRIM_GRAPH_ATTRIBUTE) {
+                    newValueForDelta = getPrimGraphSnapshotValue(this.modified.model._ambapb);
+                }
+            }
         } else if (patch.changeType === 'add' && patch.entityType === 'node' && patch.property === 'insert') {
             const location = parseNodeEntityId(patch.parentId);
             const graph = this.modified.getGraph(location.graphIndex);
@@ -1454,12 +1681,26 @@ class EditorState {
                 };
             }
         } else {
-            const location = parseNodeEntityId(entityId.includes('/attr:') ? entityId : patch.parentId || entityId);
-            const graph = this.modified.getGraph(location.graphIndex);
-            const node = graph.nodes[location.nodeIndex];
+            const nestedLocation = parseNestedCompiledNodeEntityId(entityId);
+            let node = null;
+
+            if (nestedLocation && nestedLocation.attributeIndex === null) {
+                const resolved = getNestedCompiledGraphNode(this.modified.model, nestedLocation);
+                node = resolved ? resolved.node : null;
+            } else if (!nestedLocation) {
+                const location = parseNodeEntityId(entityId.includes('/attr:') ? entityId : patch.parentId || entityId);
+                const graph = this.modified.getGraph(location.graphIndex);
+                node = graph.nodes[location.nodeIndex];
+            }
+
+            if (!node) {
+                throw new Error(`Node not found for entityId: ${entityId}`);
+            }
 
             if (patch.entityType === 'node' && patch.property === 'name') {
                 node.name = patch.newValue;
+            } else if (patch.entityType === 'node' && patch.property === 'description') {
+                node.description = patch.newValue;
             } else {
                 throw new Error(`Unsupported patch: ${JSON.stringify(patch)}`);
             }
@@ -1470,7 +1711,7 @@ class EditorState {
             entityType: patch.entityType,
             changeType,
             property: patch.property,
-            newValue: patch.newValue
+            newValue: newValueForDelta
         };
         if (patch.parentId) {
             change.parentId = patch.parentId;
@@ -1486,7 +1727,7 @@ class EditorState {
             changeType,
             property: patch.property,
             oldValue: undefined,
-            newValue: patch.newValue
+            newValue: newValueForDelta
         };
     }
 }
@@ -1504,6 +1745,24 @@ export const locateNodeEntity = function(model, node) {
                 nodeId: `graph:${graphIndex}/node:${nodeIndex}`
             };
         }
+        for (let hostNodeIndex = 0; hostNodeIndex < nodes.length; hostNodeIndex++) {
+            for (const entry of nodeGraphArguments(nodes[hostNodeIndex])) {
+                if (entry.type !== 'graph' || !entry.value || !Array.isArray(entry.value.nodes)) {
+                    continue;
+                }
+                const subNodeIndex = entry.value.nodes.indexOf(node);
+                if (subNodeIndex >= 0) {
+                    return {
+                        graphIndex,
+                        nodeIndex: subNodeIndex,
+                        nodeId: `graph:${graphIndex}/node:${hostNodeIndex}/${entry.name}/node:${subNodeIndex}`,
+                        nested: true,
+                        hostNodeIndex,
+                        graphAttrName: entry.name
+                    };
+                }
+            }
+        }
     }
     return null;
 };
@@ -1520,8 +1779,72 @@ export const locateValueEntity = function(model, value) {
                 };
             }
         }
+        const nodes = graph.nodes || [];
+        for (let hostNodeIndex = 0; hostNodeIndex < nodes.length; hostNodeIndex++) {
+            for (const entry of nodeGraphArguments(nodes[hostNodeIndex])) {
+                if (entry.type !== 'graph' || !entry.value || !Array.isArray(entry.value.nodes)) {
+                    continue;
+                }
+                const subGraph = entry.value;
+                for (const [subEntry, subValueId] of enumerateGraphValues(subGraph, graphIndex)) {
+                    if (subEntry === value) {
+                        const match = /\/value:(\d+)$/.exec(subValueId);
+                        const subValueIndex = match ? Number(match[1]) : 0;
+                        return {
+                            graphIndex,
+                            valueId: `graph:${graphIndex}/node:${hostNodeIndex}/${entry.name}/value:${subValueIndex}`,
+                            nested: true,
+                            hostNodeIndex,
+                            graphAttrName: entry.name,
+                            valueIndex: subValueIndex
+                        };
+                    }
+                }
+            }
+        }
     }
     return null;
+};
+
+export const locateGraphPath = (model, graph) => {
+    const modules = model.modules || [];
+    for (let graphIndex = 0; graphIndex < modules.length; graphIndex++) {
+        const m = modules[graphIndex];
+        if (m === graph) {
+            return { kind: 'module', index: graphIndex };
+        }
+        const nodes = m.nodes || [];
+        for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex++) {
+            for (const entry of nodeGraphArguments(nodes[nodeIndex])) {
+                if (entry.type === 'graph' && entry.value === graph) {
+                    return {
+                        kind: 'nested',
+                        graphIndex,
+                        nodeIndex,
+                        attrName: entry.name
+                    };
+                }
+            }
+        }
+    }
+    return null;
+};
+
+export const getGraphByPath = (model, pathInfo) => {
+    if (!pathInfo) {
+        return null;
+    }
+    if (pathInfo.kind === 'module') {
+        return model.modules[pathInfo.index] || null;
+    }
+    const graph = model.modules[pathInfo.graphIndex];
+    const hostNode = graph && graph.nodes ? graph.nodes[pathInfo.nodeIndex] : null;
+    if (!hostNode) {
+        return null;
+    }
+    const entry = [...(hostNode.attributes || []), ...(hostNode.blocks || [])]
+        .find((item) => item.name === pathInfo.attrName && item.type === 'graph' && item.value);
+    return entry ? entry.value : null;
 };
 
 export class ModelEditor {

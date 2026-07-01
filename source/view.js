@@ -1,12 +1,45 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
+import { canEditCheckpoint, isAmbapbCheckpoint, canExportCheckpoint } from './ambapb.js';
+import {
+    buildPrimGraphJsonAfterAttributeEdit,
+    ensureAmbapbUiState,
+    filterPrimitives,
+    formatPrimGraphForEditor,
+    isAmbapbRuntimeShellNode,
+    isAmbapbShellNode,
+    isPrimitiveModified,
+    isViewingCompiledAmbapbGraph,
+    PRIM_GRAPH_ATTRIBUTE,
+    READ_ONLY_SHELL_ATTRIBUTES,
+    resolveSelectedPrimitiveId,
+    validateAmbapbPatch
+} from './ambapb-editor.js';
+import { AmbapbMetadataResolver } from './ambapb-metadata.js';
+import { parsePrimGraphJson } from './ambapb-prim-graph.js';
 import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
 import { validateNodeInsert } from './onnx-operator-validation.js';
 import { GraphPane } from './graph-pane.js';
 import { MergeWorkspaceController } from './merge-workspace.js';
+import {
+    applyBatchInlineExpansions,
+    canExpandBatchCall,
+    inlineExpansionBatchCallName,
+    isBatchCallNode,
+    sourceEntityIdForNode,
+    sourceNodeForEntity,
+    sourceValueForEntity,
+    resolveBatchCallTarget,
+    resolveInlinedSourceContext
+} from './ambapb-batch-inline.js';
+import {
+    buildExtractWorkingGraph,
+    resolveMarkedNodesByName,
+    stripInlineExpansionPrefixes
+} from './ambapb-subgraph.js';
 
 const view = {};
 const markdown = {};
@@ -24,7 +57,9 @@ view.View = class {
             names: false,
             direction: 'vertical',
             mousewheel: 'scroll',
-            syncScroll: false
+            syncScroll: false,
+            showOriginal: true,
+            showModified: true
         };
         this._options = { ...this._defaultOptions };
         this._syncApplying = false;
@@ -34,15 +69,25 @@ view.View = class {
         this._editSession = null;
         this._editSessionError = null;
         this._deltaUnsubscribe = null;
-        // new leftPane and rightPane fields for the two graph panes
         this._leftPane = null;
         this._rightPane = null;
-        this._activePane = 'modified';
-        this._path = [];
+        this.__activePane = 'modified';
+        this._leftPath = [];
+        this._rightPath = [];
         this._selection = [];
         // arrays to support multiple begin and end marker
         this._rangeBegins = [];
         this._rangeEnds = [];
+        // expanded batch call names are here
+        this._batchInlineExpanded = new Set();
+        this._userDefSelectedNodes = new Set();
+        this._displayGraphCache = null;
+        this._displayGraphRevision = 0;
+        this._refreshPromise = null;
+        this._refreshQueued = null;
+        this._graphBusyCount = 0;
+        this._graphBusyShowTimer = null;
+        this._graphBusyOverlay = null;
         this._danglingNodeNames = new Set();
         this._applyingHistory = false;
         this._exportBasenameOverride = null;
@@ -59,6 +104,7 @@ view.View = class {
             const zip = await import('./zip.js');
             await zip.Archive.import();
             await this._host.view(this);
+            await AmbapbMetadataResolver.load(this._host);
             this._registerDebugEditorState();
             const options = this._host.get('options') || {};
             for (const [name, value] of Object.entries(options)) {
@@ -81,7 +127,29 @@ view.View = class {
                 this.toggle('syncScroll');
             });
             this._updateSyncScrollButton();
+            const showOriginal = this._element('toolbar-show-original');
+            const showModified = this._element('toolbar-show-modified');
+            if (showOriginal) {
+                showOriginal.checked = this._options.showOriginal;
+                showOriginal.addEventListener('change', () => {
+                    this._options.showOriginal = showOriginal.checked;
+                    this._updateDiffPanesVisibility();
+                    this._saveOptions();
+                });
+            }
+            if (showModified) {
+                showModified.checked = this._options.showModified;
+                showModified.addEventListener('change', () => {
+                    this._options.showModified = showModified.checked;
+                    this._updateDiffPanesVisibility();
+                    this._saveOptions();
+                });
+            }
+            this._updateDiffPanesVisibility();
             this._mergeWorkspace.bindEvents();
+            this._setupResizablePanes('diff-container', 'target-original', 'pane-divider', false);
+            this._setupResizablePanes('merge-source-row', 'merge-upstream-pane', 'merge-source-divider', false);
+            this._setupResizablePanes('merge-graph-area', 'merge-source-row', 'merge-row-divider', true);
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget();
             });
@@ -404,6 +472,59 @@ view.View = class {
         }
     }
 
+    _invalidateDisplayGraphCache() {
+        this._displayGraphRevision++;
+        this._displayGraphCache = null;
+    }
+
+    _graphBusyElement() {
+        if (!this._graphBusyOverlay) {
+            this._graphBusyOverlay = this._element('graph-busy-overlay');
+        }
+        return this._graphBusyOverlay;
+    }
+
+    _beginGraphBusy() {
+        this._graphBusyCount++;
+        if (this._graphBusyCount !== 1) {
+            return;
+        }
+        const overlay = this._graphBusyElement();
+        if (!overlay) {
+            return;
+        }
+        this._graphBusyShowTimer = this._host.window.setTimeout(() => {
+            this._graphBusyShowTimer = null;
+            overlay.classList.add('visible');
+            overlay.setAttribute('aria-busy', 'true');
+        }, 80);
+    }
+
+    _endGraphBusy() {
+        this._graphBusyCount = Math.max(0, this._graphBusyCount - 1);
+        if (this._graphBusyCount > 0) {
+            return;
+        }
+        if (this._graphBusyShowTimer) {
+            this._host.window.clearTimeout(this._graphBusyShowTimer);
+            this._graphBusyShowTimer = null;
+        }
+        const overlay = this._graphBusyElement();
+        if (overlay) {
+            overlay.classList.remove('visible');
+            overlay.setAttribute('aria-busy', 'false');
+        }
+    }
+
+    async _withGraphBusy(callback) {
+        this._beginGraphBusy();
+        try {
+            await callback();
+        } finally {
+            this._endGraphBusy();
+        }
+    }
+
     find() {
         if (this._target && this._sidebar.identifier !== 'find') {
             this._target.select(null);
@@ -523,6 +644,10 @@ view.View = class {
             default:
                 throw new view.Error(`Unsupported toggle '${name}'.`);
         }
+        this._saveOptions();
+    }
+
+    _saveOptions() {
         const options = {};
         for (const [name, value] of Object.entries(this._options)) {
             if (this._defaultOptions[name] !== value) {
@@ -578,6 +703,68 @@ view.View = class {
 
     _element(id) {
         return this._host.document.getElementById(id);
+    }
+
+    // logic for resizable panes
+    _setupResizablePanes(containerId, firstPaneId, dividerId, isVertical) {
+        const container = this._element(containerId);
+        const firstPane = this._element(firstPaneId);
+        const divider = this._element(dividerId);
+
+        if (!container || !firstPane || !divider) {
+            return;
+        }
+
+        const onPointerDown = (e) => {
+            e.preventDefault();
+            divider.classList.add('dragging');
+
+            this._host.document.body.style.cursor = isVertical ? 'row-resize' : 'col-resize';
+            this._host.document.body.style.userSelect = 'none';
+
+            const onPointerMove = (moveEvent) => {
+                const containerRect = container.getBoundingClientRect();
+                if (isVertical) {
+                    // containerRect is not codebase-specific, it is part of 
+                    // DOMRect
+                    // .clientY is a standard JS property of MouseEvent
+                    let height = moveEvent.clientY - containerRect.top;
+                    // make sure that we make a pane completely disappear
+                    // this would lead to overlapping borders, so 100px is safe
+                    const minHeight = 100;
+                    const maxHeight = containerRect.height - 100;
+                    if (maxHeight > minHeight) {
+                        height = Math.max(minHeight, Math.min(height, maxHeight));
+                        const percentage = (height / containerRect.height) * 100;
+                        firstPane.style.flex = `0 0 ${percentage}%`;
+                    }
+                } else {
+                    // This is for expanding left and right. 
+                    let width = moveEvent.clientX - containerRect.left;
+                    const minWidth = 100;
+                    const maxWidth = containerRect.width - 100;
+                    if (maxWidth > minWidth) {
+                        width = Math.max(minWidth, Math.min(width, maxWidth));
+                        const percentage = (width / containerRect.width) * 100;
+                        firstPane.style.flex = `0 0 ${percentage}%`;
+                    }
+                }
+            };
+
+            // just change the styles of the cursor and event listener
+            const onPointerUp = () => {
+                divider.classList.remove('dragging');
+                this._host.document.body.style.cursor = '';
+                this._host.document.body.style.userSelect = '';
+                this._host.document.removeEventListener('pointermove', onPointerMove);
+                this._host.document.removeEventListener('pointerup', onPointerUp);
+            };
+
+            this._host.document.addEventListener('pointermove', onPointerMove);
+            this._host.document.addEventListener('pointerup', onPointerUp);
+        };
+
+        divider.addEventListener('pointerdown', onPointerDown);
     }
 
     zoomIn() {
@@ -661,6 +848,34 @@ view.View = class {
         const active = Boolean(this._options.syncScroll);
         button.classList.toggle('active', active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+
+    _updateDiffPanesVisibility() {
+        const showOriginalEl = this._element('toolbar-show-original');
+        const showModifiedEl = this._element('toolbar-show-modified');
+        if (!showOriginalEl || !showModifiedEl) {
+            return;
+        }
+        const originalChecked = Boolean(this._options.showOriginal);
+        const modifiedChecked = Boolean(this._options.showModified);
+
+        // Prevent hiding both by disabling the remaining checked box
+        showOriginalEl.disabled = originalChecked && !modifiedChecked;
+        showModifiedEl.disabled = modifiedChecked && !originalChecked;
+
+        // Apply classes to diff-container to hide/show panes
+        const container = this._element('diff-container');
+        if (container) {
+            container.classList.toggle('hide-original', !originalChecked);
+            container.classList.toggle('hide-modified', !modifiedChecked);
+        }
+
+        // Sync the active pane if the currently active one is now hidden
+        if (!originalChecked && this._activePane === 'original') {
+            this._activePane = 'modified';
+        } else if (!modifiedChecked && this._activePane === 'modified') {
+            this._activePane = 'original';
+        }
     }
 
     _setupUndoRedoToolbar(platform) {
@@ -772,18 +987,59 @@ view.View = class {
         this._updateUndoRedoButtons();
     }
 
+    _isViewingCompiledAmbapbGraph() {
+        return isViewingCompiledAmbapbGraph(this._path, this.activeTarget);
+    }
+
+    _createNodeSidebar(node) {
+        if (this._editSession && isAmbapbCheckpoint(this._model)) {
+            if (this._canEditModelContent()) {
+                const entity = this._resolveNodeEntity(node);
+                const isCompiled = entity && (
+                    this._isViewingCompiledAmbapbGraph() ||
+                    sourceEntityIdForNode(node) !== null ||
+                    (entity.nested && (entity.graphAttrName === 'compiled_prim_graph' || entity.graphAttrName === 'graph'))
+                );
+                if (isAmbapbShellNode(node)) {
+                    return new view.AmbaShellNodeSidebar(this, node, this._editSession);
+                }
+                if (isAmbapbRuntimeShellNode(node) || isCompiled) {
+                    return new view.EditableNodeSidebar(this, node, this._editSession);
+                }
+            }
+            return new view.NodeSidebar(this, node);
+        }
+        if (this._editSession && this._canEditModelContent()) {
+            return new view.EditableNodeSidebar(this, node, this._editSession);
+        }
+        return new view.NodeSidebar(this, node);
+    }
+
     _resolveNodeEntity(node) {
         if (!this._editSession || !node) {
             return null;
         }
-        return locateNodeEntity(this._editSession.modified.model, node);
+        const nestedEntityId = sourceEntityIdForNode(node);
+        const modelNode = sourceNodeForEntity(node);
+        if (!modelNode) {
+            return null;
+        }
+        const entity = locateNodeEntity(this._editSession.modified.model, modelNode);
+        if (entity && nestedEntityId) {
+            return {
+                ...entity,
+                nodeId: nestedEntityId
+            };
+        }
+        return entity;
     }
 
     _resolveValueEntity(value) {
         if (!this._editSession || !value) {
             return null;
         }
-        return locateValueEntity(this._editSession.modified.model, value);
+        const modelValue = sourceValueForEntity(value);
+        return locateValueEntity(this._editSession.modified.model, modelValue);
     }
 
     _bindNodeSidebarEvents(sidebar, node) {
@@ -813,7 +1069,7 @@ view.View = class {
         if (!current || !current._node) {
             return;
         }
-        const sidebar = new view.EditableNodeSidebar(this, current._node, this._editSession);
+        const sidebar = this._createNodeSidebar(current._node);
         this._bindNodeSidebarEvents(sidebar, current._node);
         this._sidebar.open(sidebar, entry.title || 'Node Properties');
     }
@@ -827,7 +1083,12 @@ view.View = class {
         if (!current || !current._value) {
             return;
         }
-        const sidebar = new view.EditableConnectionSidebar(this, current._value, current._from, current._to, this._editSession);
+        // if the model is an ambapb checkpoint, we need to use the editable connection sidebar
+        // adds model.kind getter
+        // checkpoint files get exportable = false
+        const sidebar = this._canEditModelContent() ?
+            new view.EditableConnectionSidebar(this, current._value, current._from, current._to, this._editSession) :
+            new view.ConnectionSidebar(this, current._value, current._from, current._to);
         this._bindConnectionSidebarEvents(sidebar);
         this._sidebar.open(sidebar, entry.title || 'Connection Properties');
     }
@@ -841,6 +1102,14 @@ view.View = class {
         if (!change || !this._editSession) {
             return null;
         }
+        const nested = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)/.exec(change.entityId);
+        if (nested) {
+            const graph = this._editSession.modified.getGraph(Number(nested[1]));
+            const host = graph.nodes[Number(nested[2])];
+            const entry = [...(host.attributes || []), ...(host.blocks || [])]
+                .find((item) => item.name === nested[3] && item.type === 'graph' && item.value);
+            return entry && entry.value.nodes ? entry.value.nodes[Number(nested[4])] || null : null;
+        }
         const match = /^graph:(\d+)\/node:(\d+)/.exec(change.entityId);
         if (!match) {
             return null;
@@ -852,6 +1121,10 @@ view.View = class {
     _editorChangeNeedsGraphRefresh(change) {
         if (!change) {
             return false;
+        }
+        if (change.entityType === 'node' && change.property === 'description' &&
+            this._batchInlineExpanded.size > 0) {
+            return true;
         }
         if (change.entityType === 'node' && change.property === 'name') {
             return true;
@@ -883,7 +1156,7 @@ view.View = class {
                 if (modelNode && this._target) {
                     const rebuildResult = await this._target.refreshNodeArgumentList(modelNode);
                     if (rebuildResult === null || rebuildResult === true) {
-                        await this.refresh(null, { skipShow: true, skipAnimation: true});
+                        await this.refresh(null, { skipShow: true, skipAnimation: true });
                     }
                 }
             } else if (this._editorChangeNeedsGraphRefresh(change)) {
@@ -906,15 +1179,27 @@ view.View = class {
             }
         } catch (error) {
             this.error(error, 'Error applying edit.', null);
-        } 
+        }
     }
 
     _canUndoEdit() {
-        return Boolean(this._editSession && this._editSession.history.canUndo && this._canInsertNode());
+        if (!this._editSession || !this._editSession.history.canUndo) {
+            return false;
+        }
+        if (isAmbapbCheckpoint(this._model)) {
+            return canEditCheckpoint(this._model);
+        }
+        return this._canInsertNode();
     }
 
     _canRedoEdit() {
-        return Boolean(this._editSession && this._editSession.history.canRedo && this._canInsertNode());
+        if (!this._editSession || !this._editSession.history.canRedo) {
+            return false;
+        }
+        if (isAmbapbCheckpoint(this._model)) {
+            return canEditCheckpoint(this._model);
+        }
+        return this._canInsertNode();
     }
 
     async _undoEdit() {
@@ -923,7 +1208,10 @@ view.View = class {
         }
         this._applyingHistory = true;
         try {
+            this._syncBatchInlineToSession();
             this._editSession.history.undo(this._editSession);
+            this._invalidateDisplayGraphCache();
+            this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
             this._sidebar.close();
@@ -942,7 +1230,10 @@ view.View = class {
         }
         this._applyingHistory = true;
         try {
+            this._syncBatchInlineToSession();
             this._editSession.history.redo(this._editSession);
+            this._invalidateDisplayGraphCache();
+            this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
             this._sidebar.close();
@@ -955,8 +1246,45 @@ view.View = class {
         }
     }
 
+    _reconcilePathTargets() {
+        if (!this._editSession || this._path.length === 0) {
+            return;
+        }
+        const resolveInGraph = (graph, segments) => {
+            let current = graph;
+            for (const segment of segments) {
+                if (!current) {
+                    return null;
+                }
+                if (segment.kind === 'module') {
+                    current = this._editSession.modified.getGraph(segment.index);
+                    continue;
+                }
+                const host = (current.nodes || [])[segment.nodeIndex];
+                if (!host) {
+                    return null;
+                }
+                const entry = [...(host.attributes || []), ...(host.blocks || [])]
+                    .find((item) => item.name === segment.attrName && item.type === 'graph' && item.value);
+                current = entry ? entry.value : null;
+            }
+            return current;
+        };
+
+        for (const entry of this._path) {
+            if (!entry._pathSegments) {
+                continue;
+            }
+            const resolved = resolveInGraph(null, entry._pathSegments);
+            if (resolved) {
+                entry.target = resolved;
+            }
+        }
+    }
+
     _checkpointEditHistory() {
         if (this._editSession && !this._applyingHistory) {
+            this._syncBatchInlineToSession();
             this._editSession.history.checkpoint(this._editSession);
         }
     }
@@ -974,11 +1302,32 @@ view.View = class {
         if (!this._editSession) {
             return null;
         }
+        if (!this._canEditModelContent()) {
+            return null;
+        }
+        if (isAmbapbCheckpoint(this._model)) {
+            try {
+                validateAmbapbPatch(this._editSession.modified.model, patch, {
+                    viewingCompiledGraph: this._isViewingCompiledAmbapbGraph()
+                });
+            } catch (error) {
+                this.error(error, 'Edit not allowed.', null);
+                return null;
+            }
+        }
+        // edits must call checkpointedit history before applying any patches. 
         this._checkpointEditHistory();
         if (!(patch.entityType === 'node' && patch.changeType === 'delete' && patch.property === 'remove')) {
             this._danglingNodeNames.clear();
         }
-        const change = this._editSession.applyPatch(patch);
+        let change = null;
+        try {
+            change = this._editSession.applyPatch(patch);
+            this._invalidateDisplayGraphCache();
+        } catch (error) {
+            this.error(error, 'Error applying edit.', null);
+            return null;
+        }
         // eslint-disable-next-line no-console
         console.log('[editor] Patch applied:', stringifyEditorJSON(patch));
         // eslint-disable-next-line no-console
@@ -989,8 +1338,21 @@ view.View = class {
         return change;
     }
 
+    _canEditModelContent() {
+        if (!this._model || !this._editSession) {
+            return false;
+        }
+        if (isAmbapbCheckpoint(this._model)) {
+            return canEditCheckpoint(this._model);
+        }
+        return canExportOnnx(this._model);
+    }
+
     _canInsertNode() {
-        return this._editSession && this._model && canExportOnnx(this._model);
+        if (isAmbapbCheckpoint(this._model)) {
+            return false;
+        }
+        return this._canEditModelContent();
     }
 
     _closeGraphOverlays() {
@@ -1004,39 +1366,193 @@ view.View = class {
         }
     }
 
-    _showNodeContextMenu(nodeView, event) {
-        if (!this._canInsertNode() || this._target && this._target.readOnly) {
+    _resolveDisplayGraph(graph) {
+        if (!graph || this._batchInlineExpanded.size === 0) {
+            return graph;
+        }
+        const graphIndex = this._resolveGraphIndex(this.activeTarget);
+        const expandedKey = Array.from(this._batchInlineExpanded).sort().join('\0');
+        const cache = this._displayGraphCache;
+        if (cache &&
+            cache.sourceGraph === graph &&
+            cache.graphIndex === graphIndex &&
+            cache.expandedKey === expandedKey &&
+            cache.revision === this._displayGraphRevision) {
+            return cache.displayGraph;
+        }
+        const displayGraph = applyBatchInlineExpansions(graph, this._batchInlineExpanded, graphIndex);
+        this._displayGraphCache = {
+            sourceGraph: graph,
+            graphIndex,
+            expandedKey,
+            revision: this._displayGraphRevision,
+            displayGraph
+        };
+        return displayGraph;
+    }
+
+    _restoreBatchInlineState(state) {
+        if (this._editSession && Array.isArray(this._editSession.batchInlineExpanded)) {
+            this._batchInlineExpanded = new Set(this._editSession.batchInlineExpanded);
             return;
         }
-        this._closeGraphOverlays();
-        const x = event.clientX;
-        const y = event.clientY;
+        if (state && Array.isArray(state.batchInlineExpanded)) {
+            this._batchInlineExpanded = new Set(state.batchInlineExpanded);
+        }
+    }
+
+    _persistBatchInlineState() {
+        // We don't have this._batchInlineExpanded.size > 0 so collapsing writes [] to path state
+        if (this._path.length > 0) {
+            this._path[0].state = Object.assign(this._path[0].state || {}, {
+                batchInlineExpanded: Array.from(this._batchInlineExpanded)
+            });
+        }
+    }
+
+    _syncBatchInlineToSession() {
+        if (this._editSession) {
+            this._editSession.batchInlineExpanded = Array.from(this._batchInlineExpanded);
+        }
+    }
+
+    _syncBatchInlineFromSession() {
+        if (!this._editSession) {
+            return;
+        }
+        this._batchInlineExpanded = new Set(this._editSession.batchInlineExpanded || []);
+        this._persistBatchInlineState();
+    }
+
+    _refreshInlineExpandedStyles() {
+        const graph = this._target;
+        if (graph && graph.refreshInlineExpandedStyles) {
+            graph.refreshInlineExpandedStyles();
+        }
+    }
+
+    _resolveBatchCallGraph(nodeView) {
         const entity = this._resolveNodeEntity(nodeView.value);
-        const graph = entity ? this._editSession.modified.getGraph(entity.graphIndex) : null;
-        const node = graph && entity ? graph.nodes[entity.nodeIndex] : null;
-        const deleteAnalysis = node ? analyzeDeleteNode(graph, node) : { ok: false };
-        const isBegin = this._isRangeBegin(entity);
-        const isEnd = this._isRangeEnd(entity);
+        if (entity && this._editSession) {
+            return this._editSession.modified.getGraph(entity.graphIndex);
+        }
+        if (nodeView.context && nodeView.context.target) {
+            return nodeView.context.target;
+        }
+        return this.activeTarget;
+    }
+
+    _isBatchCallContextMenuTarget(nodeView) {
+        if (!nodeView || !nodeView.value || !nodeView.context) {
+            return false;
+        }
+        if (nodeView.context.readOnly) {
+            return false;
+        }
+        return isBatchCallNode(nodeView.value);
+    }
+
+    _canShowSubgraphContextMenu(nodeView) {
+        if (!nodeView || !nodeView.value || !nodeView.context) {
+            return false;
+        }
+        if (nodeView.context.readOnly || !this._editSession) {
+            return false;
+        }
+        if (!this._canEditModelContent()) {
+            return false;
+        }
+        return !this._canInsertNode();
+    }
+
+    _createRangeMarker(nodeView) {
+        const node = nodeView && nodeView.value;
+        if (!node || !node.name) {
+            return null;
+        }
+        const entity = this._resolveNodeEntity(node);
+        const graphIndex = entity
+            ? entity.graphIndex
+            : (nodeView.context && nodeView.context.graphIndex !== undefined ? nodeView.context.graphIndex : 0);
+        return {
+            graphIndex,
+            nodeName: node.name,
+            nodeId: entity ? entity.nodeId : null
+        };
+    }
+
+    _matchesRangeMarker(entry, marker) {
+        if (!entry || !marker || entry.graphIndex !== marker.graphIndex) {
+            return false;
+        }
+        if (entry.nodeName && marker.nodeName) {
+            return entry.nodeName === marker.nodeName;
+        }
+        return Boolean(entry.nodeId && marker.nodeId && entry.nodeId === marker.nodeId);
+    }
+
+    _isRangeBeginForNode(nodeView) {
+        const marker = this._createRangeMarker(nodeView);
+        return Boolean(marker && this._rangeBegins.some((entry) => this._matchesRangeMarker(entry, marker)));
+    }
+
+    _isRangeEndForNode(nodeView) {
+        const marker = this._createRangeMarker(nodeView);
+        return Boolean(marker && this._rangeEnds.some((entry) => this._matchesRangeMarker(entry, marker)));
+    }
+
+    _subgraphContextMenuItems(nodeView) {
+        const isBegin = this._isRangeBeginForNode(nodeView);
+        const isEnd = this._isRangeEndForNode(nodeView);
         const hasMarkers = this._rangeBegins.length > 0 || this._rangeEnds.length > 0;
         const canExtract = this._rangeBegins.length > 0 && this._rangeEnds.length > 0;
         const extractLabel = canExtract
             ? `Extract Subgraph (${this._rangeBegins.length} start${this._rangeBegins.length === 1 ? '' : 's'}, ${this._rangeEnds.length} end${this._rangeEnds.length === 1 ? '' : 's'})`
             : 'Extract Subgraph';
-        const items = [
-            {
-                label: 'Insert Above\u2026',
-                action: () => this._openOperatorPicker(nodeView, 'above', x, y)
-            },
-            {
-                label: 'Insert Below\u2026',
-                action: () => this._openOperatorPicker(nodeView, 'below', x, y)
-            },
-            {
-                label: 'Delete Node\u2026',
-                action: () => this._deleteNodeAt(nodeView),
-                enabled: deleteAnalysis.ok
-            },
-            { separator: true },
+        const items = [];
+        const node = nodeView.value;
+
+        const graphIndex = 0;
+        const sourceGraph = this._editSession ? this._editSession.modified.getGraph(graphIndex) : null;
+        const isUserDefSelected = this._userDefSelectedNodes && this._userDefSelectedNodes.has(node.name);
+        const isUserDefSelectable = isUserDefSelected || (sourceGraph && this._isNodeCompatibleForUserDef(sourceGraph, node));
+
+        if (node && node.type?.name !== 'UserDefCall' && node.type?.name !== 'UserDefSubgraph' && node.type?.name !== 'FragSubgraph' && isUserDefSelectable) {
+            items.push({
+                label: isUserDefSelected ? 'Deselect Node for UserDefCall' : 'Select Node for UserDefCall',
+                action: () => {
+                    if (isUserDefSelected) {
+                        this._userDefSelectedNodes.delete(node.name);
+                        if (nodeView.context && nodeView.context.select) {
+                            nodeView.context.select(null);
+                        }
+                    } else {
+                        this._userDefSelectedNodes.add(node.name);
+                    }
+                    this._refreshUserDefSelectionStyles();
+                }
+            });
+            items.push({ separator: true });
+        }
+        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0 && node.type?.name !== 'UserDefCall') {
+            items.push({
+                label: 'Create UserDefCall',
+                action: () => this._createUserDefCall()
+            });
+            items.push({ separator: true });
+        }
+
+        if (node._inlineExpanded) {
+            const batchCallName = inlineExpansionBatchCallName(node);
+            if (batchCallName) {
+                items.push({
+                    label: 'Collapse Subgraph Inline',
+                    action: () => this._toggleBatchInlineExpansion(batchCallName)
+                });
+                items.push({ separator: true });
+            }
+        }
+        items.push(
             {
                 label: isBegin ? 'Unmark Beginning' : 'Mark as Beginning',
                 action: () => this._markRangeBegin(nodeView)
@@ -1055,39 +1571,172 @@ view.View = class {
                 action: () => this._extractAndReplaceGraph(),
                 enabled: canExtract
             }
+        );
+        return items;
+    }
+
+    _showSubgraphContextMenu(nodeView, event) {
+        if (!this._canShowSubgraphContextMenu(nodeView)) {
+            return;
+        }
+        this._closeGraphOverlays();
+        const items = this._subgraphContextMenuItems(nodeView);
+        this._graphContextMenu = new view.GraphContextMenu(this, this._host, event.clientX, event.clientY, items);
+        this._graphContextMenu.open();
+    }
+
+    _canExpandBatchCall(nodeView) {
+        if (!isBatchCallNode(nodeView.value)) {
+            return false;
+        }
+        const graph = this._resolveBatchCallGraph(nodeView);
+        return Boolean(graph && canExpandBatchCall(graph, nodeView.value));
+    }
+
+    _batchCallContextMenuItems(nodeView) {
+        const node = nodeView.value;
+        const items = [];
+
+        if (node._inlineExpanded) {
+            const batchCallName = inlineExpansionBatchCallName(node);
+            if (batchCallName) {
+                items.push({
+                    label: 'Collapse Subgraph Inline',
+                    action: () => this._toggleBatchInlineExpansion(batchCallName)
+                });
+            }
+            return items;
+        }
+        if (!isBatchCallNode(node)) {
+            return items;
+        }
+
+        const nodeName = node.name;
+        const isExpanded = this._batchInlineExpanded.has(nodeName);
+        const canExpand = this._canExpandBatchCall(nodeView);
+
+        if (isExpanded) {
+            items.push({
+                label: 'Collapse Subgraph Inline',
+                action: () => this._toggleBatchInlineExpansion(nodeName)
+            });
+        } else {
+            const noMatchLabel = node.type?.name === 'FragSubgraph';
+            items.push({
+                label: canExpand
+                    ? 'Expand Subgraph Inline'
+                    : `Expand Subgraph Inline (no matching ${noMatchLabel})`,
+                enabled: canExpand,
+                action: () => this._toggleBatchInlineExpansion(nodeName)
+            });
+        }
+        return items;
+    }
+
+    _showBatchCallContextMenu(nodeView, event) {
+        if (!this._isBatchCallContextMenuTarget(nodeView)) {
+            return;
+        }
+        this._closeGraphOverlays();
+
+        const items = this._batchCallContextMenuItems(nodeView);
+
+        if (this._canShowSubgraphContextMenu(nodeView)) {
+            if (items.length > 0) {
+                items.push({ separator: true });
+            }
+            items.push(...this._subgraphContextMenuItems(nodeView));
+        }
+
+        if (items.length === 0) {
+            return;
+        }
+
+        this._graphContextMenu = new view.GraphContextMenu(
+            this, this._host, event.clientX, event.clientY, items
+        );
+        this._graphContextMenu.open();
+    }
+
+    async _toggleBatchInlineExpansion(batchCallName) {
+        if (!batchCallName) {
+            return;
+        }
+        this._checkpointEditHistory();
+        if (this._batchInlineExpanded.has(batchCallName)) {
+            this._batchInlineExpanded.delete(batchCallName);
+        } else {
+            this._batchInlineExpanded.add(batchCallName);
+        }
+        this._persistBatchInlineState();
+        // Very important. Guarantees that edit session state stays perfectly in sync
+        // with the active satte before any navigation or re-rendering occurs
+        this._syncBatchInlineToSession();
+        this._updateUndoRedoButtons();
+        await this.refresh();
+        this._refreshInlineExpandedStyles();
+    }
+
+    _showNodeContextMenu(nodeView, event) {
+        if (!this._canInsertNode() || this._target && this._target.readOnly) {
+            return;
+        }
+        this._closeGraphOverlays();
+        const x = event.clientX;
+        const y = event.clientY;
+        const entity = this._resolveNodeEntity(nodeView.value);
+        const graph = entity ? this._editSession.modified.getGraph(entity.graphIndex) : null;
+        const node = graph && entity ? graph.nodes[entity.nodeIndex] : null;
+        const deleteAnalysis = node ? analyzeDeleteNode(graph, node) : { ok: false };
+        const items = [
+            {
+                label: 'Insert Above\u2026',
+                action: () => this._openOperatorPicker(nodeView, 'above', x, y)
+            },
+            {
+                label: 'Insert Below\u2026',
+                action: () => this._openOperatorPicker(nodeView, 'below', x, y)
+            },
+            {
+                label: 'Delete Node\u2026',
+                action: () => this._deleteNodeAt(nodeView),
+                enabled: deleteAnalysis.ok
+            },
+            { separator: true },
+            ...this._subgraphContextMenuItems(nodeView)
         ];
         this._graphContextMenu = new view.GraphContextMenu(this, this._host, x, y, items);
         this._graphContextMenu.open();
-    } 
+    }
 
     // mark begin node for graph extraction
     _markRangeBegin(nodeView) {
-        const entity = this._resolveNodeEntity(nodeView.value);
-        if (!entity) {
+        const marker = this._createRangeMarker(nodeView);
+        if (!marker) {
             return;
         }
-        if (this._isRangeBegin(entity)) {
-            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== entity.nodeId);
+        if (this._isRangeBeginForNode(nodeView)) {
+            this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
         } else {
-            this._clearRangeMarkersOnOtherGraph(entity.graphIndex);
-            this._rangeBegins.push(entity);
-            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== entity.nodeId);
+            this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
+            this._rangeBegins.push(marker);
+            this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
         }
         this._refreshRangeMarkerStyles();
     }
 
     // mark end node for graph extraction
     _markRangeEnd(nodeView) {
-        const entity = this._resolveNodeEntity(nodeView.value);
-        if (!entity) {
+        const marker = this._createRangeMarker(nodeView);
+        if (!marker) {
             return;
         }
-        if (this._isRangeEnd(entity)) {
-            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== entity.nodeId);
+        if (this._isRangeEndForNode(nodeView)) {
+            this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
         } else {
-            this._clearRangeMarkersOnOtherGraph(entity.graphIndex);
-            this._rangeEnds.push(entity);
-            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== entity.nodeId);
+            this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
+            this._rangeEnds.push(marker);
+            this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
         }
         this._refreshRangeMarkerStyles();
     }
@@ -1106,11 +1755,17 @@ view.View = class {
     }
 
     _isRangeBegin(entity) {
-        return entity && this._rangeBegins.some((entry) => entry.nodeId === entity.nodeId);
+        return entity && this._rangeBegins.some((entry) =>
+            entry.nodeId === entity.nodeId ||
+            (entry.nodeName && entity.node && entry.nodeName === entity.node.name)
+        );
     }
 
     _isRangeEnd(entity) {
-        return entity && this._rangeEnds.some((entry) => entry.nodeId === entity.nodeId);
+        return entity && this._rangeEnds.some((entry) =>
+            entry.nodeId === entity.nodeId ||
+            (entry.nodeName && entity.node && entry.nodeName === entity.node.name)
+        );
     }
 
     _clearRangeMarkersOnOtherGraph(graphIndex) {
@@ -1119,15 +1774,7 @@ view.View = class {
     }
 
     _resolveMarkedNodes(entities, graph) {
-        const nodes = [];
-        for (const entity of entities) {
-            const node = graph.nodes[entity.nodeIndex];
-            if (!node) {
-                throw new SubgraphExtractError('Marked nodes are no longer available.');
-            }
-            nodes.push(node);
-        }
-        return nodes;
+        return resolveMarkedNodesByName(graph, entities);
     }
 
     // extract and replace graph
@@ -1142,10 +1789,79 @@ view.View = class {
             return;
         }
         try {
-            const graph = this._editSession.modified.getGraph(graphIndex);
-            const beginNodes = this._resolveMarkedNodes(this._rangeBegins, graph);
-            const endNodes = this._resolveMarkedNodes(this._rangeEnds, graph);
-            const extracted = extractSubgraph(graph, beginNodes, endNodes);
+            const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+            const workingGraph = buildExtractWorkingGraph(sourceGraph, this._batchInlineExpanded);
+            const beginNodes = resolveMarkedNodesByName(workingGraph, this._rangeBegins);
+            const endNodes = resolveMarkedNodesByName(workingGraph, this._rangeEnds);
+            let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
+
+            const cloneFragSubgraph = (fragNode) => {
+                return {
+                    name: fragNode.name,
+                    type: fragNode.type ? Object.assign({}, fragNode.type) : null,
+                    attributes: (fragNode.attributes || []).map((attribute) => {
+                        if (attribute.type === 'graph' && attribute.value) {
+                            return {
+                                name: attribute.name,
+                                type: attribute.type,
+                                value: cloneGraph(attribute.value)
+                            };
+                        }
+                        return {
+                            name: attribute.name,
+                            type: attribute.type,
+                            value: attribute.value
+                        };
+                    }),
+                    inputs: (fragNode.inputs || []).map((input) => ({
+                        name: input.name,
+                        value: (input.value || []).map((val) => Object.assign({}, val))
+                    })),
+                    outputs: (fragNode.outputs || []).map((output) => ({
+                        name: output.name,
+                        value: (output.value || []).map((val) => Object.assign({}, val))
+                    }))
+                };
+            };
+
+            const keepFragSubgraphs = [];
+
+            // 1. Identify FragSubgraphs for non-inlined BatchCalls
+            for (const node of extracted.nodes || []) {
+                if (node.type?.name === 'BatchCall' || node.type?.name === 'UserDefCall') {
+                    const target = resolveBatchCallTarget(workingGraph, node);
+                    if (target && target.fragSubgraphNode) {
+                        const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
+                        if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
+                            keepFragSubgraphs.push(target.fragSubgraphNode);
+                        }
+                    }
+                }
+            }
+
+            // 2. Identify FragSubgraphs for already-inlined BatchCalls
+            for (const node of extracted.nodes || []) {
+                const batchCallName = inlineExpansionBatchCallName(node);
+                if (batchCallName) {
+                    const originalBatchCall = (sourceGraph.nodes || []).find((n) => n.name === batchCallName);
+                    if (originalBatchCall) {
+                        const target = resolveBatchCallTarget(sourceGraph, originalBatchCall);
+                        if (target && target.fragSubgraphNode && target.fragSubgraphNode.type?.name !== 'UserDefSubgraph') {
+                            const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
+                            if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
+                                keepFragSubgraphs.push(target.fragSubgraphNode);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Automatically keep all identified FragSubgraphs
+            for (const fragNode of keepFragSubgraphs) {
+                extracted.nodes.push(cloneFragSubgraph(fragNode));
+            }
+
+            extracted = stripInlineExpansionPrefixes(extracted);
             this._checkpointEditHistory();
             this._editSession.replaceGraph(graphIndex, extracted);
             if (this._model && this._model.proto) {
@@ -1160,12 +1876,323 @@ view.View = class {
             this._host.document.title = `${this._exportBasenameOverride}.onnx`;
             this._rangeBegins = [];
             this._rangeEnds = [];
+            this._batchInlineExpanded.clear();
+            this._persistBatchInlineState();
             this._sidebar.close();
             this._bindEditorSession();
             await this._refreshModifiedPane();
         } catch (error) {
             const message = error instanceof SubgraphExtractError ? error.message : (error && error.message ? error.message : error.toString());
             await this._host.message(message, true, 'OK');
+        }
+    }
+
+    _isNodeCompatibleForUserDef(sourceGraph, node) {
+        if (!node) {
+            return false;
+        }
+        if (node.type?.name === 'UserDefCall' || node.type?.name === 'UserDefSubgraph' || node.type?.name === 'FragSubgraph') {
+            return false;
+        }
+        let selectedType = null;
+        for (const selectedNodeName of this._userDefSelectedNodes) {
+            const selNode = (sourceGraph.nodes || []).find(n => n.name === selectedNodeName);
+            if (!selNode) {
+                continue;
+            }
+            if (selNode.type?.name === 'BatchCall') {
+                const target = resolveBatchCallTarget(sourceGraph, selNode);
+                if (target && target.subGraph && target.subGraph.nodes && target.subGraph.nodes.length > 0) {
+                    const firstNode = target.subGraph.nodes[0];
+                    const t = firstNode.type?.name;
+                    if (t) {
+                        if (selectedType && selectedType !== t) {
+                            return false;
+                        }
+                        selectedType = t;
+                    }
+                }
+            } else {
+                const t = selNode.type?.name;
+                if (t) {
+                    if (selectedType && selectedType !== t) {
+                        return false;
+                    }
+                    selectedType = t;
+                }
+            }
+        }
+
+        if (node.type?.name === 'BatchCall') {
+            const target = resolveBatchCallTarget(sourceGraph, node);
+            if (!target || !target.subGraph || !target.subGraph.nodes || target.subGraph.nodes.length === 0) {
+                return false;
+            }
+            let candidateType = null;
+            for (const subNode of target.subGraph.nodes) {
+                const t = subNode.type?.name;
+                if (!t) return false;
+                if (candidateType && candidateType !== t) {
+                    return false;
+                }
+                candidateType = t;
+            }
+            if (selectedType && selectedType !== candidateType) {
+                return false;
+            }
+            return true;
+        } else {
+            const t = node.type?.name;
+            if (!t) {
+                return false;
+            }
+            if (selectedType && selectedType !== t) {
+                return false;
+            }
+            return true;
+        }
+    }
+
+    _refreshUserDefSelectionStyles() {
+        const graph = this._activePaneGraph();
+        if (graph && graph.refreshUserDefSelectionStyles) {
+            graph.refreshUserDefSelectionStyles();
+        }
+    }
+
+    // before, only resolved selections from sourceGraph. Now, we resolve selections from workingGraph.
+    async _createUserDefCall() {
+        if (!this._editSession || !this._userDefSelectedNodes || this._userDefSelectedNodes.size === 0) {
+            return;
+        }
+        const graphIndex = 0;
+        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+
+        const callsToInline = new Set();
+        const inlineRegex = /inline::([^:]+)::/g;
+        for (const nodeName of this._userDefSelectedNodes) {
+            let match;
+            inlineRegex.lastIndex = 0;
+            while ((match = inlineRegex.exec(nodeName)) !== null) {
+                callsToInline.add(match[1]);
+            }
+        }
+
+        const workingGraph = buildExtractWorkingGraph(sourceGraph, callsToInline);
+        const selectedNodes = (workingGraph.nodes || []).filter(node => {
+            if (!node || !node.name) {
+                return false;
+            }
+            if (this._userDefSelectedNodes.has(node.name)) {
+                return true;
+            }
+            const batchCallName = inlineExpansionBatchCallName(node);
+            if (batchCallName && callsToInline.has(batchCallName)) {
+                return true;
+            }
+            return false;
+        });
+
+        if (selectedNodes.length === 0) {
+            return;
+        }
+
+        try {
+            const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
+            let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
+            extracted = stripInlineExpansionPrefixes(extracted);
+            const subGraphId = genUniqueNodeName('userdefsubgraph', workingGraph);
+            extracted.name = subGraphId;
+            const callNodeName = genUniqueNodeName('userDefCall', workingGraph);
+
+            const userDefSubgraphNode = {
+                name: subGraphId,
+                type: {
+                    name: 'UserDefSubgraph',
+                    identifier: 'UserDefSubgraph',
+                    module: 'com.ambarella'
+                },
+                attributes: [
+                    {
+                        name: 'graph',
+                        type: 'graph',
+                        value: extracted
+                    }
+                ],
+                inputs: [],
+                outputs: []
+            };
+
+            const src_mappings = [];
+            const userDefCallInputs = [];
+            for (let i = 0; i < extracted.inputs.length; i++) {
+                const input = extracted.inputs[i];
+                const valName = input.value && input.value[0] ? input.value[0].name : '';
+                src_mappings.push({
+                    id: valName,
+                    index: i
+                });
+                userDefCallInputs.push({
+                    name: input.name,
+                    value: input.value.map(val => Object.assign({}, val))
+                });
+            }
+
+            const out_mappings = [];
+            const userDefCallOutputs = [];
+            for (let i = 0; i < extracted.outputs.length; i++) {
+                const output = extracted.outputs[i];
+                const valName = output.value && output.value[0] ? output.value[0].name : '';
+                out_mappings.push({
+                    id: valName,
+                    index: i
+                });
+                userDefCallOutputs.push({
+                    name: output.name,
+                    value: output.value.map(val => Object.assign({}, val))
+                });
+            }
+
+            const userDefCallNode = {
+                name: callNodeName,
+                type: {
+                    name: 'UserDefCall',
+                    identifier: 'UserDefCall',
+                    module: 'com.ambarella'
+                },
+                attributes: [
+                    {
+                        name: 'graph_id',
+                        type: 'string',
+                        value: subGraphId
+                    },
+                    {
+                        name: 'src_mappings',
+                        type: 'string',
+                        value: JSON.stringify(src_mappings)
+                    },
+                    {
+                        name: 'out_mappings',
+                        type: 'string',
+                        value: JSON.stringify(out_mappings)
+                    }
+                ],
+                inputs: userDefCallInputs,
+                outputs: userDefCallOutputs
+            };
+
+            let rootNodeIndex = -1;
+            for (const node of selectedNodes) {
+                const idx = workingGraph.nodes.indexOf(node);
+                if (idx > rootNodeIndex) {
+                    rootNodeIndex = idx;
+                }
+            }
+
+            const keepSet = new Set(selectedNodes);
+            const nextNodes = [];
+            for (let i = 0; i < workingGraph.nodes.length; i++) {
+                const node = workingGraph.nodes[i];
+                if (keepSet.has(node)) {
+                    if (i === rootNodeIndex) {
+                        nextNodes.push(userDefCallNode);
+                    }
+                } else {
+                    nextNodes.push(node);
+                }
+            }
+
+            let insertIdx = 0;
+            for (let i = 0; i < nextNodes.length; i++) {
+                const node = nextNodes[i];
+                if (node && node.type && (node.type.name === 'FragSubgraph' || node.type.name === 'UserDefSubgraph')) {
+                    insertIdx = i + 1;
+                }
+            }
+            nextNodes.splice(insertIdx, 0, userDefSubgraphNode);
+
+            // Strip prefix of dissolved calls from nodes and value references in the rest of the graph
+            // If we do not, mappings and connectoins are ruined since downstream nodes were still referencing prefixed value names
+            const stripCallPrefixes = (name, calls) => {
+                if (!name || typeof name !== 'string' || calls.size === 0) {
+                    return name;
+                }
+                let current = name;
+                let changed = true;
+                while (changed) {
+                    changed = false;
+                    for (const callName of calls) {
+                        const prefix = `inline::${callName}::`;
+                        if (current.startsWith(prefix)) {
+                            current = current.slice(prefix.length);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+                return current;
+            };
+
+            const remapValue = (value) => {
+                if (!value || !value.name) {
+                    return value;
+                }
+                const nextName = stripCallPrefixes(value.name, callsToInline);
+                if (nextName === value.name) {
+                    return value;
+                }
+                return Object.assign({}, value, { name: nextName });
+            };
+
+            const remapArgument = (argument) => {
+                if (!argument) {
+                    return argument;
+                }
+                const values = argument.value;
+                const mappedValues = Array.isArray(values) ? values.map((val) => remapValue(val)) : remapValue(values);
+                return Object.assign({}, argument, { value: mappedValues });
+            };
+
+            const stripNodePrefixes = (node) => {
+                if (!node) {
+                    return node;
+                }
+                return Object.assign({}, node, {
+                    name: stripCallPrefixes(node.name, callsToInline),
+                    inputs: (node.inputs || []).map((input) => remapArgument(input)),
+                    outputs: (node.outputs || []).map((output) => remapArgument(output))
+                });
+            };
+
+            const finalNodes = nextNodes.map(node => stripNodePrefixes(node));
+
+            const modifiedGraph = {
+                name: workingGraph.name,
+                identifier: workingGraph.identifier,
+                inputs: (workingGraph.inputs || []).map((input) => remapArgument(input)),
+                outputs: (workingGraph.outputs || []).map((output) => remapArgument(output)),
+                nodes: finalNodes
+            };
+
+            this._checkpointEditHistory();
+            this._editSession.replaceGraph(graphIndex, modifiedGraph);
+
+            if (this._model && this._model.proto) {
+                this._model.proto.graph = rebuildGraphProtoFromModified(modifiedGraph, this._model.proto);
+            }
+
+            for (const callName of callsToInline) {
+                this._batchInlineExpanded.delete(callName);
+            }
+            this._persistBatchInlineState();
+            this._syncBatchInlineToSession();
+
+            this._userDefSelectedNodes.clear();
+            this._sidebar.close();
+            this._bindEditorSession();
+            await this._refreshModifiedPane();
+        } catch (error) {
+            await this._host.message(error.message || error.toString(), true, 'OK');
         }
     }
 
@@ -1268,25 +2295,27 @@ view.View = class {
         if (!this._rightPane || !this.activeTarget) {
             return;
         }
-        const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
-        const previous = this._rightPane.graph;
-        const zoom = previous ? previous.zoom : 1;
-        const container = this._rightPane.container;
-        const scrollLeft = container ? container.scrollLeft : 0;
-        const scrollTop = container ? container.scrollTop : 0;
-        if (previous && this._target === previous) {
-            previous.unregister();
-        }
-        await this._rightPane.render(this._resolveModifiedTarget(this.activeTarget), this.activeSignature, state);
-        if (this._rightPane.graph) {
-            this._rightPane.graph.zoom = zoom;
-            this._rightPane.graph.register();
-            this.target = this._rightPane.graph;
-            if (container) {
-                container.scrollLeft = scrollLeft;
-                container.scrollTop = scrollTop;
+        await this._withGraphBusy(async () => {
+            const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
+            const previous = this._rightPane.graph;
+            const zoom = previous ? previous.zoom : 1;
+            const container = this._rightPane.container;
+            const scrollLeft = container ? container.scrollLeft : 0;
+            const scrollTop = container ? container.scrollTop : 0;
+            if (previous && this._target === previous) {
+                previous.unregister();
             }
-        }
+            await this._rightPane.render(this._resolveModifiedTarget(this.activeTarget), this.activeSignature, state);
+            if (this._rightPane.graph) {
+                this._rightPane.graph.zoom = zoom;
+                this._rightPane.graph.register();
+                this.target = this._rightPane.graph;
+                if (container) {
+                    container.scrollLeft = scrollLeft;
+                    container.scrollTop = scrollTop;
+                }
+            }
+        });
     }
 
     _resolveGraphIndex(target) {
@@ -1333,6 +2362,16 @@ view.View = class {
         if (!session || !target) {
             return target;
         }
+        if (locateGraphPath(session.modified.model, target)) {
+            return target;
+        }
+        const pathInfo = locateGraphPath(session.original, target);
+        if (pathInfo) {
+            const resolved = getGraphByPath(session.modified.model, pathInfo);
+            if (resolved) {
+                return resolved;
+            }
+        }
         const modules = session.original.modules || [];
         for (let i = 0; i < modules.length; i++) {
             if (modules[i] === target) {
@@ -1343,12 +2382,45 @@ view.View = class {
         if (name) {
             const modifiedModules = session.modified.model.modules || [];
             for (const graph of modifiedModules) {
-                if (graph.name === name || graph.identifier === name) {
-                    return graph;
+                const result = this._findGraphByName(graph, name);
+                if (result) {
+                    return result;
                 }
             }
         }
         return session.modified.getGraph(0);
+    }
+
+    _findGraphByName(graph, name) {
+        if (!graph) {
+            return null;
+        }
+        if (graph.name === name || graph.identifier === name) {
+            return graph;
+        }
+        if (Array.isArray(graph.nodes)) {
+            for (const node of graph.nodes) {
+                const items = [...(node.attributes || []), ...(node.blocks || [])];
+                for (const item of items) {
+                    if (item.value) {
+                        if (item.type === 'graph') {
+                            const result = this._findGraphByName(item.value, name);
+                            if (result) {
+                                return result;
+                            }
+                        } else if (item.type === 'graph[]' && Array.isArray(item.value)) {
+                            for (const subGraph of item.value) {
+                                const result = this._findGraphByName(subGraph, name);
+                                if (result) {
+                                    return result;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     // render the graph in the pane
@@ -1364,7 +2436,9 @@ view.View = class {
         let status = '';
         if (target) {
             const document = this._host.document;
-            const graph = target;
+            this._restoreBatchInlineState(state);
+            const sourceGraph = target;
+            const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph, model));
             if (state && state.blocks) {
@@ -1381,6 +2455,7 @@ view.View = class {
                 viewGraph.restore(state);
                 viewGraph.refreshDeltaStyles();
                 viewGraph.refreshRangeMarkerStyles();
+                viewGraph.refreshInlineExpandedStyles();
                 pane._setGraph(viewGraph);
                 pane._logRender();
             } else {
@@ -1393,15 +2468,48 @@ view.View = class {
     }
 
     async refresh(anchor, options = {}) {
+        if (this._refreshPromise) {
+            this._refreshQueued = { anchor, options: { ...options } };
+            return this._refreshPromise;
+        }
+        const run = async () => {
+            let current = { anchor, options: { ...options } };
+            const showBusy = current.options.busy !== false;
+            if (showBusy) {
+                this._beginGraphBusy();
+            }
+            try {
+                while (current) {
+                    const pending = current;
+                    current = null;
+                    await this._refreshImpl(pending.anchor, pending.options);
+                    if (this._refreshQueued) {
+                        current = this._refreshQueued;
+                        this._refreshQueued = null;
+                    }
+                }
+            } finally {
+                if (showBusy) {
+                    this._endGraphBusy();
+                }
+            }
+        };
+        this._refreshPromise = run().finally(() => {
+            this._refreshPromise = null;
+        });
+        return this._refreshPromise;
+    }
+
+    async _refreshImpl(anchor, options = {}) {
         if (options.skipShow) {
             this._ensureDefaultScreen();
         }
-        // because right is modify pane
-        const pane = this._rightPane;
-        const origin = this._target ? this._target._origin : null;
+        const pane = options.paneId === 'original' ? this._leftPane : this._rightPane;
+        const targetGraph = pane ? pane.graph : this._target;
+        const origin = targetGraph ? targetGraph._origin : null;
         const snapshot = new Map();
-        if (this._target) {
-            for (const [key, entry] of this._target.nodes) {
+        if (targetGraph) {
+            for (const [key, entry] of targetGraph.nodes) {
                 const label = entry.label;
                 if (label && label.x !== undefined) {
                     snapshot.set(label.value || key, {
@@ -1412,23 +2520,27 @@ view.View = class {
             }
         }
         const container = pane ? pane.container : null;
-        const zoom = this._target ? this._target._zoom : 1;
-        const blocks = this._target ? this._target.blocks : null;
-        if (blocks && blocks.size > 0 && this._path.length > 0) {
-            this._path[0].state = Object.assign(this._path[0].state || {}, { blocks });
+        const zoom = targetGraph ? targetGraph._zoom : 1;
+        const blocks = targetGraph ? targetGraph.blocks : null;
+
+        const panePath = options.paneId === 'original' ? this._leftPath : this._rightPath;
+        const paneTarget = panePath && panePath.length > 0 ? panePath[0].target : this.activeTarget;
+        const paneSignature = panePath && panePath.length > 0 ? panePath[0].signature : this.activeSignature;
+
+        if (blocks && blocks.size > 0 && panePath.length > 0) {
+            panePath[0].state = Object.assign(panePath[0].state || {}, { blocks });
         }
+        this._persistBatchInlineState();
         let previous = null;
-        if (origin && this.activeTarget && pane) {
+        if (origin && paneTarget && pane) {
             previous = origin.getScreenCTM();
             const oldChildren = Array.from(origin.children);
-            const graph = this._resolveModifiedTarget(this.activeTarget);
+            const sourceGraph = pane.readOnly ? paneTarget : this._resolveModifiedTarget(paneTarget);
+            const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
-            const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
-            if (state && state.blocks) {
-                viewGraph.blocks = state.blocks;
-            }
-            viewGraph.add(graph, this.activeSignature);
+            viewGraph.blocks = targetGraph ? targetGraph.blocks : new Set();
+            viewGraph.add(graph, paneSignature);
             viewGraph.addTunnels();
             viewGraph.build(this._host.document, origin);
             await viewGraph.measure();
@@ -1446,11 +2558,20 @@ view.View = class {
                     viewGraph._background.setAttribute('width', 0);
                     viewGraph._background.setAttribute('height', 0);
                 }
+                const state = panePath && panePath.length > 0 ? panePath[0].state : null;
                 viewGraph.restore(state);
                 viewGraph.refreshDeltaStyles();
                 viewGraph.refreshRangeMarkerStyles();
+                viewGraph.refreshInlineExpandedStyles();
                 pane._setGraph(viewGraph);
-                this.target = viewGraph;
+                if (!this._leftPane || pane.id === this._activePane) {
+                    this.target = viewGraph;
+                } else {
+                    if (targetGraph) {
+                        targetGraph.unregister();
+                    }
+                    viewGraph.register();
+                }
                 if (options.skipShow) {
                     this._ensureDefaultScreen();
                 }
@@ -1467,10 +2588,11 @@ view.View = class {
         if (!options.skipShow) {
             this.show(null);
         }
-        if (this._target) {
-            this._target.zoom = zoom;
+        const currentPaneGraph = pane ? pane.graph : this._target;
+        if (currentPaneGraph) {
+            currentPaneGraph.zoom = zoom;
             if (container && anchor) {
-                const anchorNode = this._target.find(anchor.value);
+                const anchorNode = currentPaneGraph.find(anchor.value);
                 if (anchorNode instanceof grapher.Node && anchorNode.element) {
                     let newRect = anchorNode.element.getBoundingClientRect();
                     if (anchorNode.definition && anchorNode.definition.element) {
@@ -1483,27 +2605,27 @@ view.View = class {
                         container.scrollTop += (newRect.top - anchor.rect.top);
                     }
                 }
-                delete this._target._scrollLeft;
-                delete this._target._scrollTop;
+                delete currentPaneGraph._scrollLeft;
+                delete currentPaneGraph._scrollTop;
             }
             const current = origin ? origin.getScreenCTM() : null;
             const ox = previous && current ? (previous.e - current.e) / current.a : 0;
             const oy = previous && current ? (previous.f - current.f) / current.d : 0;
             const animateTransition = (snapshot) => {
-                if (!this._target || snapshot.size === 0) {
+                if (!currentPaneGraph || snapshot.size === 0) {
                     return;
                 }
                 const duration = 300;
                 let startTime = 0;
                 const animations = [];
-                for (const [key, entry] of this._target.nodes) {
+                for (const [key, entry] of currentPaneGraph.nodes) {
                     const label = entry.label;
                     if (!label || !label.element) {
                         continue;
                     }
                     const modelKey = label.value || key;
                     const old = snapshot.get(modelKey);
-                    const isCluster = this._target.children(key).length > 0;
+                    const isCluster = currentPaneGraph.children(key).length > 0;
                     if (old) {
                         if (isCluster) {
                             animations.push({
@@ -1527,7 +2649,7 @@ view.View = class {
                         animations.push({ type: 'fadein', element: label.element });
                     }
                 }
-                for (const edge of this._target.edges.values()) {
+                for (const edge of currentPaneGraph.edges.values()) {
                     const label = edge.label;
                     if (!label || !label.element) {
                         continue;
@@ -1535,8 +2657,8 @@ view.View = class {
                     const fromNode = snapshot.get(label.from.value || edge.v);
                     const toNode = snapshot.get(label.to.value || edge.w);
                     if (fromNode && toNode) {
-                        const newFrom = this._target.node(edge.v);
-                        const newTo = this._target.node(edge.w);
+                        const newFrom = currentPaneGraph.node(edge.v);
+                        const newTo = currentPaneGraph.node(edge.w);
                         if (newFrom && newTo) {
                             const dfx = fromNode.x - newFrom.label.x;
                             const dfy = fromNode.y - newFrom.label.y;
@@ -1702,16 +2824,33 @@ view.View = class {
 
     async open(context) {
         this._sidebar.close();
+        this._leftPath = [];
+        this._rightPath = [];
+        this._activePane = 'modified';
         this._exportBasenameOverride = null;
+        this._options.showOriginal = true;
+        this._options.showModified = true;
+        const showOriginalEl = this._element('toolbar-show-original');
+        const showModifiedEl = this._element('toolbar-show-modified');
+        if (showOriginalEl) {
+            showOriginalEl.checked = true;
+        }
+        if (showModifiedEl) {
+            showModifiedEl.checked = true;
+        }
+        this._updateDiffPanesVisibility();
+        this._saveOptions();
         await this._timeout(2);
         try {
             const model = await this._modelFactoryService.open(context);
             try {
                 this._editSession = ModelEditor.createSession(model);
                 this._editSessionError = null;
+                this._invalidateDisplayGraphCache();
             } catch (error) {
                 this._editSession = null;
                 this._editSessionError = error;
+                this._invalidateDisplayGraphCache();
             }
             this._initGraphPanes();
             this._bindEditorSession();
@@ -1789,34 +2928,40 @@ view.View = class {
         return null;
     }
 
-    async _updateTarget(model, path) {
-        const lastModel = this._model;
-        const lastPath = this._path;
-        try {
-            await this._updatePath(model, path);
-            return this._model;
-        } catch (error) {
-            await this._updatePath(lastModel, lastPath);
-            throw error;
+    get _activePane() {
+        return this.__activePane;
+    }
+
+    set _activePane(value) {
+        if (this.__activePane !== value) {
+            this.__activePane = value;
+            this._updateToolbarPath();
         }
     }
 
-    async _updatePath(model, stack) {
-        this.model = model;
-        this._path = stack;
-        const status = await this.render(this.activeTarget, this.activeSignature);
-        if (status === 'cancel') {
-            this.model = null;
-            this._path = [];
-            this._activeTarget = null;
+    get _path() {
+        return this._activePane === 'original' ? this._leftPath : this._rightPath;
+    }
+
+    set _path(value) {
+        if (Array.isArray(value) && value.length === 0) {
+            this._leftPath = [];
+            this._rightPath = [];
         }
-        this.show(null);
+        if (this._activePane === 'original') {
+            this._leftPath = value;
+        } else {
+            this._rightPath = value;
+        }
+    }
+
+    _updateToolbarPath() {
         const path = this._element('toolbar-path');
         const back = this._element('toolbar-path-back-button');
-        while (path.children.length > 1) {
-            path.removeChild(path.lastElementChild);
-        }
-        if (status === '') {
+        if (path && back) {
+            while (path.children.length > 1) {
+                path.removeChild(path.lastElementChild);
+            }
             if (this._path.length <= 1) {
                 back.style.opacity = 0;
             } else {
@@ -1865,10 +3010,10 @@ view.View = class {
                     path.appendChild(element);
                 }
             }
-            this._select.update(model, stack);
+            this._select.update(this._model, this._path);
             const button = this._element('sidebar-target-button');
-            if (stack.length > 0) {
-                const type = stack[stack.length - 1].type || 'graph';
+            if (this._path.length > 0) {
+                const type = this._path[this._path.length - 1].type || 'graph';
                 const name = type.charAt(0).toUpperCase() + type.slice(1);
                 button.setAttribute('title', `${name} Properties`);
                 button.style.display = 'block';
@@ -1878,11 +3023,53 @@ view.View = class {
         }
     }
 
-    async pushTarget(graph, context) {
+    async _updateTarget(model, path) {
+        const lastModel = this._model;
+        const lastPath = this._path;
+        try {
+            await this._updatePath(model, path);
+            return this._model;
+        } catch (error) {
+            await this._updatePath(lastModel, lastPath);
+            throw error;
+        }
+    }
+
+    async _updatePath(model, stack) {
+        this.model = model;
+        if (this._leftPath.length === 0 && this._rightPath.length === 0) {
+            this._leftPath = stack.map((entry) => ({ ...entry, state: entry.state ? { ...entry.state } : null }));
+            this._rightPath = stack.map((entry) => ({ ...entry, state: entry.state ? { ...entry.state } : null }));
+        } else {
+            this._path = stack;
+        }
+        const status = await this.render(this.activeTarget, this.activeSignature);
+        if (status === 'cancel') {
+            this.model = null;
+            this._path = [];
+            this._activeTarget = null;
+        }
+        this.show(null);
+        this._updateToolbarPath();
+    }
+
+    async pushTarget(graph, context, paneId) {
+        if (paneId) {
+            this._activePane = paneId;
+        }
         if (graph && graph !== this.activeTarget && Array.isArray(graph.nodes)) {
+            const currentPaneGraph = (paneId === 'original' ? this._leftPane?.graph : this._rightPane?.graph) || this._target;
+            if (currentPaneGraph) {
+                currentPaneGraph.select(null);
+            }
             this._sidebar.close();
             if (context && this._path.length > 0) {
-                this._path[0].state = { context, zoom: this._target.zoom, blocks: this._target.blocks };
+                this._path[0].state = {
+                    context,
+                    zoom: currentPaneGraph ? currentPaneGraph.zoom : 1,
+                    blocks: currentPaneGraph ? currentPaneGraph.blocks : new Set(),
+                    batchInlineExpanded: Array.from(this._batchInlineExpanded)
+                };
             }
             const signature = Array.isArray(graph.signatures) && graph.signatures.length > 0 ? graph.signatures[0] : null;
             const entry = { target: graph, signature };
@@ -1911,16 +3098,19 @@ view.View = class {
         this._initGraphPanes();
         let status = '';
         if (target && this._leftPane && this._rightPane) {
-            const nodes = target.nodes || [];
-            this._host.event('graph_view', {
-                graph_node_count: nodes.length,
-                graph_skip: 0
-            });
-            const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
-            const modifiedTarget = this._resolveModifiedTarget(target);
-            // doubles the status for the two panes
-            status = await this._rightPane.render(modifiedTarget, signature, state);
-            const leftStatus = await this._leftPane.render(target, signature, state);
+            const leftEntry = this._leftPath && this._leftPath.length > 0 ? this._leftPath[0] : { target };
+            const rightEntry = this._rightPath && this._rightPath.length > 0 ? this._rightPath[0] : { target };
+            const leftTarget = leftEntry.target;
+            const rightTarget = rightEntry.target;
+            const leftState = leftEntry.state || null;
+            const rightState = rightEntry.state || null;
+            const leftSignature = leftEntry.signature || signature;
+            const rightSignature = rightEntry.signature || signature;
+
+            const modifiedRightTarget = this._resolveModifiedTarget(rightTarget);
+
+            status = await this._rightPane.render(modifiedRightTarget, rightSignature, rightState);
+            const leftStatus = await this._leftPane.render(leftTarget, leftSignature, leftState);
             if (status === '') {
                 status = leftStatus;
             }
@@ -1935,7 +3125,13 @@ view.View = class {
     }
 
     _canExportOnnx() {
-        return this._model && this._editSession && canExportOnnx(this._model);
+        if (!this._model || !this._editSession) {
+            return false;
+        }
+        if (canExportOnnx(this._model)) {
+            return true;
+        }
+        return isAmbapbCheckpoint(this._model) && canExportCheckpoint(this._model);
     }
 
     _suggestedExportBasename() {
@@ -1962,7 +3158,7 @@ view.View = class {
             }
             // export the modified model as ONNX
             const bytes = exportModifiedOnnx(this._model, this._editSession);
-            const blob = new Blob([bytes], { type: 'application/octet-stream' });
+            const blob = new window.Blob([bytes], { type: 'application/octet-stream' });
             await this._host.export(filename, blob);
         } catch (error) {
             const message = error instanceof OnnxExportError ? error.message : (error && error.message ? error.message : error.toString());
@@ -2127,7 +3323,7 @@ view.View = class {
             });
             await this._host.export(file, blob);
         }
-    } 
+    }
 
     showModelProperties() {
         if (!this._model) {
@@ -2204,7 +3400,7 @@ view.View = class {
         } catch (error) {
             this.error(error, 'Error showing target properties.', null);
         }
-    } 
+    }
 
     showNodeProperties(node, source) {
         if (node) {
@@ -2212,9 +3408,7 @@ view.View = class {
                 if (this._menu) {
                     this._menu.close();
                 }
-                const sidebar = this._editSession ?
-                    new view.EditableNodeSidebar(this, node, this._editSession) :
-                    new view.NodeSidebar(this, node);
+                const sidebar = this._createNodeSidebar(node);
                 this._bindNodeSidebarEvents(sidebar, node);
                 this._sidebar.open(sidebar, 'Node Properties', source);
             } catch (error) {
@@ -2243,7 +3437,7 @@ view.View = class {
             if (this._menu) {
                 this._menu.close();
             }
-            const sidebar = this._editSession ?
+            const sidebar = this._editSession && this._canEditModelContent() ?
                 new view.EditableConnectionSidebar(this, value, from, to, this._editSession) :
                 new view.ConnectionSidebar(this, value, from, to);
             this._bindConnectionSidebarEvents(sidebar);
@@ -2334,9 +3528,9 @@ view.Menu = class {
             ['Up', '&#x2191;'], ['Down', '&#x2193;'],
         ]);
         this._keydown = (e) => {
-             // fix to tell the menu not to handle backspace
-             // browser space is naturally to go to the previous tab. We usually override it by doing nothing, but now, 
-             // we make sure _keydown just returns and doesn't handle backspace
+            // fix to tell the menu not to handle backspace
+            // browser space is naturally to go to the previous tab. We usually override it by doing nothing, but now, 
+            // we make sure _keydown just returns and doesn't handle backspace
             const active = this._document.activeElement;
             const tag = active ? active.tagName : '';
             if (tag === 'INPUT' || tag === 'TEXTAREA' || (active && active.isContentEditable)) {
@@ -2374,7 +3568,7 @@ view.Menu = class {
                 } else {
                     this._stack = [this];
                     if (this._root.length > 1) {
-                        this._root =  [this];
+                        this._root = [this];
                         this._rebuild();
                     }
                     this._update();
@@ -3154,6 +4348,35 @@ view.Graph = class extends grapher.Graph {
         this._canvas = null;
         this._origin = null;
         this._background = null;
+        this.entityIdPrefix = options.entityIdPrefix || null;
+    }
+
+    // added since we have more than one pane id
+    get paneId() {
+        return this._paneId;
+    }
+
+    blockKey(hostEntityId, attrName) {
+        if (!hostEntityId || !attrName) {
+            return null;
+        }
+        return `${hostEntityId}/${attrName}`;
+    }
+
+    isBlockExpanded(blockKey) {
+        return Boolean(blockKey && this.blocks.has(blockKey));
+    }
+
+    toggleBlockExpanded(blockKey) {
+        if (!blockKey) {
+            return false;
+        }
+        if (this.blocks.has(blockKey)) {
+            this.blocks.delete(blockKey);
+            return false;
+        }
+        this.blocks.add(blockKey);
+        return true;
     }
 
     _containerElement() {
@@ -3172,6 +4395,7 @@ view.Graph = class extends grapher.Graph {
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
 .edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
 .node-border-outer { fill: none; stroke: none; pointer-events: none; }
+.userdef-selected > .node.node-border { stroke: rgba(255, 140, 0, 0.95); stroke-width: 2px; }
 .edited:not(.range-begin):not(.range-end) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .range-begin:not(.edited) > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
 .range-end:not(.edited) > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
@@ -3182,6 +4406,7 @@ view.Graph = class extends grapher.Graph {
 .edited.range-end:not(.range-begin) > .node.node-border-outer { stroke: rgba(0, 80, 200, 0.95); stroke-width: 6px; }
 .edited.range-begin.range-end > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .edited.range-begin.range-end > .node.node-border-outer { stroke: rgba(120, 0, 160, 0.95); stroke-width: 6px; }
+.inline-expanded > .node.node-border { stroke: rgba(220, 0, 0, 0.95); stroke-width: 2px; }
 .edge-path-tunnel { stroke-dasharray: 5, 3; marker-end: url(#${prefix}arrowhead-tunnel); opacity: 0.5; }
 #${prefix}arrowhead { fill: #000; }
 #${prefix}arrowhead-hover { fill: rgba(220, 0, 0, 0.9); }
@@ -3230,19 +4455,35 @@ view.Graph = class extends grapher.Graph {
         return this._selection;
     }
 
+    // Use model entity id, not the display graph index
     createNode(node) {
-        const obj = new view.Node(this, node);
+        let entityId = null;
+        if (this.entityIdPrefix) {
+            const nodeIndex = (this.target?.nodes || []).indexOf(node);
+            entityId = nodeIndex >= 0 ? `${this.entityIdPrefix}/node:${nodeIndex}` : null;
+        } else if (this.view && this.view._editSession) {
+            const entity = this.view._resolveNodeEntity(node);
+            if (entity) {
+                entityId = entity.nodeId;
+            }
+        }
+        if (!entityId) {
+            const nodes = this.target && this.target.nodes ? this.target.nodes : [];
+            const nodeIndex = nodes.indexOf(node);
+            entityId = nodeIndex >= 0 ? `graph:${this.graphIndex}/node:${nodeIndex}` : null;
+        }
+
+        const obj = new view.Node(this, node, undefined, null, entityId);
         obj.name = (this._nodeKey++).toString();
-        const nodes = this.target && this.target.nodes ? this.target.nodes : [];
-        const nodeIndex = nodes.indexOf(node);
-        obj._entityId = nodeIndex >= 0 ? `graph:${this.graphIndex}/node:${nodeIndex}` : null;
+        obj._entityId = entityId;
         this._table.set(node, obj);
         return obj;
     }
 
-    createGraph(graph, type) {
-        const obj = new view.Node(this, graph, type || 'graph');
+    createGraph(graph, type, blockKey, hostNodeValue) {
+        const obj = new view.Node(this, graph, type || 'graph', blockKey);
         obj.name = (this._nodeKey++).toString();
+        obj.hostNodeValue = hostNodeValue || null;
         this._table.set(graph, obj);
         return obj;
     }
@@ -3288,6 +4529,13 @@ view.Graph = class extends grapher.Graph {
             if (obj && typeof obj.applyDeltaStyle === 'function') {
                 obj.applyDeltaStyle();
             }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshDeltaStyles) {
+                        block.target.refreshDeltaStyles();
+                    }
+                }
+            }
         }
     }
 
@@ -3296,6 +4544,43 @@ view.Graph = class extends grapher.Graph {
             if (obj && typeof obj.applyRangeMarkerStyle === 'function') {
                 obj.applyRangeMarkerStyle();
             }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshRangeMarkerStyles) {
+                        block.target.refreshRangeMarkerStyles();
+                    }
+                }
+            }
+        }
+    }
+
+    refreshUserDefSelectionStyles() {
+        for (const obj of this._table.values()) {
+            if (obj && typeof obj.applyUserDefSelectionStyle === 'function') {
+                obj.applyUserDefSelectionStyle();
+            }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshUserDefSelectionStyles) {
+                        block.target.refreshUserDefSelectionStyles();
+                    }
+                }
+            }
+        }
+    }
+
+    refreshInlineExpandedStyles() {
+        for (const obj of this._table.values()) {
+            if (obj && typeof obj.applyInlineExpandedStyle === 'function') {
+                obj.applyInlineExpandedStyle();
+            }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshInlineExpandedStyles) {
+                        block.target.refreshInlineExpandedStyles();
+                    }
+                }
+            }
         }
     }
 
@@ -3303,6 +4588,13 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyDanglingStyle === 'function') {
                 obj.applyDanglingStyle();
+            }
+            if (obj instanceof grapher.Node) {
+                for (const block of obj.blocks) {
+                    if (block.target && block.target.refreshDanglingStyles) {
+                        block.target.refreshDanglingStyles();
+                    }
+                }
             }
         }
     }
@@ -3864,9 +5156,9 @@ view.Graph = class extends grapher.Graph {
         canvas.setAttribute('height', height);
         this._zoom = state ? state.zoom : 1;
         this._updateZoom(this._zoom);
-        const context = state ? this.select([state.context]) : [];
-        if (context.length > 0) {
-            this.scrollTo(context, 'instant');
+        const contextNode = state && state.context ? this._table.get(state.context) : null;
+        if (contextNode && contextNode.element) {
+            this.scrollTo([contextNode.element], 'instant');
         } else if (elements && elements.length > 0) {
             // Center view based on input elements
             const bounds = container.getBoundingClientRect();
@@ -3989,6 +5281,19 @@ view.Graph = class extends grapher.Graph {
         }
         const document = this.host.document;
         const container = this._containerElement();
+        const isBackground = e.target === this._canvas || e.target === this._background || e.target === container ||
+            (e.target && e.target.classList && (e.target.classList.contains('node-block-background') || e.target.classList.contains('canvas'))) ||
+            (e.target && e.target.parentNode && e.target.parentNode.classList && e.target.parentNode.classList.contains('cluster'));
+        if (isBackground) {
+            this.view._sidebar.close();
+            if (this.view._leftPane && this.view._leftPane.graph) {
+                this.view._leftPane.graph.select(null);
+            }
+            if (this.view._rightPane && this.view._rightPane.graph) {
+                this.view._rightPane.graph.select(null);
+            }
+            this.select(null);
+        }
         e.target.setPointerCapture(e.pointerId);
         this._mousePosition = {
             left: container.scrollLeft,
@@ -4196,10 +5501,12 @@ view.Graph = class extends grapher.Graph {
 
 view.Node = class extends grapher.Node {
 
-    constructor(context, value, type) {
+    constructor(context, value, type, blockKey, entityId) {
         super();
         this.context = context;
         this.value = value;
+        this._blockKey = blockKey || null;
+        this._entityId = entityId || null;
         this.id = `node-${value.name ? `name-${value.name}` : `id-${(context.counter++)}`}`;
         this._add(value, type);
         const inputs = value.inputs;
@@ -4230,9 +5537,22 @@ view.Node = class extends grapher.Node {
         }
         if (type !== 'graph' && type !== 'function') {
             this.onContextMenu = (event) => {
-                if (!this.context.readOnly && this.context.view && this.context.view._canInsertNode()) {
-                    this.context.view._showNodeContextMenu(this, event);
+                if (this.context.readOnly || !this.context.view) {
+                    return;
                 }
+                const viewRef = this.context.view;
+                if (viewRef._isBatchCallContextMenuTarget(this)) {
+                    viewRef._showBatchCallContextMenu(this, event);
+                    return;
+                }
+                if (viewRef._canShowSubgraphContextMenu(this)) {
+                    viewRef._showSubgraphContextMenu(this, event);
+                    return;
+                }
+                if (!viewRef._canInsertNode()) {
+                    return;
+                }
+                viewRef._showNodeContextMenu(this, event);
             };
         }
     }
@@ -4260,15 +5580,33 @@ view.Node = class extends grapher.Node {
 
     // apply range marker style for graph extraction
     applyRangeMarkerStyle() {
-        if (!this.element || !this._entityId || !this.context.view) {
+        if (!this.element || !this.context.view || !this.value || !this.value.name) {
             return;
         }
         const view = this.context.view;
-        const isBegin = view._rangeBegins.some((entry) => entry.nodeId === this._entityId);
-        const isEnd = view._rangeEnds.some((entry) => entry.nodeId === this._entityId);
-        // change css
+        const graphIndex = this.context.graphIndex !== undefined ? this.context.graphIndex : 0;
+        const marker = { graphIndex, nodeName: this.value.name };
+        const isBegin = view._rangeBegins.some((entry) => view._matchesRangeMarker(entry, marker));
+        const isEnd = view._rangeEnds.some((entry) => view._matchesRangeMarker(entry, marker));
         this.element.classList.toggle('range-begin', Boolean(isBegin));
         this.element.classList.toggle('range-end', Boolean(isEnd));
+    }
+
+    applyUserDefSelectionStyle() {
+        if (!this.element || !this.context.view || !this.value || !this.value.name) {
+            return;
+        }
+        const view = this.context.view;
+        const isSelected = view._userDefSelectedNodes && view._userDefSelectedNodes.has(this.value.name);
+        this.element.classList.toggle('userdef-selected', Boolean(isSelected));
+    }
+
+    applyInlineExpandedStyle() {
+        if (!this.element) {
+            return;
+        }
+        const expanded = Boolean(this.value && this.value._inlineExpanded && !this.value._inlineExpandedFromUserDef);
+        this.element.classList.toggle('inline-expanded', expanded);
     }
 
     applyDanglingStyle() {
@@ -4284,13 +5622,15 @@ view.Node = class extends grapher.Node {
         super.update();
         this.applyDeltaStyle();
         this.applyRangeMarkerStyle();
+        this.applyInlineExpandedStyle();
         this.applyDanglingStyle();
+        this.applyUserDefSelectionStyle();
     }
 
     _add(value, type) {
         const node = (type === 'graph' || type === 'function') ? { type: value } : value;
         const options = this.context.options;
-        const header =  this.header();
+        const header = this.header();
         const category = node.type && node.type.category ? node.type.category : '';
         if (node.type && typeof node.type.name !== 'string' || !node.type.name.split) { // #416
             const error = new view.Error(`Unsupported node type '${JSON.stringify(node.type.name)}'.`);
@@ -4319,8 +5659,9 @@ view.Node = class extends grapher.Node {
             this.definition.content = '\u25CB';
             this.definition.tooltip = 'Show Graph';
             this.definition.padding = 4;
-            this.definition.on('click', async () => await this.context.view.pushTarget(value, this.value));
-            const expanded = this.context.blocks.has(value);
+            this.definition.on('click', async () => await this.context.view.pushTarget(value, this.hostNodeValue, this.context.paneId));
+            const blockKey = this._blockKey;
+            const expanded = this.context.isBlockExpanded(blockKey);
             const icon = expanded ? '\u2212' : '+';
             const tooltip = expanded ? 'Collapse Graph' : 'Expand Graph';
             this.expander = header.add(null, styles);
@@ -4329,12 +5670,10 @@ view.Node = class extends grapher.Node {
             this.expander.padding = 6;
             this.expander.on('click', () => {
                 const rect = this.expander.element.getBoundingClientRect();
-                if (this.context.blocks.has(value)) {
-                    this.context.blocks.delete(value);
-                } else {
-                    this.context.blocks.add(value);
+                if (blockKey) {
+                    this.context.toggleBlockExpanded(blockKey);
                 }
-                this.context.view.refresh({ value: this.value, rect });
+                this.context.view.refresh({ value: this.value, rect }, { paneId: this.context.paneId });
             });
         } else if (node.type.type || (Array.isArray(node.type.nodes) && node.type.nodes.length > 0)) {
             let icon = '\u0192';
@@ -4346,7 +5685,7 @@ view.Node = class extends grapher.Node {
             this.definition = header.add(null, styles);
             this.definition.content = icon;
             this.definition.tooltip = tooltip;
-            this.definition.on('click', async () => await this.context.view.pushTarget(node.type, this.value));
+            this.definition.on('click', async () => await this.context.view.pushTarget(node.type, this.value, this.context.paneId));
         }
         let current = null;
         const list = () => {
@@ -4368,6 +5707,14 @@ view.Node = class extends grapher.Node {
             this.context.createNode(node.inner);
             this._add(node.inner);
         }
+    }
+
+    _blockHostEntityId() {
+        const node = this.value;
+        if (node && node._inlineExpanded && node.name) {
+            return `display:${node.name}`;
+        }
+        return this._entityId;
     }
 
     _populateArgumentList(node, list) {
@@ -4404,10 +5751,10 @@ view.Node = class extends grapher.Node {
                 const type = argument.type;
                 if (argument.visible !== false &&
                     ((type === 'graph' && argument.value) ||
-                    (type === 'object' && isObject(argument.value)) ||
-                    (type === 'object[]' && Array.isArray(argument.value) && argument.value.length > 0) ||
-                    type === 'function' ||
-                    (type === 'function[]' && Array.isArray(argument.value) && argument.value.length > 0))) {
+                        (type === 'object' && isObject(argument.value)) ||
+                        (type === 'object[]' && Array.isArray(argument.value) && argument.value.length > 0) ||
+                        type === 'function' ||
+                        (type === 'function[]' && Array.isArray(argument.value) && argument.value.length > 0))) {
                     objects.push(argument);
                 } else if (options.weights && argument.visible !== false && argument.type !== 'attribute' && Array.isArray(argument.value) && argument.value.length === 1 && argument.value[0].initializer) {
                     const item = this.context.createArgument(argument);
@@ -4427,8 +5774,8 @@ view.Node = class extends grapher.Node {
                 const type = argument.type;
                 if (argument.visible !== false &&
                     ((type === 'graph' && argument.value) ||
-                    (type === 'object' && argument.value) ||
-                    ((type === 'object[]' || type === 'function' || type === 'function[]') && Array.isArray(argument.value) && argument.value.length > 0))) {
+                        (type === 'object' && argument.value) ||
+                        ((type === 'object[]' || type === 'function' || type === 'function[]') && Array.isArray(argument.value) && argument.value.length > 0))) {
                     objects.push(argument);
                 } else if (options.attributes && argument.visible !== false) {
                     const item = attribute(argument);
@@ -4441,8 +5788,8 @@ view.Node = class extends grapher.Node {
                 const type = argument.type;
                 if (argument.visible !== false &&
                     ((type === 'graph' && argument.value) ||
-                    (type === 'object' && isObject(argument.value)) ||
-                    ((type === 'object[]' || type === 'function' || type === 'function[]') && Array.isArray(argument.value) && argument.value.length > 0))) {
+                        (type === 'object' && isObject(argument.value)) ||
+                        ((type === 'object[]' || type === 'function' || type === 'function[]') && Array.isArray(argument.value) && argument.value.length > 0))) {
                     objects.push(argument);
                 }
             }
@@ -4454,19 +5801,24 @@ view.Node = class extends grapher.Node {
         for (const argument of objects) {
             const type = argument.type;
             let content = null;
-            if (type === 'graph' && this.context.blocks.has(argument.value)) {
-                content = this.context.createGraph(argument.value);
-                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks));
+            const hostEntityId = this._blockHostEntityId();
+            const blockKey = this.context.blockKey(hostEntityId, argument.name);
+            if (type === 'graph' && blockKey && this.context.isBlockExpanded(blockKey)) {
+                content = this.context.createGraph(argument.value, 'graph', blockKey, this.value);
+                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks, blockKey));
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else if (type === 'graph' || type === 'function') {
-                content = this.context.createGraph(argument.value, type);
+                content = this.context.createGraph(argument.value, type, blockKey, this.value);
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else if (type === 'graph[]') {
-                content = argument.value.map((value) => this.context.createGraph(value));
+                content = argument.value.map((value, index) => {
+                    const itemKey = this.context.blockKey(hostEntityId, `${argument.name}[${index}]`);
+                    return this.context.createGraph(value, 'graph', itemKey, this.value);
+                });
                 const item = list().argument(argument.name, content);
                 list().add(item);
             } else {
@@ -4556,8 +5908,8 @@ view.Node = class extends grapher.Node {
 
 view.Block = class {
 
-    constructor(viewRef, target, blocks) {
-        this.target = new view.Graph(viewRef, false);
+    constructor(viewRef, target, blocks, entityIdPrefix) {
+        this.target = new view.Graph(viewRef, false, { entityIdPrefix });
         if (blocks) {
             this.target.blocks = blocks;
         }
@@ -5454,7 +6806,17 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
         if (node.identifier) {
             this.addProperty('identifier', node.identifier, 'nowrap');
         }
-        if (node.description) {
+        if (node.description !== undefined && node.description !== null && nodeId) {
+            this.addEditableProperty('description', node.description, (value) => {
+                this._view.applyEditorPatch({
+                    entityId: nodeId,
+                    entityType: 'node',
+                    changeType: 'modify',
+                    property: 'description',
+                    newValue: value
+                });
+            });
+        } else if (node.description) {
             this.addProperty('description', node.description);
         }
         if (node.device) {
@@ -5465,7 +6827,8 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
             this.addSection('Attributes');
             for (let index = 0; index < attributes.length; index++) {
                 const attribute = attributes[index];
-                if (nodeId) {
+                // WE check for attribute type
+                if (nodeId && attribute.type !== 'graph' && attribute.type !== 'function') {
                     const attributeId = `${nodeId}/attr:${index}`;
                     this.addEditableAttribute(attribute, attributeId, (patch) => {
                         this._view.applyEditorPatch(patch);
@@ -5511,6 +6874,454 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
             this.addSection('Blocks');
             for (const block of blocks) {
                 this.addArgument(block.name, block);
+            }
+        }
+    }
+
+    activate() {
+        this.emit('select', this._node);
+    }
+
+    deactivate() {
+        this.emit('select', null);
+        if (this._focused) {
+            for (const value of this._focused) {
+                this.emit('blur', value);
+            }
+            this._focused.clear();
+        }
+    }
+};
+
+view.EditablePrimGraphJsonView = class extends view.Control {
+
+    constructor(context, jsonText, options = {}) {
+        super(context);
+        this._onCommit = options.onCommit;
+        this._committedValue = jsonText;
+        this._collapsed = options.collapsed === true;
+        this.element = this.createElement('div', 'sidebar-item-value');
+        const line = this.createElement('div', 'sidebar-editable-attribute-row sidebar-item-value-line');
+        const textarea = this.createElement('textarea');
+        textarea.setAttribute('class', 'sidebar-editable-input');
+        textarea.style.fontFamily = 'monospace';
+        textarea.style.minHeight = '12em';
+        textarea.style.width = '100%';
+        textarea.style.resize = 'vertical';
+        textarea.value = jsonText;
+        const commit = () => {
+            const nextValue = textarea.value;
+            if (nextValue !== this._committedValue && this._onCommit) {
+                this._committedValue = nextValue;
+                this._onCommit(nextValue);
+            }
+        };
+        textarea.addEventListener('blur', commit);
+        textarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                textarea.blur();
+            }
+        });
+        line.appendChild(textarea);
+        this.element.appendChild(line);
+        if (this._collapsed) {
+            this.element.style.display = 'none';
+        }
+        this._textarea = textarea;
+    }
+
+    render() {
+        return [this.element];
+    }
+
+    setVisible(visible) {
+        this.element.style.display = visible ? '' : 'none';
+    }
+
+    toggle() {
+    }
+};
+
+// class for the primgraph editor. 
+// we have a hybrid editor because we can also edit the raw prim_graph JSON text is the user chooses to do so
+// normally, we will find all primitives in prim_graph through ambapb-editor.js
+// When we rerender, we call helpers from ambapb-editor to build new, edited list
+view.PrimGraphHybridEditor = class extends view.Control {
+
+    constructor(context, options) {
+        super(context);
+        this._options = options;
+        this._ambapb = options.ambapb;
+        this._editSession = options.editSession;
+        this._entityId = options.entityId;
+        this._onCommit = options.onCommit;
+        this._canEdit = options.canEdit !== false;
+        this._uiState = ensureAmbapbUiState(this._ambapb);
+        this.element = this.createElement('div', 'prim-graph-editor sidebar-item-value');
+        this._build();
+    }
+
+    _originalAmbapb() {
+        return this._editSession && this._editSession.original && this._editSession.original.model ?
+            this._editSession.original.model._ambapb :
+            null;
+    }
+
+    _primitives() {
+        return this._ambapb && this._ambapb.primGraph && this._ambapb.primGraph.primitives ?
+            this._ambapb.primGraph.primitives :
+            [];
+    }
+
+    _selectedPrimitive() {
+        const ids = this._primitives().map((entry) => entry.id);
+        const selectedId = resolveSelectedPrimitiveId(this._ambapb, ids);
+        return this._primitives().find((entry) => entry.id === selectedId) || null;
+    }
+
+    _commitPrimGraphJson(jsonText) {
+        if (this._onCommit) {
+            this._onCommit(jsonText);
+        }
+    }
+
+    _commitAttribute(primitiveId, attributeName, value) {
+        if (!this._canEdit || !this._onCommit) {
+            return;
+        }
+        try {
+            const jsonText = buildPrimGraphJsonAfterAttributeEdit(this._ambapb, primitiveId, attributeName, value);
+            this._commitPrimGraphJson(jsonText);
+        } catch (error) {
+            this._view.error(error, 'Error applying prim_graph edit.', null);
+        }
+    }
+    // we heavily use DOM manipulation here, like appendChild, though appendChild is quite outdated
+    // We use createElement to create new elements and replaceChildren to replace the existing elements
+    _renderList() {
+        this._listElement.replaceChildren();
+        const filtered = filterPrimitives(this._primitives(), this._uiState.searchQuery);
+        const originalAmbapb = this._originalAmbapb();
+        const selected = this._selectedPrimitive();
+        for (const primitive of filtered) {
+            const row = this.createElement('div', 'prim-graph-list-row');
+            if (selected && selected.id === primitive.id) {
+                row.classList.add('prim-graph-list-row-selected');
+            }
+            const idCell = this.createElement('span', 'prim-graph-list-id');
+            idCell.textContent = primitive.id || '-';
+            const typeCell = this.createElement('span', 'prim-graph-list-type');
+            typeCell.textContent = primitive.type || '-';
+            row.appendChild(idCell);
+            row.appendChild(typeCell);
+            if (originalAmbapb && isPrimitiveModified(originalAmbapb, this._ambapb, primitive.id)) {
+                const marker = this.createElement('span', 'prim-graph-list-modified');
+                marker.textContent = '\u25CF';
+                marker.setAttribute('title', 'Modified');
+                row.appendChild(marker);
+            }
+            row.addEventListener('click', () => {
+                this._uiState.selectedPrimitiveId = primitive.id;
+                this._renderList();
+                this._renderForm();
+            });
+            this._listElement.appendChild(row);
+        }
+        if (filtered.length === 0) {
+            const empty = this.createElement('div', 'prim-graph-list-empty');
+            empty.textContent = 'No matching primitives';
+            this._listElement.appendChild(empty);
+        }
+    }
+
+    _renderForm() {
+        this._formElement.replaceChildren();
+        const primitive = this._selectedPrimitive();
+        if (!primitive) {
+            const empty = this.createElement('div', 'prim-graph-form-empty');
+            empty.textContent = 'Select a primitive';
+            this._formElement.appendChild(empty);
+            this._formHeaderElement.textContent = '';
+            return;
+        }
+        this._formHeaderElement.textContent = `${primitive.id} (${primitive.type})`;
+        const attributes = primitive.attributes || {};
+        const keys = AmbapbMetadataResolver.getOrderedAttributeKeys(primitive.type, attributes);
+        if (keys.length === 0) {
+            const empty = this.createElement('div', 'prim-graph-form-empty');
+            empty.textContent = 'No editable attributes';
+            this._formElement.appendChild(empty);
+            return;
+        }
+        for (const key of keys) {
+            const row = this.createElement('div', 'prim-graph-form-row sidebar-item');
+            const nameElement = this.createElement('div', 'sidebar-item-name prim-graph-form-name');
+            const nameInput = this.createElement('input');
+            nameInput.setAttribute('type', 'text');
+            nameInput.setAttribute('readonly', 'true');
+            nameInput.setAttribute('value', AmbapbMetadataResolver.getAttributeLabel(primitive.type, key));
+            nameInput.setAttribute('title', key);
+            nameElement.appendChild(nameInput);
+            const valueElement = this.createElement('div', 'sidebar-item-value-list prim-graph-form-value');
+            const line = this.createElement('div', 'sidebar-editable-attribute-row sidebar-item-value-line');
+            const input = this.createElement('input');
+            input.setAttribute('type', 'text');
+            input.setAttribute('class', 'sidebar-editable-input');
+            input.value = attributes[key] === undefined || attributes[key] === null ? '' : String(attributes[key]);
+            if (!this._canEdit) {
+                input.setAttribute('readonly', 'true');
+            } else {
+                const committedValue = input.value;
+                const commit = () => {
+                    if (input.value !== committedValue) {
+                        this._commitAttribute(primitive.id, key, input.value);
+                    }
+                };
+                input.addEventListener('blur', commit);
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        input.blur();
+                    }
+                });
+            }
+            line.appendChild(input);
+            valueElement.appendChild(line);
+            row.appendChild(nameElement);
+            row.appendChild(valueElement);
+            this._formElement.appendChild(row);
+        }
+    }
+
+    _build() {
+        const searchRow = this.createElement('div', 'prim-graph-search-row');
+        this._searchInput = this.createElement('input');
+        this._searchInput.setAttribute('type', 'text');
+        this._searchInput.setAttribute('class', 'sidebar-editable-input prim-graph-search');
+        this._searchInput.setAttribute('placeholder', 'Search primitives...');
+        this._searchInput.value = this._uiState.searchQuery || '';
+        this._searchInput.addEventListener('input', () => {
+            this._uiState.searchQuery = this._searchInput.value;
+            this._renderList();
+        });
+        searchRow.appendChild(this._searchInput);
+        this.element.appendChild(searchRow);
+
+        this._listElement = this.createElement('div', 'prim-graph-list');
+        this.element.appendChild(this._listElement);
+
+        this._formHeaderElement = this.createElement('div', 'prim-graph-form-header');
+        this.element.appendChild(this._formHeaderElement);
+
+        this._formElement = this.createElement('div', 'prim-graph-form');
+        this.element.appendChild(this._formElement);
+
+        const advanced = this.createElement('div', 'prim-graph-advanced');
+        this._advancedToggle = this.createElement('div', 'prim-graph-advanced-toggle sidebar-item-value-line-link');
+        this._advancedToggle.textContent = this._uiState.advancedOpen ?
+            '\u25BC Advanced: edit raw JSON' :
+            '\u25B6 Advanced: edit raw JSON';
+        this._advancedToggle.addEventListener('click', () => {
+            this._uiState.advancedOpen = !this._uiState.advancedOpen;
+            this._advancedToggle.textContent = this._uiState.advancedOpen ?
+                '\u25BC Advanced: edit raw JSON' :
+                '\u25B6 Advanced: edit raw JSON';
+            this._advancedJsonView.setVisible(this._uiState.advancedOpen);
+        });
+        advanced.appendChild(this._advancedToggle);
+        const jsonText = formatPrimGraphForEditor(this._ambapb);
+        this._advancedJsonView = new view.EditablePrimGraphJsonView(this._view, jsonText, {
+            collapsed: !this._uiState.advancedOpen,
+            onCommit: (value) => {
+                if (this._canEdit) {
+                    try {
+                        const parsed = JSON.parse(value);
+                        if (parsed && Array.isArray(parsed.primitives)) {
+                            const currentId = this._uiState.selectedPrimitiveId;
+                            const stillExists = currentId &&
+                                parsed.primitives.some((entry) => entry && entry.id === currentId);
+                            if (!stillExists) {
+                                this._uiState.selectedPrimitiveId = parsed.primitives[0] && parsed.primitives[0].id ?
+                                    parsed.primitives[0].id :
+                                    null;
+                            }
+                        }
+                    } catch {
+                        // validation happens when the patch is applied
+                    }
+                    this._commitPrimGraphJson(value);
+                }
+            }
+        });
+        if (!this._canEdit) {
+            this._advancedJsonView._textarea.setAttribute('readonly', 'true');
+        }
+        for (const element of this._advancedJsonView.render()) {
+            advanced.appendChild(element);
+        }
+        this.element.appendChild(advanced);
+
+        this._renderList();
+        this._renderForm();
+    }
+
+    render() {
+        return [this.element];
+    }
+
+    toggle() {
+    }
+};
+
+view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
+
+    constructor(context, node, editSession) {
+        super(context);
+        this._node = node;
+        this._editSession = editSession;
+        this._entity = context._resolveNodeEntity(node);
+    }
+
+    get identifier() {
+        return 'node';
+    }
+
+    render() {
+        const node = this._node;
+        const nodeId = this._entity ? this._entity.nodeId : null;
+        let ambapb = node._ambapb;
+        if (!ambapb) {
+            const primGraphAttr = (node.attributes || []).find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
+            if (primGraphAttr && primGraphAttr.value) {
+                try {
+                    ambapb = {
+                        primGraph: parsePrimGraphJson(primGraphAttr.value),
+                        canEdit: this._editSession.modified.model._ambapb?.canEdit ?? true,
+                        metadata: this._editSession.modified.model._ambapb?.metadata ?? {}
+                    };
+                    node._ambapb = ambapb;
+                } catch {
+                    // Ignore
+                }
+            }
+        }
+        if (!ambapb) {
+            ambapb = this._editSession.modified.model._ambapb;
+        }
+        if (node.type) {
+            const type = node.type;
+            const item = this.addProperty('type', node.type.identifier || node.type.name);
+            if (type && (type.description || type.inputs || type.outputs || type.attributes)) {
+                let icon = '?';
+                let tooltip = 'Show Definition';
+                if (type.type === 'weights') {
+                    icon = '\u25CF';
+                    tooltip = 'Show Weights';
+                } else if (Array.isArray(type.nodes)) {
+                    icon = '\u0192';
+                }
+                item.action(icon, tooltip, () => {
+                    this.emit('show-definition', null);
+                });
+            }
+            const module = node.type.module;
+            const version = node.type.version;
+            const status = node.type.status;
+            if (module || version || status) {
+                const list = [module, version ? `v${version}` : '', status];
+                const value = list.filter((value) => value).join(' ');
+                this.addProperty('module', value, 'nowrap');
+            }
+        }
+        if (node.name && nodeId) {
+            this.addEditableProperty('name', node.name, (value) => {
+                this._view.applyEditorPatch({
+                    entityId: nodeId,
+                    entityType: 'node',
+                    changeType: 'modify',
+                    property: 'name',
+                    newValue: value
+                });
+            }, { style: 'nowrap' });
+        } else if (node.name) {
+            this.addProperty('name', node.name, 'nowrap');
+        }
+        if (node.identifier) {
+            this.addProperty('identifier', node.identifier, 'nowrap');
+        }
+        if (node.description !== undefined && node.description !== null && nodeId) {
+            this.addEditableProperty('description', node.description, (value) => {
+                this._view.applyEditorPatch({
+                    entityId: nodeId,
+                    entityType: 'node',
+                    changeType: 'modify',
+                    property: 'description',
+                    newValue: value
+                });
+            });
+        } else if (node.description) {
+            this.addProperty('description', node.description);
+        }
+        if (node.device) {
+            this.addProperty('device', node.device);
+        }
+        const attributes = node.attributes;
+        if (Array.isArray(attributes) && attributes.length > 0) {
+            this.addSection('Attributes');
+            for (let index = 0; index < attributes.length; index++) {
+                const attribute = attributes[index];
+                if (!nodeId) {
+                    this.addArgument(attribute.name, attribute, 'attribute');
+                    continue;
+                }
+                const attributeId = `${nodeId}/attr:${index}`;
+                if (attribute.name === PRIM_GRAPH_ATTRIBUTE) {
+                    const item = new view.PrimGraphHybridEditor(this._view, {
+                        ambapb,
+                        editSession: this._editSession,
+                        entityId: attributeId,
+                        canEdit: true,
+                        onCommit: (value) => {
+                            this._view.applyEditorPatch({
+                                entityId: attributeId,
+                                entityType: 'attribute',
+                                changeType: 'modify',
+                                property: `attributes.${attribute.name}`,
+                                newValue: value
+                            });
+                            try {
+                                if (node._ambapb) {
+                                    node._ambapb.primGraph = parsePrimGraphJson(value);
+                                }
+                            } catch {
+                            }
+                        }
+                    });
+                    this.addEntry(attribute.name, item);
+                } else if (READ_ONLY_SHELL_ATTRIBUTES.has(attribute.name)) {
+                    this.addArgument(attribute.name, attribute, 'attribute');
+                } else if (attribute.type === 'string' || attribute.type === 'float32' || attribute.type === 'int64') {
+                    this.addEditableAttribute(attribute, attributeId, (patch) => {
+                        this._view.applyEditorPatch(patch);
+                    });
+                } else {
+                    this.addArgument(attribute.name, attribute, 'attribute');
+                }
+            }
+        }
+        const inputs = node.inputs;
+        if (Array.isArray(inputs) && inputs.length > 0) {
+            this.addSection('Inputs');
+            for (const input of inputs) {
+                this.addArgument(input.name, input);
+            }
+        }
+        const outputs = node.outputs;
+        if (Array.isArray(outputs) && outputs.length > 0) {
+            this.addSection('Outputs');
+            for (const output of outputs) {
+                this.addArgument(output.name, output);
             }
         }
     }
@@ -6685,7 +8496,7 @@ view.ModelSidebar = class extends view.ObjectSidebar {
                 this.addArgument(argument.name, argument, 'attribute');
             }
         }
-       
+
         if (this._view._canMergeOnnx()) {
             this.addSection('Actions');
             const item = this.addProperty('merge', 'Merge ONNX Graph…');
@@ -8219,7 +10030,7 @@ markdown.Generator = class {
             if (match) {
                 source = source.substring(match[0].length);
                 prevChar = match[0].slice(-1);
-                tokens.push({ type: 'text' , text: inRawBlock ? match[0] : this._escape(match[0]) });
+                tokens.push({ type: 'text', text: inRawBlock ? match[0] : this._escape(match[0]) });
                 continue;
             }
             throw new Error(`Unexpected '${source.charCodeAt(0)}'.`);
@@ -8233,7 +10044,7 @@ markdown.Generator = class {
                 case 'paragraph':
                 case 'text':
                 case 'heading': {
-                    token.tokens  = this._tokenizeInline(token.text, links, false, false, '');
+                    token.tokens = this._tokenizeInline(token.text, links, false, false, '');
                     break;
                 }
                 case 'table': {
@@ -9484,7 +11295,7 @@ view.ModelFactoryService = class {
                 throw new view.Error("Archive contains no model files.");
             }
         }
-        const regex = async() => {
+        const regex = async () => {
             if (stream) {
                 const entries = [
                     { name: 'Unity metadata', value: /fileFormatVersion:/ },
@@ -9533,7 +11344,7 @@ view.ModelFactoryService = class {
                     { name: 'ModelScope configuration', tags: ['framework', 'task'] }, // https://github.com/modelscope/modelscope
                     { name: 'Tokenizer data', tags: ['<eos>', '<bos>'] },
                     { name: 'Jupyter Notebook data', tags: ['cells', 'nbformat'] },
-                    { name: 'Kaggle credentials', tags: ['username','key'] },
+                    { name: 'Kaggle credentials', tags: ['username', 'key'] },
                     { name: '.NET runtime configuration', tags: ['runtimeOptions.configProperties'] },
                     { name: '.NET dependency manifest', tags: ['runtimeTarget', 'targets', 'libraries'] },
                     { name: 'GuitarML NeuralPi model data', tags: ['model_data', 'state_dict'] },
@@ -9618,16 +11429,16 @@ view.ModelFactoryService = class {
             const tags = await context.tags('pb+');
             if (Object.keys(tags).length > 0) {
                 const formats = [
-                    { name: 'sentencepiece.ModelProto data', tags: [[1,[[1,2],[2,5],[3,0]]],[2,[[1,2],[2,2],[3,0],[4,0],[5,2],[6,0],[7,2],[10,5],[16,0],[40,0],[41,0],[42,0],[43,0]]],[3,[]],[4,[]],[5,[]]] }, // https://github.com/google/sentencepiece/blob/master/src/sentencepiece_model.proto
-                    { name: 'mediapipe.BoxDetectorIndex data', tags: [[1,[[1,[[1,[[1,5],[2,5],[3,5],[4,5],[6,0],[7,5],[8,5],[10,5],[11,0],[12,0]]],[2,5],[3,[]]]],[2,false],[3,false],[4,false],[5,false]]],[2,false],[3,false]] }, // https://github.com/google-ai-edge/mediapipe/blob/2b5a50fff37f79db8103dbd88f552c1a9be31e51/mediapipe/util/tracking/box_detector.proto
-                    { name: 'third_party.tensorflow.python.keras.protobuf.SavedMetadata data', tags: [[1,[[1,[[1,0],[2,0]]],[2,0],[3,2],[4,2],[5,2]]]] },
-                    { name: 'pblczero.Net data', tags: [[1,5],[2,2],[3,[[1,0],[2,0],[3,0]],[10,[[1,[]],[2,[]],[3,[]],[4,[]],[5,[]],[6,[]]]],[11,[]]]] }, // https://github.com/LeelaChessZero/lczero-common/blob/master/proto/net.proto
-                    { name: 'chrome_browser_media.PreloadedData', tags: [[1,2]], identifier: 'preloaded_data.pb' }, // https://github.com/kiwibrowser/src/blob/86afd150b847c9dd6f9ad3faddee1a28b8c9b23b/chrome/browser/media/media_engagement_preload.proto#L9
-                    { name: 'mindspore.irpb.Checkpoint', tags: [[1,[[1,2],[2,[[1,0],[2,2],[3,2]]]]]] }, // https://github.com/mindspore-ai/mindspore/blob/master/mindspore/ccsrc/utils/checkpoint.proto
-                    { name: 'optimization_guide.proto.PageTopicsOverrideList data', tags: [[1,[[1,2],[2,[]]]]] }, // https://github.com/chromium/chromium/blob/main/components/optimization_guide/proto/page_topics_override_list.proto
-                    { name: 'optimization_guide.proto.ModelInfo data', tags: [[1,0],[2,0],[4,0],[6,false],[7,[]],[9,0]] }, // https://github.com/chromium/chromium/blob/22b0d711657b451b61d50dd2e242b3c6e38e6ef5/components/optimization_guide/proto/models.proto#L80
-                    { name: 'Horizon binary model', tags: [[1,0],[2,0],[5,[[7,2],[8,2]]],[6,[[1,[[1,2],[2,2]]]]]] }, // https://github.com/HorizonRDK/hobot_dnn
-                    { name: 'TensorFlow Profiler data', tags: [[1,[[2,2],[3,[]],[4,[]]]]] }, // https://github.com/tensorflow/tensorflow/blob/master/third_party/xla/third_party/tsl/tsl/profiler/protobuf/xplane.proto
+                    { name: 'sentencepiece.ModelProto data', tags: [[1, [[1, 2], [2, 5], [3, 0]]], [2, [[1, 2], [2, 2], [3, 0], [4, 0], [5, 2], [6, 0], [7, 2], [10, 5], [16, 0], [40, 0], [41, 0], [42, 0], [43, 0]]], [3, []], [4, []], [5, []]] }, // https://github.com/google/sentencepiece/blob/master/src/sentencepiece_model.proto
+                    { name: 'mediapipe.BoxDetectorIndex data', tags: [[1, [[1, [[1, [[1, 5], [2, 5], [3, 5], [4, 5], [6, 0], [7, 5], [8, 5], [10, 5], [11, 0], [12, 0]]], [2, 5], [3, []]]], [2, false], [3, false], [4, false], [5, false]]], [2, false], [3, false]] }, // https://github.com/google-ai-edge/mediapipe/blob/2b5a50fff37f79db8103dbd88f552c1a9be31e51/mediapipe/util/tracking/box_detector.proto
+                    { name: 'third_party.tensorflow.python.keras.protobuf.SavedMetadata data', tags: [[1, [[1, [[1, 0], [2, 0]]], [2, 0], [3, 2], [4, 2], [5, 2]]]] },
+                    { name: 'pblczero.Net data', tags: [[1, 5], [2, 2], [3, [[1, 0], [2, 0], [3, 0]], [10, [[1, []], [2, []], [3, []], [4, []], [5, []], [6, []]]], [11, []]]] }, // https://github.com/LeelaChessZero/lczero-common/blob/master/proto/net.proto
+                    { name: 'chrome_browser_media.PreloadedData', tags: [[1, 2]], identifier: 'preloaded_data.pb' }, // https://github.com/kiwibrowser/src/blob/86afd150b847c9dd6f9ad3faddee1a28b8c9b23b/chrome/browser/media/media_engagement_preload.proto#L9
+                    { name: 'mindspore.irpb.Checkpoint', tags: [[1, [[1, 2], [2, [[1, 0], [2, 2], [3, 2]]]]]] }, // https://github.com/mindspore-ai/mindspore/blob/master/mindspore/ccsrc/utils/checkpoint.proto
+                    { name: 'optimization_guide.proto.PageTopicsOverrideList data', tags: [[1, [[1, 2], [2, []]]]] }, // https://github.com/chromium/chromium/blob/main/components/optimization_guide/proto/page_topics_override_list.proto
+                    { name: 'optimization_guide.proto.ModelInfo data', tags: [[1, 0], [2, 0], [4, 0], [6, false], [7, []], [9, 0]] }, // https://github.com/chromium/chromium/blob/22b0d711657b451b61d50dd2e242b3c6e38e6ef5/components/optimization_guide/proto/models.proto#L80
+                    { name: 'Horizon binary model', tags: [[1, 0], [2, 0], [5, [[7, 2], [8, 2]]], [6, [[1, [[1, 2], [2, 2]]]]]] }, // https://github.com/HorizonRDK/hobot_dnn
+                    { name: 'TensorFlow Profiler data', tags: [[1, [[2, 2], [3, []], [4, []]]]] }, // https://github.com/tensorflow/tensorflow/blob/master/third_party/xla/third_party/tsl/tsl/profiler/protobuf/xplane.proto
                 ];
                 const match = (tags, schema) => {
                     for (const [key, inner] of schema) {
@@ -9886,8 +11697,8 @@ view.ModelFactoryService = class {
         let accept = false;
         for (const extension of this._patterns) {
             if ((typeof extension === 'string' &&
-                    ((extension !== '' && identifier.endsWith(extension)) ||
-                     (extension === '' && identifier.indexOf('.') === -1))) ||
+                ((extension !== '' && identifier.endsWith(extension)) ||
+                    (extension === '' && identifier.indexOf('.') === -1))) ||
                 (extension instanceof RegExp && extension.exec(identifier))) {
                 accept = true;
                 break;
@@ -9999,8 +11810,8 @@ view.ModelFactoryService = class {
             const modules = ['./message', './onnx', './pytorch', './tflite', './mlnet', './onnx-proto', './onnx-schema', './tflite-schema'];
             const assets = ['onnx-metadata.json', 'pytorch-metadata.json', 'tflite-metadata.json'];
             await Promise.all([
-                ...modules.map((module) => this._host.require(module).catch(() => {})),
-                ...assets.map((asset) => this._host.asset(asset).catch(() => {})),
+                ...modules.map((module) => this._host.require(module).catch(() => { })),
+                ...assets.map((asset) => this._host.asset(asset).catch(() => { })),
             ]);
         }
     }
@@ -10088,6 +11899,78 @@ view.Error = class extends Error {
 if (typeof window !== 'undefined' && window.exports) {
     window.exports.view = view;
 }
+
+const findBoundaryNodes = (graph, selectedNodes) => {
+    const selectedNodesSet = new Set(selectedNodes);
+    const beginNodes = [];
+    const endNodes = [];
+
+    const argumentValues = (argument) => {
+        if (!argument || argument.value === null || argument.value === undefined) {
+            return [];
+        }
+        return Array.isArray(argument.value) ? argument.value : [argument.value];
+    };
+
+    const internalValues = new Set();
+    for (const node of selectedNodes) {
+        for (const output of node.outputs || []) {
+            for (const val of argumentValues(output)) {
+                if (val && val.name) {
+                    internalValues.add(val.name);
+                }
+            }
+        }
+    }
+
+    for (const node of selectedNodes) {
+        let isBegin = false;
+        for (const input of node.inputs || []) {
+            for (const val of argumentValues(input)) {
+                if (val && val.name && !val.initializer && !internalValues.has(val.name)) {
+                    isBegin = true;
+                    break;
+                }
+            }
+            if (isBegin) break;
+        }
+        if (isBegin) {
+            beginNodes.push(node);
+        }
+
+        let isEnd = false;
+        for (const output of node.outputs || []) {
+            for (const val of argumentValues(output)) {
+                if (!val || !val.name) continue;
+                const isGraphOutput = (graph.outputs || []).some(o =>
+                    argumentValues(o).some(v => v && v.name === val.name)
+                );
+                if (isGraphOutput) {
+                    isEnd = true;
+                    break;
+                }
+                const consumers = findValueConsumers(graph, val);
+                const hasExternalConsumer = consumers.some(c => c.node && !selectedNodesSet.has(c.node));
+                if (hasExternalConsumer) {
+                    isEnd = true;
+                    break;
+                }
+            }
+            if (isEnd) break;
+        }
+        if (isEnd) {
+            endNodes.push(node);
+        }
+    }
+
+    if (beginNodes.length === 0 && selectedNodes.length > 0) {
+        beginNodes.push(...selectedNodes);
+    }
+    if (endNodes.length === 0 && selectedNodes.length > 0) {
+        endNodes.push(...selectedNodes);
+    }
+    return { beginNodes, endNodes };
+};
 
 export const View = view.View;
 export const ModelFactoryService = view.ModelFactoryService;
