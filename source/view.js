@@ -2,7 +2,7 @@
 import * as base from './base.js';
 import * as grapher from './grapher.js';
 import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph } from './model-editor.js';
-import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
+import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModifiedWithAmbapb } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint } from './ambapb.js';
 import {
     buildPrimGraphJsonAfterAttributeEdit,
@@ -36,7 +36,9 @@ import {
 import {
     buildExtractWorkingGraph,
     resolveMarkedNodesByName,
-    stripInlineExpansionPrefixes
+    stripInlineExpansionPrefixes,
+    resolveExtractGraphContext,
+    applyExtractedGraph
 } from './ambapb-subgraph.js';
 
 const view = {};
@@ -1627,8 +1629,10 @@ view.View = class {
             return;
         }
         try {
-            const sourceGraph = this._editSession.modified.getGraph(graphIndex);
-            const workingGraph = buildExtractWorkingGraph(sourceGraph, this._batchInlineExpanded);
+            const rootGraph = this._editSession.modified.getGraph(graphIndex);
+            const extractContext = resolveExtractGraphContext(rootGraph, this._rangeBegins[0]);
+            const extractSourceGraph = extractContext.extractGraph || rootGraph;
+            const workingGraph = buildExtractWorkingGraph(extractSourceGraph, this._batchInlineExpanded);
             const beginNodes = resolveMarkedNodesByName(workingGraph, this._rangeBegins);
             const endNodes = resolveMarkedNodesByName(workingGraph, this._rangeEnds);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
@@ -1681,9 +1685,9 @@ view.View = class {
             for (const node of extracted.nodes || []) {
                 const batchCallName = inlineExpansionBatchCallName(node);
                 if (batchCallName) {
-                    const originalBatchCall = (sourceGraph.nodes || []).find((n) => n.name === batchCallName);
+                    const originalBatchCall = (extractSourceGraph.nodes || []).find((n) => n.name === batchCallName);
                     if (originalBatchCall) {
-                        const target = resolveBatchCallTarget(sourceGraph, originalBatchCall);
+                        const target = resolveBatchCallTarget(extractSourceGraph, originalBatchCall);
                         if (target && target.fragSubgraphNode) {
                             const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
                             if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
@@ -1701,9 +1705,24 @@ view.View = class {
 
             extracted = stripInlineExpansionPrefixes(extracted);
             this._checkpointEditHistory();
-            this._editSession.replaceGraph(graphIndex, extracted);
+            const ambapbPrimGraph = this._model && this._model._ambapb ? this._model._ambapb.primGraph : null;
+            if (extractContext.replaceTarget) {
+                applyExtractedGraph(rootGraph, extractContext.replaceTarget, extracted);
+                this._editSession.replaceGraph(graphIndex, rootGraph);
+            } else {
+                this._editSession.replaceGraph(graphIndex, extracted);
+            }
             if (this._model && this._model.proto) {
-                this._model.proto.graph = rebuildGraphProtoFromModified(extracted, this._model.proto);
+                const graphForRebuild = extractContext.replaceTarget ? extracted : this._editSession.modified.getGraph(graphIndex);
+                const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
+                    graphForRebuild,
+                    this._model.proto,
+                    ambapbPrimGraph
+                );
+                this._model.proto.graph = rebuilt.graph;
+                if (rebuilt.slicedPrimGraph && this._model._ambapb) {
+                    this._model._ambapb.primGraph = rebuilt.slicedPrimGraph;
+                }
             }
             const exportBase = stripExportExtension(this._host.document.title || 'model');
             this._exportBasenameOverride = buildSubgraphExportBasename(

@@ -288,6 +288,151 @@ export const enumeratePrimPorts = (primitives) => {
     return ports;
 };
 // set to make sure all primitives have unique ids
+const collectArgumentValueNamesFromGraph = (graph) => {
+    const names = new Set();
+    const track = (argument) => {
+        if (!argument || !Array.isArray(argument.value)) {
+            return;
+        }
+        for (const value of argument.value) {
+            if (value && value.name) {
+                names.add(value.name);
+            }
+        }
+    };
+    for (const input of graph.inputs || []) {
+        track(input);
+    }
+    for (const output of graph.outputs || []) {
+        track(output);
+    }
+    for (const node of graph.nodes || []) {
+        for (const input of node.inputs || []) {
+            track(input);
+        }
+        for (const output of node.outputs || []) {
+            track(output);
+        }
+    }
+    return names;
+};
+
+export const resolveKeptPrimitiveIds = (modifiedGraph, primGraph) => {
+    const kept = new Set();
+    if (!modifiedGraph || !primGraph || !Array.isArray(primGraph.primitives)) {
+        return kept;
+    }
+    const primitives = primGraph.primitives;
+    const byId = new Map(primitives.map((prim) => [prim.id, prim]));
+    const nodeNames = new Set((modifiedGraph.nodes || []).map((node) => node.name).filter(Boolean));
+    const valueNames = collectArgumentValueNamesFromGraph(modifiedGraph);
+
+    const add = (id) => {
+        if (id && byId.has(id)) {
+            kept.add(id);
+        }
+    };
+
+    for (const node of modifiedGraph.nodes || []) {
+        if (node._primitiveId) {
+            add(node._primitiveId);
+        }
+        add(node.name);
+    }
+
+    for (const prim of primitives) {
+        if (nodeNames.has(prim.id) || (prim.mangledId && nodeNames.has(prim.mangledId))) {
+            add(prim.id);
+        }
+        for (const oport of prim.oports || []) {
+            if (oport.id && valueNames.has(oport.id)) {
+                add(prim.id);
+            }
+            for (const depId of oport.additionalDepPrimIds || []) {
+                add(depId);
+            }
+        }
+    }
+
+    let growing = true;
+    while (growing) {
+        growing = false;
+        for (const id of kept) {
+            const prim = byId.get(id);
+            if (!prim) {
+                continue;
+            }
+            for (const source of prim.sources || []) {
+                if (source.id && !kept.has(source.id)) {
+                    const upstream = byId.get(source.id);
+                    if (upstream && (upstream.type === 'input' || valueNames.has(source.id) || keptHasProducer(kept, byId, source.id, valueNames))) {
+                        kept.add(source.id);
+                        growing = true;
+                    }
+                }
+            }
+        }
+    }
+
+    return kept;
+};
+
+const keptHasProducer = (kept, byId, valueName, valueNames) => {
+    for (const id of kept) {
+        const prim = byId.get(id);
+        if (!prim) {
+            continue;
+        }
+        for (const oport of prim.oports || []) {
+            if (oport.id === valueName) {
+                return true;
+            }
+        }
+    }
+    return valueNames.has(valueName);
+};
+
+export const collectImmediateTensorNames = (primitives) => {
+    const names = new Set();
+    for (const prim of primitives || []) {
+        const raw = prim.raw || prim;
+        const immediates = raw.immediates;
+        if (!Array.isArray(immediates)) {
+            continue;
+        }
+        for (const imm of immediates) {
+            if (imm && imm['file-name']) {
+                names.add(String(imm['file-name']).replace(/\.bin$/, ''));
+            }
+            if (imm && imm['unquant-file-name']) {
+                names.add(String(imm['unquant-file-name']).replace(/\.bin$/, ''));
+            }
+        }
+    }
+    return names;
+};
+
+export const slicePrimGraph = (primGraph, keptIds) => {
+    if (!primGraph || !primGraph.raw || !Array.isArray(primGraph.raw.primitives)) {
+        throw new AmbapbParseError('primGraph.raw is required for slicing.');
+    }
+    const idSet = keptIds instanceof Set ? keptIds : new Set(keptIds);
+    const slicedRaw = Object.assign({}, primGraph.raw, {
+        primitives: primGraph.raw.primitives.filter((entry) => entry && idSet.has(entry.id))
+    });
+
+    const inputPrim = slicedRaw.primitives.find((entry) => entry.type === 'input');
+    const outputPrim = slicedRaw.primitives.find((entry) => entry.type === 'output');
+    if (inputPrim) {
+        slicedRaw.graph_input = inputPrim.id;
+    }
+    if (outputPrim) {
+        slicedRaw.graph_output = outputPrim.id;
+    }
+
+    return parsePrimGraphJson(JSON.stringify(slicedRaw));
+};
+
 export const validatePrimGraph = (primitives) => {
     const errors = [];
     const ids = new Set();

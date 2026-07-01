@@ -10,7 +10,9 @@ import {
     buildExtractWorkingGraph,
     resolveMarkedNodesByName,
     stripInlineExpansionName,
-    stripInlineExpansionPrefixes
+    stripInlineExpansionPrefixes,
+    resolveExtractGraphContext,
+    applyExtractedGraph
 } from '../source/ambapb-subgraph.js';
 import { extractSubgraph, ModelEditor, SubgraphExtractError } from '../source/model-editor.js';
 
@@ -154,5 +156,38 @@ describe('ambapb subgraph extract', () => {
         assert.equal(stored.nodes.length, 2);
         assert.equal(stored.nodes[1].name, 'inner_nvp');
         assert.equal(editor.delta.getChanges().length, 0);
+    });
+
+    it('resolveExtractGraphContext finds nested compiled graphs from markers', () => {
+        const source = buildRuntimeGraph();
+        const marker = {
+            graphIndex: 0,
+            nodeName: 'inner_nvp',
+            nodeId: 'graph:0/node:1/compiled_prim_graph/node:0'
+        };
+        const context = resolveExtractGraphContext(source, marker);
+        assert.ok(context.extractGraph);
+        assert.equal(context.extractGraph.nodes[0].name, 'inner_nvp');
+        assert.deepEqual(context.replaceTarget, { hostNodeIndex: 1, attrName: 'compiled_prim_graph' });
+    });
+
+    it('applyExtractedGraph writes nested compiled graph slices back to the host node', () => {
+        const source = buildRuntimeGraph();
+        const extracted = {
+            name: 'subgraph_body',
+            inputs: [],
+            outputs: [],
+            nodes: [{
+                name: 'inner_nvp',
+                type: { name: 'CVFlowNVP' },
+                attributes: [],
+                inputs: [],
+                outputs: [{ name: 'output', value: [{ name: 'sub_output_0' }] }]
+            }]
+        };
+        const updated = applyExtractedGraph(source, { hostNodeIndex: 1, attrName: 'compiled_prim_graph' }, extracted);
+        const compiled = updated.nodes[1].attributes[0].value;
+        assert.equal(compiled.nodes.length, 1);
+        assert.equal(compiled.nodes[0].name, 'inner_nvp');
     });
 });

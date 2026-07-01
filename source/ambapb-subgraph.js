@@ -25,6 +25,48 @@ export const stripInlineExpansionName = (name) => {
     return match ? match[1] : name;
 };
 
+export const resolveExtractGraphContext = (rootGraph, marker) => {
+    if (!rootGraph || !marker || !marker.nodeId) {
+        return { extractGraph: rootGraph, replaceTarget: null };
+    }
+    const match = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:\d+$/.exec(marker.nodeId);
+    if (!match) {
+        return { extractGraph: rootGraph, replaceTarget: null };
+    }
+    const hostNodeIndex = Number(match[2]);
+    const attrName = match[3];
+    const hostNode = (rootGraph.nodes || [])[hostNodeIndex];
+    if (!hostNode) {
+        return { extractGraph: rootGraph, replaceTarget: null };
+    }
+    const graphEntry = [...(hostNode.attributes || []), ...(hostNode.blocks || [])]
+        .find((entry) => entry.name === attrName && entry.type === 'graph' && entry.value);
+    if (!graphEntry) {
+        return { extractGraph: rootGraph, replaceTarget: null };
+    }
+    return {
+        extractGraph: graphEntry.value,
+        replaceTarget: { hostNodeIndex, attrName }
+    };
+};
+
+export const applyExtractedGraph = (rootGraph, replaceTarget, extracted) => {
+    if (!replaceTarget) {
+        return extracted;
+    }
+    const hostNode = (rootGraph.nodes || [])[replaceTarget.hostNodeIndex];
+    if (!hostNode) {
+        return rootGraph;
+    }
+    for (const entry of [...(hostNode.attributes || []), ...(hostNode.blocks || [])]) {
+        if (entry.name === replaceTarget.attrName && entry.type === 'graph') {
+            entry.value = extracted;
+            break;
+        }
+    }
+    return rootGraph;
+};
+
 export const buildExtractWorkingGraph = (sourceGraph, batchInlineExpanded) => {
     if (!sourceGraph) {
         return null;

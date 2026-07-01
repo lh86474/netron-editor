@@ -6,7 +6,20 @@ import './onnx-encode.js';
 import { onnx } from './onnx-proto.js';
 import { BinaryReader } from './protobuf.js';
 import { enumerateGraphValues } from './model-editor.js';
-import { buildPrimGraphAttributeProto, PRIM_GRAPH_ATTRIBUTE_NAME, parsePrimGraphJson } from './ambapb-prim-graph.js';
+import { findCVFlowNVPNode } from './ambapb.js';
+import {
+    buildPrimGraphAttributeProto,
+    collectImmediateTensorNames,
+    parsePrimGraphJson,
+    PRIM_GRAPH_ATTRIBUTE_NAME,
+    resolveKeptPrimitiveIds,
+    serializePrimGraphJson,
+    slicePrimGraph
+} from './ambapb-prim-graph.js';
+import {
+    COMPILED_PRIM_GRAPH_ATTRIBUTE,
+    PRIM_GRAPH_IMMS_ATTRIBUTE
+} from './ambapb-editor.js';
 // class to create the ONNXExportError
 // Holds the error message and has property ONNX Export Error
 // from parent class Error
@@ -600,21 +613,11 @@ const buildGraphValueInfo = (argument, sourceGraph, usedNames) => {
     return infos;
 };
 
-export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
-    if (!sourceProto || !sourceProto.graph) {
-        throw new OnnxExportError('Original ONNX protobuf is not available for graph rebuild.');
-    }
-    const sourceGraph = sourceProto.graph;
-    const originalByName = new Map();
-    for (const node of sourceGraph.node || []) {
-        if (node.name) {
-            originalByName.set(node.name, node);
-        }
-    }
+const buildRuntimeGraphBody = (modifiedGraph, sourceGraph, originalNodesByName) => {
     const usedNames = collectArgumentValueNamesFromGraph(modifiedGraph);
     const nodes = [];
     for (const modifiedNode of modifiedGraph.nodes || []) {
-        const existing = originalByName.get(modifiedNode.name);
+        const existing = originalNodesByName.get(modifiedNode.name);
         if (existing) {
             syncNodeFromModified(existing, modifiedNode);
             nodes.push(existing);
@@ -630,42 +633,6 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
     for (const modifiedOutput of modifiedGraph.outputs || []) {
         output.push(...buildGraphValueInfo(modifiedOutput, sourceGraph, usedNames));
     }
-    const immsTensors = [];
-    let primGraph = null;
-    const wrapperNode = sourceGraph.node.find((node) => node && node.op_type === 'CVFlowNVP');
-    if (wrapperNode) {
-        const immsAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === 'prim_graph_imms');
-        if (immsAttr && Array.isArray(immsAttr.tensors)) {
-            immsTensors.push(...immsAttr.tensors);
-        }
-        const primGraphAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === 'prim_graph');
-        if (primGraphAttr && primGraphAttr.t) {
-            try {
-                primGraph = parsePrimGraphJson(primGraphAttr.t);
-            } catch {
-                // ignore
-            }
-        }
-    }
-    if (primGraph && Array.isArray(primGraph.primitives)) {
-        const nodeNames = new Set((modifiedGraph.nodes || []).map((node) => node.name));
-        for (const prim of primGraph.primitives) {
-            if (prim && nodeNames.has(prim.id) && prim.raw && Array.isArray(prim.raw.immediates)) {
-                for (const imm of prim.raw.immediates) {
-                    if (imm && imm['file-name']) {
-                        const baseName = imm['file-name'].replace(/\.bin$/, '');
-                        usedNames.add(baseName);
-                    }
-                    if (imm && imm['unquant-file-name']) {
-                        const baseName = imm['unquant-file-name'].replace(/\.bin$/, '');
-                        usedNames.add(baseName);
-                    }
-                }
-            }
-        }
-    }
-    const allInitializers = [...(sourceGraph.initializer || []), ...immsTensors];
-    const initializer = allInitializers.filter((tensor) => tensor.name && usedNames.has(tensor.name));
     const value_info = (sourceGraph.value_info || []).filter((value) => value.name && usedNames.has(value.name));
     const sparse_initializer = (sourceGraph.sparse_initializer || []).filter((tensor) => {
         const valuesName = tensor.values && tensor.values.name;
@@ -678,11 +645,223 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
         node: nodes,
         input,
         output,
-        initializer,
+        initializer: (sourceGraph.initializer || []).filter((tensor) => tensor.name && usedNames.has(tensor.name)),
         value_info,
         sparse_initializer,
         quantization_annotation: sourceGraph.quantization_annotation || []
     };
+};
+
+const collectOriginalNodesByName = (sourceGraph, wrapperNode) => {
+    const originalByName = new Map();
+    for (const node of sourceGraph.node || []) {
+        if (node.name) {
+            originalByName.set(node.name, node);
+        }
+    }
+    if (wrapperNode) {
+        const compiledAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === COMPILED_PRIM_GRAPH_ATTRIBUTE);
+        const compiledGraph = compiledAttr && compiledAttr.g ? compiledAttr.g : null;
+        for (const node of (compiledGraph && compiledGraph.node) || []) {
+            if (node.name && !originalByName.has(node.name)) {
+                originalByName.set(node.name, node);
+            }
+        }
+    }
+    return originalByName;
+};
+
+const loadCheckpointPrimGraph = (wrapperNode, ambapbPrimGraph) => {
+    if (ambapbPrimGraph) {
+        return ambapbPrimGraph;
+    }
+    const primGraphAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === PRIM_GRAPH_ATTRIBUTE_NAME);
+    if (!primGraphAttr || !primGraphAttr.t) {
+        return null;
+    }
+    try {
+        return parsePrimGraphJson(primGraphAttr.t);
+    } catch {
+        return null;
+    }
+};
+
+const loadCheckpointImmsTensors = (wrapperNode) => {
+    const immsAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === PRIM_GRAPH_IMMS_ATTRIBUTE);
+    if (!immsAttr || !Array.isArray(immsAttr.tensors)) {
+        return [];
+    }
+    return immsAttr.tensors;
+};
+
+const buildImmsAttributeProto = (tensors, originalAttribute) => {
+    const attribute = new onnx.AttributeProto();
+    attribute.name = PRIM_GRAPH_IMMS_ATTRIBUTE;
+    attribute.type = onnx.AttributeProto.AttributeType.TENSORS;
+    attribute.tensors = tensors;
+    if (originalAttribute && originalAttribute.doc_string) {
+        attribute.doc_string = originalAttribute.doc_string;
+    }
+    return attribute;
+};
+
+const buildCompiledGraphAttributeProto = (graphBody, originalAttribute) => {
+    const attribute = new onnx.AttributeProto();
+    attribute.name = COMPILED_PRIM_GRAPH_ATTRIBUTE;
+    attribute.type = onnx.AttributeProto.AttributeType.GRAPH;
+    attribute.g = graphBody;
+    if (originalAttribute && originalAttribute.doc_string) {
+        attribute.doc_string = originalAttribute.doc_string;
+    }
+    return attribute;
+};
+
+const rebuildCheckpointWrapperAttributes = (wrapperNode, modifiedGraph, sourceGraph, ambapbPrimGraph) => {
+    const primGraph = loadCheckpointPrimGraph(wrapperNode, ambapbPrimGraph);
+    if (!primGraph) {
+        return null;
+    }
+    const keptIds = resolveKeptPrimitiveIds(modifiedGraph, primGraph);
+    if (keptIds.size === 0) {
+        return null;
+    }
+    const slicedPrimGraph = slicePrimGraph(primGraph, keptIds);
+    const slicedPrimitives = slicedPrimGraph.primitives || [];
+    const weightNames = collectImmediateTensorNames(slicedPrimitives);
+    const valueNames = collectArgumentValueNamesFromGraph(modifiedGraph);
+    for (const name of valueNames) {
+        weightNames.add(name);
+    }
+    const immsTensors = loadCheckpointImmsTensors(wrapperNode);
+    const filteredImms = immsTensors.filter((tensor) => tensor.name && weightNames.has(tensor.name));
+
+    const originalByName = collectOriginalNodesByName(sourceGraph, wrapperNode);
+    const compiledBody = buildRuntimeGraphBody(modifiedGraph, sourceGraph, originalByName);
+
+    const originalAttributes = wrapperNode.attribute || [];
+    const originalPrimGraphAttr = originalAttributes.find((attr) => attr && attr.name === PRIM_GRAPH_ATTRIBUTE_NAME) || null;
+    const originalImmsAttr = originalAttributes.find((attr) => attr && attr.name === PRIM_GRAPH_IMMS_ATTRIBUTE) || null;
+    const originalCompiledAttr = originalAttributes.find((attr) => attr && attr.name === COMPILED_PRIM_GRAPH_ATTRIBUTE) || null;
+
+    const updatedByName = new Map([
+        [PRIM_GRAPH_ATTRIBUTE_NAME, buildPrimGraphAttributeProto(serializePrimGraphJson(slicedPrimGraph), originalPrimGraphAttr)],
+        [PRIM_GRAPH_IMMS_ATTRIBUTE, buildImmsAttributeProto(filteredImms, originalImmsAttr)],
+        [COMPILED_PRIM_GRAPH_ATTRIBUTE, buildCompiledGraphAttributeProto(compiledBody, originalCompiledAttr)]
+    ]);
+
+    const attributes = [];
+    const seen = new Set();
+    for (const attribute of originalAttributes) {
+        if (!attribute || !attribute.name || seen.has(attribute.name)) {
+            continue;
+        }
+        seen.add(attribute.name);
+        attributes.push(updatedByName.has(attribute.name) ? updatedByName.get(attribute.name) : attribute);
+    }
+    for (const [name, attribute] of updatedByName) {
+        if (!seen.has(name)) {
+            attributes.push(attribute);
+        }
+    }
+
+    return {
+        attributes,
+        slicedPrimGraph
+    };
+};
+
+const rebuildFlatGraphProtoFromModified = (modifiedGraph, sourceGraph, wrapperNode) => {
+    const originalByName = collectOriginalNodesByName(sourceGraph, wrapperNode);
+    const usedNames = collectArgumentValueNamesFromGraph(modifiedGraph);
+    const body = buildRuntimeGraphBody(modifiedGraph, sourceGraph, originalByName);
+
+    const immsTensors = wrapperNode ? loadCheckpointImmsTensors(wrapperNode) : [];
+    let primGraph = wrapperNode ? loadCheckpointPrimGraph(wrapperNode, null) : null;
+    if (primGraph && Array.isArray(primGraph.primitives)) {
+        const keptIds = resolveKeptPrimitiveIds(modifiedGraph, primGraph);
+        for (const prim of primGraph.primitives) {
+            if (!prim || !keptIds.has(prim.id)) {
+                continue;
+            }
+            for (const name of collectImmediateTensorNames([prim])) {
+                usedNames.add(name);
+            }
+        }
+    }
+    const allInitializers = [...(sourceGraph.initializer || []), ...immsTensors];
+    body.initializer = allInitializers.filter((tensor) => tensor.name && usedNames.has(tensor.name));
+    return body;
+};
+
+const rebuildCheckpointGraphProtoFromModified = (modifiedGraph, sourceProto, wrapperNode, ambapbPrimGraph) => {
+    const sourceGraph = sourceProto.graph;
+    const wrapperUpdate = rebuildCheckpointWrapperAttributes(wrapperNode, modifiedGraph, sourceGraph, ambapbPrimGraph);
+    if (!wrapperUpdate) {
+        return {
+            graph: rebuildFlatGraphProtoFromModified(modifiedGraph, sourceGraph, wrapperNode),
+            slicedPrimGraph: null
+        };
+    }
+
+    const wrapper = new onnx.NodeProto();
+    wrapper.name = wrapperNode.name || '';
+    wrapper.op_type = wrapperNode.op_type || 'CVFlowNVP';
+    if (wrapperNode.domain) {
+        wrapper.domain = wrapperNode.domain;
+    }
+    if (wrapperNode.doc_string) {
+        wrapper.doc_string = wrapperNode.doc_string;
+    }
+    wrapper.input = Array.isArray(wrapperNode.input) ? wrapperNode.input.slice() : [];
+    wrapper.output = Array.isArray(wrapperNode.output) ? wrapperNode.output.slice() : [];
+    wrapper.attribute = wrapperUpdate.attributes;
+
+    return {
+        graph: {
+            name: sourceGraph.name || '',
+            doc_string: sourceGraph.doc_string || '',
+            node: [wrapper],
+            input: sourceGraph.input || [],
+            output: sourceGraph.output || [],
+            initializer: sourceGraph.initializer || [],
+            value_info: sourceGraph.value_info || [],
+            sparse_initializer: sourceGraph.sparse_initializer || [],
+            quantization_annotation: sourceGraph.quantization_annotation || []
+        },
+        slicedPrimGraph: wrapperUpdate.slicedPrimGraph
+    };
+};
+
+export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto, options = {}) => {
+    if (!sourceProto || !sourceProto.graph) {
+        throw new OnnxExportError('Original ONNX protobuf is not available for graph rebuild.');
+    }
+    const sourceGraph = sourceProto.graph;
+    const wrapperNode = findCVFlowNVPNode(sourceGraph);
+    if (wrapperNode) {
+        const checkpoint = rebuildCheckpointGraphProtoFromModified(
+            modifiedGraph,
+            sourceProto,
+            wrapperNode,
+            options.ambapbPrimGraph || null
+        );
+        return checkpoint.graph;
+    }
+
+    const originalByName = collectOriginalNodesByName(sourceGraph, null);
+    return buildRuntimeGraphBody(modifiedGraph, sourceGraph, originalByName);
+};
+
+export const rebuildGraphProtoFromModifiedWithAmbapb = (modifiedGraph, sourceProto, ambapbPrimGraph) => {
+    const sourceGraph = sourceProto && sourceProto.graph;
+    const wrapperNode = findCVFlowNVPNode(sourceGraph);
+    if (!wrapperNode) {
+        return {
+            graph: rebuildGraphProtoFromModified(modifiedGraph, sourceProto),
+            slicedPrimGraph: null
+        };
+    }
+    return rebuildCheckpointGraphProtoFromModified(modifiedGraph, sourceProto, wrapperNode, ambapbPrimGraph);
 };
 
 // This supports node insertions and deletions by rebuilding graph.node from the modified graph.
