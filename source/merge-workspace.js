@@ -286,6 +286,10 @@ export class MergeWorkspaceController {
         this._downstreamSourcePane = null;
         this._session = null;
         const page = this._returnPage === 'merge-workspace' ? 'welcome' : this._returnPage;
+        this._view._clearMergePanePaths();
+        for (const id of ['merge-upstream', 'merge-downstream', 'merge-preview']) {
+            this._view._updatePanePathUI(id);
+        }
         this._view.show(page);
     }
 
@@ -349,6 +353,8 @@ export class MergeWorkspaceController {
         }
         await this._upstreamSourcePane.render(upstream.target, null, null, upstream.model);
         await this._downstreamSourcePane.render(downstream.target, null, null, downstream.model);
+        this._view._resetMergePanePath('merge-upstream', upstream.target);
+        this._view._resetMergePanePath('merge-downstream', downstream.target);
     }
 
     _clearSourcePanes() {
@@ -360,6 +366,10 @@ export class MergeWorkspaceController {
                 pane.render(null, null, null);
             }
         }
+        this._view._mergePanePaths.delete('merge-upstream');
+        this._view._mergePanePaths.delete('merge-downstream');
+        this._view._updatePanePathUI('merge-upstream');
+        this._view._updatePanePathUI('merge-downstream');
     }
 
     _element(id) {
@@ -727,6 +737,7 @@ export class MergeWorkspaceController {
         const model = await this._view._modelFactoryService.open(context);
         const target = resolveMainGraphTarget(model);
         await this._previewPane.render(target, null, null, model);
+        this._view._resetMergePanePath('merge-preview', target);
         this._session.mergedPreview = {
             proto: result.mergedProto,
             model,
@@ -744,6 +755,8 @@ export class MergeWorkspaceController {
         if (this._session) {
             this._session.mergedPreview = null;
         }
+        this._view._mergePanePaths.delete('merge-preview');
+        this._view._updatePanePathUI('merge-preview');
     }
 
     async openMerged() {

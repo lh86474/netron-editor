@@ -74,6 +74,7 @@ view.View = class {
         this.__activePane = 'modified';
         this._leftPath = [];
         this._rightPath = [];
+        this._mergePanePaths = new Map();
         this._selection = [];
         // arrays to support multiple begin and end marker
         this._rangeBegins = [];
@@ -151,7 +152,7 @@ view.View = class {
             this._setupResizablePanes('merge-source-row', 'merge-upstream-pane', 'merge-source-divider', false);
             this._setupResizablePanes('merge-graph-area', 'merge-source-row', 'merge-row-divider', true);
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
-                await this.popTarget();
+                await this.popTarget('original');
             });
             this._element('sidebar').addEventListener('mousewheel', (e) => {
                 if (e.shiftKey || e.ctrlKey) {
@@ -848,6 +849,324 @@ view.View = class {
         if (paneId === 'merge-downstream') {
             return ws._downstreamSourcePane;
         }
+        return null;
+    }
+
+    _clearMergePanePaths() {
+        this._mergePanePaths.clear();
+    }
+
+    _resetMergePanePath(paneId, target, signature = null) {
+        if (!paneId || !target) {
+            this._mergePanePaths.delete(paneId);
+        } else {
+            this._mergePanePaths.set(paneId, [{ target, signature, state: null }]);
+        }
+        this._updatePanePathUI(paneId);
+    }
+
+    _panePathArray(paneId) {
+        if (paneId && paneId.startsWith('merge-')) {
+            if (!this._mergePanePaths.has(paneId)) {
+                this._mergePanePaths.set(paneId, []);
+            }
+            return this._mergePanePaths.get(paneId);
+        }
+        if (paneId === 'original') {
+            return this._leftPath;
+        }
+        if (paneId === 'modified') {
+            return this._rightPath;
+        }
+        return null;
+    }
+
+    _pathEntryName(target) {
+        if (target && target.identifier) {
+            return target.identifier;
+        }
+        if (target && target.name) {
+            return target.name;
+        }
+        return '';
+    }
+
+    _isPaneChromeElement(element) {
+        return element.classList.contains('graph-pane-label') ||
+            element.classList.contains('graph-pane-path') ||
+            element.classList.contains('graph-busy-overlay') ||
+            element.id === 'graph-busy-overlay';
+    }
+
+    _ensurePaneScroll(container) {
+        let scroll = container.querySelector(':scope > .graph-pane-scroll');
+        if (!scroll) {
+            const document = this._host.document;
+            scroll = document.createElement('div');
+            scroll.className = 'graph-pane-scroll';
+            if (container.classList.contains('target')) {
+                scroll.classList.add('target');
+                container.classList.remove('target');
+            }
+            if (container.hasAttribute('tabindex')) {
+                scroll.tabIndex = container.tabIndex;
+                container.removeAttribute('tabindex');
+            }
+            const toMove = [];
+            for (const child of Array.from(container.children)) {
+                if (!this._isPaneChromeElement(child)) {
+                    toMove.push(child);
+                }
+            }
+            container.insertBefore(scroll, container.firstChild);
+            for (const child of toMove) {
+                scroll.appendChild(child);
+            }
+        }
+        return scroll;
+    }
+
+    _paneScrollContainer(pane) {
+        if (!pane || !pane.container) {
+            return null;
+        }
+        if (pane.id === 'original') {
+            return pane.container;
+        }
+        return this._ensurePaneScroll(pane.container);
+    }
+
+    _clearPaneGraphContent(pane) {
+        const container = pane.container;
+        const scroll = pane.id === 'original' ? null : container.querySelector(':scope > .graph-pane-scroll');
+        if (scroll) {
+            while (scroll.lastChild) {
+                scroll.removeChild(scroll.lastChild);
+            }
+            return;
+        }
+        const preserve = [];
+        for (const child of Array.from(container.children)) {
+            if (this._isPaneChromeElement(child)) {
+                preserve.push(child);
+            }
+        }
+        while (container.lastChild) {
+            container.removeChild(container.lastChild);
+        }
+        for (const child of preserve) {
+            container.appendChild(child);
+        }
+    }
+
+    _pathHostFor(paneId) {
+        if (paneId === 'original') {
+            const pane = this._leftPane;
+            const stale = pane?.container?.querySelector('.graph-pane-path');
+            if (stale) {
+                stale.remove();
+            }
+            return this._element('toolbar-path');
+        }
+        const pane = this._paneById(paneId);
+        if (!pane || !pane.container) {
+            return null;
+        }
+        return this._ensurePanePath(pane.container, paneId);
+    }
+
+    _ensurePanePath(container, paneId) {
+        if (paneId === 'original') {
+            return this._element('toolbar-path');
+        }
+        this._ensurePaneScroll(container);
+        let pathEl = container.querySelector(':scope > .graph-pane-path');
+        if (!pathEl) {
+            const document = this._host.document;
+            pathEl = document.createElement('div');
+            pathEl.className = 'graph-pane-path';
+            pathEl.dataset.paneId = paneId;
+            const back = document.createElement('button');
+            back.className = 'toolbar-path-back-button graph-pane-path-back';
+            back.type = 'button';
+            back.title = 'Back';
+            back.innerHTML = '&#x276E;';
+            back.addEventListener('click', async () => {
+                await this.popTarget(paneId);
+            });
+            pathEl.appendChild(back);
+            container.appendChild(pathEl);
+        }
+        return pathEl;
+    }
+
+    _appendPathNameButtons(pathEl, pathArray, paneId) {
+        const document = this.host.document;
+        const last = pathArray.length - 2;
+        const count = Math.min(2, last);
+        if (count < last) {
+            const element = document.createElement('button');
+            element.setAttribute('class', 'toolbar-path-name-button');
+            element.innerHTML = '&hellip;';
+            pathEl.appendChild(element);
+        }
+        for (let i = count; i >= 0; i--) {
+            const target = pathArray[i].target;
+            const element = document.createElement('button');
+            element.setAttribute('class', 'toolbar-path-name-button');
+            element.addEventListener('click', async () => {
+                if (i > 0) {
+                    await this._popPanePathTo(paneId, i);
+                } else {
+                    if (paneId === 'original' || paneId === 'modified') {
+                        this._activePane = paneId;
+                    }
+                    await this.showTargetProperties(target);
+                }
+            });
+            const name = this._pathEntryName(target);
+            if (name.length > 24) {
+                element.setAttribute('title', name);
+                const truncated = name.substring(name.length - 24, name.length);
+                element.innerHTML = '&hellip;';
+                element.appendChild(document.createTextNode(truncated));
+            } else if (name) {
+                element.textContent = name;
+            } else {
+                element.innerHTML = '&nbsp;';
+            }
+            pathEl.appendChild(element);
+        }
+    }
+
+    _updatePanePathUI(paneId) {
+        const pathEl = this._pathHostFor(paneId);
+        if (!pathEl) {
+            return;
+        }
+        const pathArray = this._panePathArray(paneId);
+        const isToolbar = paneId === 'original';
+        const back = isToolbar
+            ? this._element('toolbar-path-back-button')
+            : pathEl.querySelector('.graph-pane-path-back');
+
+        while (pathEl.children.length > (isToolbar ? 1 : 1)) {
+            pathEl.removeChild(pathEl.lastElementChild);
+        }
+
+        if (!pathArray || pathArray.length <= 1) {
+            if (isToolbar) {
+                pathEl.classList.remove('visible');
+                if (back) {
+                    back.style.opacity = '0';
+                    back.style.pointerEvents = 'none';
+                }
+            } else {
+                pathEl.classList.remove('visible');
+            }
+            return;
+        }
+
+        if (isToolbar) {
+            pathEl.classList.add('visible');
+            if (back) {
+                back.style.opacity = '1';
+                back.style.pointerEvents = 'auto';
+            }
+        } else {
+            pathEl.classList.add('visible');
+        }
+
+        this._appendPathNameButtons(pathEl, pathArray, paneId);
+    }
+
+    async _renderEditorPane(paneId) {
+        const pane = this._paneById(paneId);
+        const path = this._panePathArray(paneId);
+        if (!pane || !path || path.length === 0) {
+            return '';
+        }
+        const entry = path[0];
+        let target = entry.target;
+        if (paneId === 'modified') {
+            target = this._resolveModifiedTarget(target);
+        }
+        const status = await pane.render(target, entry.signature || null, entry.state || null);
+        if (status === '' && pane.graph) {
+            if (paneId === this._activePane) {
+                this.target = pane.graph;
+            }
+            pane.graph.register();
+        }
+        this._updatePanePathUI(paneId);
+        return status;
+    }
+
+    async _popPanePathTo(paneId, index) {
+        const path = this._panePathArray(paneId);
+        if (!path || index <= 0 || index >= path.length) {
+            return;
+        }
+        const newPath = path.slice(index);
+        if (paneId.startsWith('merge-')) {
+            this._mergePanePaths.set(paneId, newPath);
+            const pane = this._paneById(paneId);
+            const entry = newPath[0];
+            const model = pane && pane.graph ? pane.graph._renderModel : null;
+            await pane.render(entry.target, entry.signature || null, entry.state || null, model);
+        } else if (paneId === 'original') {
+            this._leftPath = newPath;
+            await this._renderEditorPane('original');
+        } else if (paneId === 'modified') {
+            this._rightPath = newPath;
+            await this._renderEditorPane('modified');
+        }
+        this._updatePanePathUI(paneId);
+        if (paneId === this._activePane) {
+            this._updateToolbarPath();
+        }
+    }
+
+    async _pushMergeTarget(graph, context, paneId, currentPaneGraph) {
+        const pane = this._paneById(paneId);
+        if (!pane || !currentPaneGraph || !currentPaneGraph.target) {
+            return;
+        }
+        let path = this._mergePanePaths.get(paneId);
+        if (!path || path.length === 0) {
+            path = [{ target: currentPaneGraph.target, signature: null, state: null }];
+        }
+        if (context) {
+            path[0].state = {
+                context,
+                zoom: currentPaneGraph.zoom,
+                blocks: currentPaneGraph.blocks,
+                batchInlineExpanded: Array.from(this._batchInlineExpanded)
+            };
+        }
+        const signature = Array.isArray(graph.signatures) && graph.signatures.length > 0
+            ? graph.signatures[0]
+            : null;
+        const entry = { target: graph, signature, state: null };
+        this._mergePanePaths.set(paneId, [entry].concat(path));
+        const model = currentPaneGraph._renderModel || null;
+        await pane.render(graph, signature, null, model);
+        this._updatePanePathUI(paneId);
+    }
+
+    async _popMergeTarget(paneId) {
+        const path = this._mergePanePaths.get(paneId);
+        if (!path || path.length <= 1) {
+            return null;
+        }
+        this._sidebar.close();
+        const newPath = path.slice(1);
+        this._mergePanePaths.set(paneId, newPath);
+        const pane = this._paneById(paneId);
+        const entry = newPath[0];
+        const model = pane && pane.graph ? pane.graph._renderModel : null;
+        await pane.render(entry.target, entry.signature || null, entry.state || null, model);
+        this._updatePanePathUI(paneId);
         return null;
     }
 
@@ -2365,7 +2684,7 @@ view.View = class {
     _graphOptions(pane, target, model) {
         return {
             paneId: pane.id,
-            container: pane.container,
+            container: this._paneScrollContainer(pane) || pane.container,
             readOnly: pane.readOnly,
             deltaTracker: pane.deltaTracker,
             graphIndex: this._resolveGraphIndex(target),
@@ -2442,13 +2761,11 @@ view.View = class {
     // render the graph in the pane
     async _renderGraphInPane(pane, target, signature, state, model) {
         const container = pane.container;
-        const label = container.querySelector('.graph-pane-label');
-        while (container.lastChild) {
-            container.removeChild(container.lastChild);
+        if (pane.id !== 'original') {
+            this._ensurePaneScroll(container);
+            this._ensurePanePath(container, pane.id);
         }
-        if (label) {
-            container.appendChild(label);
-        }
+        this._clearPaneGraphContent(pane);
         let status = '';
         if (target) {
             const document = this._host.document;
@@ -2480,6 +2797,7 @@ view.View = class {
         } else {
             pane._setGraph(null);
         }
+        this._updatePanePathUI(pane.id);
         return status;
     }
 
@@ -2583,7 +2901,7 @@ view.View = class {
                 viewGraph.refreshRangeMarkerStyles();
                 viewGraph.refreshInlineExpandedStyles();
                 pane._setGraph(viewGraph);
-                if (!this._leftPane || pane.id === this._activePane) {
+                if (!isMergePane && (!this._leftPane || pane.id === this._activePane)) {
                     this.target = viewGraph;
                 } else {
                     if (targetGraph) {
@@ -2606,6 +2924,9 @@ view.View = class {
         }
         if (!options.skipShow) {
             this.show(this._page === 'merge-workspace' ? 'merge-workspace' : null);
+        }
+        if (options.paneId) {
+            this._updatePanePathUI(options.paneId);
         }
         const currentPaneGraph = pane ? pane.graph : this._target;
         if (currentPaneGraph) {
@@ -2975,62 +3296,14 @@ view.View = class {
     }
 
     _updateToolbarPath() {
-        const path = this._element('toolbar-path');
-        const back = this._element('toolbar-path-back-button');
-        if (path && back) {
-            while (path.children.length > 1) {
-                path.removeChild(path.lastElementChild);
-            }
-            if (this._path.length <= 1) {
-                back.style.opacity = 0;
-            } else {
-                back.style.opacity = 1;
-                const last = this._path.length - 2;
-                const count = Math.min(2, last);
-                const document = this.host.document;
-                if (count < last) {
-                    const element = document.createElement('button');
-                    element.setAttribute('class', 'toolbar-path-name-button');
-                    element.innerHTML = '&hellip;';
-                    path.appendChild(element);
-                }
-                for (let i = count; i >= 0; i--) {
-                    const target = this._path[i].target;
-                    const element = document.createElement('button');
-                    element.setAttribute('class', 'toolbar-path-name-button');
-                    element.addEventListener('click', async () => {
-                        if (i > 0) {
-                            this._path = this._path.slice(i);
-                            await this._updateTarget(this._model, this._path);
-                        } else {
-                            await this.showTargetProperties(target);
-                        }
-                    });
-                    let name = '';
-                    if (target && target.identifier) {
-                        name = target.identifier;
-                    } else if (target && target.name) {
-                        name = target.name;
-                    }
-                    if (name.length > 24) {
-                        element.setAttribute('title', name);
-                        const truncated = name.substring(name.length - 24, name.length);
-                        element.innerHTML = '&hellip;';
-                        const text = document.createTextNode(truncated);
-                        element.appendChild(text);
-                    } else {
-                        element.removeAttribute('title');
-                        if (name) {
-                            element.textContent = name;
-                        } else {
-                            element.innerHTML = '&nbsp;';
-                        }
-                    }
-                    path.appendChild(element);
-                }
-            }
-            this._select.update(this._model, this._path);
-            const button = this._element('sidebar-target-button');
+        this._updatePanePathUI('original');
+        this._updatePanePathUI('modified');
+        this._updatePanePathUI('merge-upstream');
+        this._updatePanePathUI('merge-downstream');
+        this._updatePanePathUI('merge-preview');
+        this._select.update(this._model, this._path);
+        const button = this._element('sidebar-target-button');
+        if (button) {
             if (this._path.length > 0) {
                 const type = this._path[this._path.length - 1].type || 'graph';
                 const name = type.charAt(0).toUpperCase() + type.slice(1);
@@ -3073,36 +3346,95 @@ view.View = class {
     }
 
     async pushTarget(graph, context, paneId) {
-        if (paneId) {
+        const isMergePane = Boolean(paneId && paneId.startsWith('merge-'));
+
+        if (paneId === 'original' || paneId === 'modified') {
             this._activePane = paneId;
         }
-        if (graph && graph !== this.activeTarget && Array.isArray(graph.nodes)) {
-            const currentPaneGraph = this._paneGraph(paneId) || this._target;
-            if (currentPaneGraph) {
-                currentPaneGraph.select(null);
+
+        const currentPaneGraph = this._paneGraph(paneId) || this._target;
+        const currentTarget = currentPaneGraph && currentPaneGraph.target
+            ? currentPaneGraph.target
+            : this.activeTarget;
+
+        if (!graph || graph === currentTarget || !Array.isArray(graph.nodes)) {
+            return;
+        }
+
+        if (currentPaneGraph) {
+            currentPaneGraph.select(null);
+        }
+        this._sidebar.close();
+
+        if (isMergePane) {
+            await this._pushMergeTarget(graph, context, paneId, currentPaneGraph);
+            return;
+        }
+
+        let path = this._panePathArray(paneId);
+        if ((!path || path.length === 0) && currentPaneGraph && currentPaneGraph.target) {
+            const root = { target: currentPaneGraph.target, signature: null, state: null };
+            if (paneId === 'original') {
+                this._leftPath = [root];
+            } else {
+                this._rightPath = [root];
             }
-            this._sidebar.close();
-            if (context && this._path.length > 0) {
-                this._path[0].state = {
-                    context,
-                    zoom: currentPaneGraph ? currentPaneGraph.zoom : 1,
-                    blocks: currentPaneGraph ? currentPaneGraph.blocks : new Set(),
-                    batchInlineExpanded: Array.from(this._batchInlineExpanded)
-                };
-            }
-            const signature = Array.isArray(graph.signatures) && graph.signatures.length > 0 ? graph.signatures[0] : null;
-            const entry = { target: graph, signature };
-            const stack = [entry].concat(this._path);
-            await this._updateTarget(this._model, stack);
+            path = this._panePathArray(paneId);
+        }
+
+        if (context && path.length > 0) {
+            path[0].state = {
+                context,
+                zoom: currentPaneGraph ? currentPaneGraph.zoom : 1,
+                blocks: currentPaneGraph ? currentPaneGraph.blocks : new Set(),
+                batchInlineExpanded: Array.from(this._batchInlineExpanded)
+            };
+        }
+        const signature = Array.isArray(graph.signatures) && graph.signatures.length > 0 ? graph.signatures[0] : null;
+        const entry = { target: graph, signature, state: null };
+        const stack = [entry].concat(path);
+
+        if (paneId === 'original') {
+            this._leftPath = stack;
+        } else {
+            this._rightPath = stack;
+        }
+
+        await this._renderEditorPane(paneId);
+        if (paneId === this._activePane) {
+            this._updateToolbarPath();
         }
     }
 
-    async popTarget() {
-        if (this._path.length > 1) {
-            this._sidebar.close();
-            return await this._updateTarget(this._model, this._path.slice(1));
+    async popTarget(paneId) {
+        const id = paneId || this._activePane;
+        if (id && id.startsWith('merge-')) {
+            return await this._popMergeTarget(id);
         }
-        return null;
+        if (id !== 'original' && id !== 'modified') {
+            return null;
+        }
+
+        const path = this._panePathArray(id);
+        if (!path || path.length <= 1) {
+            return null;
+        }
+
+        this._sidebar.close();
+        const newPath = path.slice(1);
+        if (id === 'original') {
+            this._leftPath = newPath;
+        } else {
+            this._rightPath = newPath;
+        }
+
+        await this._renderEditorPane(id);
+        if (id === this._activePane) {
+            this._updateToolbarPath();
+        } else {
+            this._updatePanePathUI(id);
+        }
+        return this._model;
     }
 
     async render(target, signature) {
@@ -3140,6 +3472,8 @@ view.View = class {
                 this._leftPane.graph.register();
             }
         }
+        this._updatePanePathUI('original');
+        this._updatePanePathUI('modified');
         return status;
     }
 

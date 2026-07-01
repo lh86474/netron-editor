@@ -30,8 +30,14 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .diff-container.hide-modified #target-modified { display: none; }
 .diff-container.hide-modified #pane-divider { display: none; }
 .diff-container.hide-modified #target-original { flex: 1 1 100% !important; }
-.graph-pane { display: flex; flex: 1; min-width: 100px; height: 100%; overflow: auto; outline: none; touch-action: pan-x pan-y; position: relative; }
+.graph-pane { display: flex; flex: 1; min-width: 100px; height: 100%; overflow: hidden; outline: none; touch-action: pan-x pan-y; position: relative; }
 .graph-pane-label { position: absolute; top: 0px; height: var(--chrome-height); display: flex; align-items: center; left: var(--chrome-inset); z-index: 1; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
+.graph-pane-scroll { flex: 1; min-width: 0; min-height: 0; width: 100%; height: 100%; display: flex;overflow: auto; outline: none; touch-action: pan-x pan-y; }
+.graph-pane-path { position: absolute; bottom: 10px; left: 10px; z-index: 3; display: none; align-items: center; pointer-events: auto; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
+.graph-pane-path.visible { display: flex; }
+.graph-pane-path-back { margin: 0; }
+#toolbar-path { display: none; align-items: center; }
+#toolbar-path.visible { display: flex; }
 .graph-busy-overlay { position: absolute; inset: 0; z-index: 10; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background-color: rgba(236, 236, 236, 0.55); pointer-events: all; cursor: wait; opacity: 0; transition: opacity 0.12s ease; }
 .graph-busy-overlay.visible { display: flex; opacity: 1; }
 .graph-busy-spinner { width: 48px; height: 48px; -webkit-animation: orbit 0.5s infinite linear; animation: orbit 0.5s infinite linear; }
@@ -73,8 +79,8 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .merge-graph-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .merge-source-row { display: none; flex: 1; min-height: 0; flex-direction: row; overflow: hidden; }
 .merge-graph-area.show-source-graphs .merge-source-row { display: flex; }
-.merge-source-pane { flex: 1; min-width: 100px; min-height: 0; overflow: auto; position: relative; }
-.merge-preview-pane { display: flex; flex: 1; min-height: 100px; overflow: auto; position: relative; }
+.merge-source-pane { flex: 1; min-width: 100px; min-height: 0; overflow: hidden; position: relative; }
+.merge-preview-pane { display: flex; flex: 1; min-height: 100px; overflow: hidden; position: relative; }
 .merge-graph-area.show-source-graphs .merge-preview-pane { flex: 1.2; }
 .merge-graph-area.show-source-graphs .pane-divider-vertical { display: block; }
 .merge-source-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; user-select: none; }
