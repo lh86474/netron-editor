@@ -253,6 +253,26 @@ describe('ambapb shell editing', () => {
             newValue: 'tensor_in_edited'
         });
         assert.equal(compiledGraph.nodes[0].inputs[0].value[0].name, 'tensor_in_edited');
+
+        // Add an attribute to the nested connection
+        session.applyPatch({
+            parentId: 'graph:0/node:0/compiled_prim_graph/value:0',
+            entityType: 'attribute',
+            changeType: 'add',
+            property: 'attributes.test_attr',
+            newValue: '42'
+        });
+        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes[0].name, 'test_attr');
+        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes[0].value, '42');
+
+        // Delete an attribute of the nested connection
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/value:0/attr:0',
+            entityType: 'attribute',
+            changeType: 'delete',
+            property: 'attributes.test_attr'
+        });
+        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes.length, 0);
     });
 
     it('attachCheckpoint keeps shell graph and enables editing', () => {

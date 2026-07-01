@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint } from './ambapb.js';
 import {
@@ -2123,6 +2123,16 @@ view.View = class {
         const session = this._editSession;
         if (!session || !target) {
             return target;
+        }
+        if (locateGraphPath(session.modified.model, target)) {
+            return target;
+        }
+        const pathInfo = locateGraphPath(session.original, target);
+        if (pathInfo) {
+            const resolved = getGraphByPath(session.modified.model, pathInfo);
+            if (resolved) {
+                return resolved;
+            }
         }
         const modules = session.original.modules || [];
         for (let i = 0; i < modules.length; i++) {
