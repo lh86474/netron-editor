@@ -486,6 +486,65 @@ export const findValueConsumers = (graph, value) => {
     return consumers;
 };
 
+const hasConsumerInGraph = (graph, value) => {
+    for (const consumer of findValueConsumers(graph, value)) {
+        if (consumer.graphOutput) {
+            return true;
+        }
+        if (consumer.node && (graph.nodes || []).includes(consumer.node)) {
+            return true;
+        }
+    }
+    return false;
+};
+
+const graphOutputTensorNames = (graph) => {
+    const names = new Set();
+    for (const output of graph.outputs || []) {
+        for (const value of argumentValues(output)) {
+            if (value && value.name) {
+                names.add(value.name);
+            }
+        }
+    }
+    return names;
+};
+
+/**
+ * Promote node output tensors with no in-graph consumer into graph.outputs
+ * so the view renders output terminals (CVFlowNVP :3, BatchCall runtime2:0, etc.).
+ */
+export const promoteVisibleGraphOutputs = (graph) => {
+    if (!graph) {
+        return graph;
+    }
+    const seen = graphOutputTensorNames(graph);
+    const promoted = [];
+
+    for (const node of graph.nodes || []) {
+        for (const output of node.outputs || []) {
+            for (const value of argumentValues(output)) {
+                if (!value || !value.name || seen.has(value.name)) {
+                    continue;
+                }
+                if (hasConsumerInGraph(graph, value)) {
+                    continue;
+                }
+                seen.add(value.name);
+                promoted.push({
+                    name: value.name,
+                    value: [value]
+                });
+            }
+        }
+    }
+
+    if (promoted.length > 0) {
+        graph.outputs = (graph.outputs || []).concat(promoted);
+    }
+    return graph;
+};
+
 export const collectNodesBetween = (graph, beginNode, endNode) => {
     if (!beginNode || !endNode) {
         throw new SubgraphExtractError('Begin and end nodes are required.');
@@ -825,17 +884,18 @@ export const extractSubgraph = (graph, beginNodes, endNodes) => {
         }
     }
 
-    if (boundaryOutputs.size === 0) {
-        for (const endNode of ends) {
-            for (const output of endNode.outputs || []) {
-                for (const value of output.value || []) {
-                    if (value && value.name && !boundaryOutputs.has(value.name)) {
-                        boundaryOutputs.set(value.name, {
-                            name: output.name,
-                            value: [cloneExtractValue(value, valueMap)]
-                        });
-                    }
+    // Always promote marked end-node outputs (e.g. BatchCall -> runtime2:0),
+    // not only when boundaryOutputs is empty.
+    for (const endNode of ends) {
+        for (const output of endNode.outputs || []) {
+            for (const value of argumentValues(output)) {
+                if (!value || !value.name || boundaryOutputs.has(value.name)) {
+                    continue;
                 }
+                boundaryOutputs.set(value.name, {
+                    name: value.name,
+                    value: [cloneExtractValue(value, valueMap)]
+                });
             }
         }
     }
@@ -866,13 +926,15 @@ export const extractSubgraph = (graph, beginNodes, endNodes) => {
         orderedOutputs.push(entry);
     }
 
-    return {
+    const extracted = {
         name: graph.name,
         identifier: graph.identifier,
         inputs: orderedInputs,
         outputs: orderedOutputs,
         nodes: keptNodes
     };
+
+    return promoteVisibleGraphOutputs(extracted);
 };
 
 export const buildNodeFromMetadata = (opSchema, uniqueName, graph) => {

@@ -6,9 +6,33 @@
  * Author: Luray He
  */
 import { applyBatchInlineExpansions } from './ambapb-batch-inline.js';
-import { SubgraphExtractError } from './model-editor.js';
+import { SubgraphExtractError, promoteVisibleGraphOutputs } from './model-editor.js';
 
 const INLINE_NAME_PREFIX = /^inline::[^:]+::(.*)$/;
+
+const graphArguments = (node) => {
+    if (!node) {
+        return [];
+    }
+    return (node.attributes || []).concat(node.blocks || []);
+};
+
+const promoteNestedGraphOutputs = (graph) => {
+    if (!graph) {
+        return graph;
+    }
+    promoteVisibleGraphOutputs(graph);
+    for (const node of graph.nodes || []) {
+        for (const entry of graphArguments(node)) {
+            if (entry && entry.type === 'graph' && entry.value) {
+                promoteNestedGraphOutputs(entry.value);
+            }
+        }
+    }
+    return graph;
+};
+
+export { promoteNestedGraphOutputs };
 
 const argumentValues = (argument) => {
     if (!argument || argument.value === null || argument.value === undefined) {

@@ -38,7 +38,8 @@ import {
     resolveMarkedNodesByName,
     stripInlineExpansionPrefixes,
     resolveExtractGraphContext,
-    applyExtractedGraph
+    applyExtractedGraph,
+    promoteNestedGraphOutputs
 } from './ambapb-subgraph.js';
 
 const view = {};
@@ -1720,6 +1721,7 @@ view.View = class {
 
             extracted = stripInlineExpansionPrefixes(extracted);
             ensureFragSubgraphGraphAttributes(extracted);
+            extracted = promoteNestedGraphOutputs(extracted);
             this._checkpointEditHistory();
             const ambapbPrimGraph = this._model && this._model._ambapb ? this._model._ambapb.primGraph : null;
             if (extractContext.replaceTarget) {
@@ -4147,6 +4149,40 @@ view.Graph = class extends grapher.Graph {
                             this.createValue(value).to.push(viewOutput);
                         }
                     }
+                }
+            }
+        }
+        this._promoteOrphanOutputTerminals(graph);
+    }
+
+    _promoteOrphanOutputTerminals(graph) {
+        const covered = new Set();
+        for (const output of graph.outputs || []) {
+            for (const value of output.value || []) {
+                if (value && value.name) {
+                    covered.add(value.name);
+                }
+            }
+        }
+
+        for (const node of graph.nodes || []) {
+            for (const output of node.outputs || []) {
+                for (const value of output.value || []) {
+                    if (!value || !value.name || covered.has(value.name)) {
+                        continue;
+                    }
+                    const viewValue = this._values.get(value.name);
+                    if (!viewValue || !viewValue.from || viewValue.to.length > 0) {
+                        continue;
+                    }
+                    const argument = {
+                        name: value.name,
+                        value: [{ name: value.name, type: value.type }]
+                    };
+                    const viewOutput = this.createOutput(argument);
+                    this.setNode(viewOutput);
+                    viewValue.to.push(viewOutput);
+                    covered.add(value.name);
                 }
             }
         }
