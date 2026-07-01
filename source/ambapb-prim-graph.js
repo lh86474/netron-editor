@@ -42,6 +42,9 @@ const decodeText = (input) => {
     if (input instanceof Uint8Array) {
         return textDecoder.decode(input);
     }
+    if (input && typeof input === 'object' && input.values !== undefined) {
+        return decodeText(input.values);
+    }
     if (input && typeof input === 'object' && input.raw_data instanceof Uint8Array) {
         return textDecoder.decode(input.raw_data);
     }

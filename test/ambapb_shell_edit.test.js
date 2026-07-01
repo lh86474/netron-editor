@@ -222,6 +222,20 @@ describe('ambapb shell editing', () => {
             }]
         });
 
+        const nestedNvpJson = JSON.stringify({
+            primitives: [{
+                id: 'prim_0',
+                type: 'input',
+                attributes: { test: 'val' }
+            }]
+        });
+
+        compiledGraph.nodes.push({
+            name: 'mobilenetv2_prim_nvp0',
+            type: { name: 'CVFlowNVP' },
+            attributes: [{ name: 'prim_graph', type: 'string', value: nestedNvpJson }]
+        });
+
         const session = ModelEditor.createSession(model);
 
         // Edit name of the compiled node
@@ -273,6 +287,23 @@ describe('ambapb shell editing', () => {
             property: 'attributes.test_attr'
         });
         assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes.length, 0);
+
+        // Edit prim_graph of nested NVP node
+        const updatedNvpJson = JSON.stringify({
+            primitives: [{
+                id: 'prim_0_edited',
+                type: 'input',
+                attributes: { test: 'val2' }
+            }]
+        });
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:1/attr:0',
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: 'attributes.prim_graph',
+            newValue: updatedNvpJson
+        });
+        assert.equal(compiledGraph.nodes[1].attributes[0].value, updatedNvpJson);
     });
 
     it('attachCheckpoint keeps shell graph and enables editing', () => {
