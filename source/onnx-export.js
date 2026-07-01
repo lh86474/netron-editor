@@ -6,7 +6,7 @@ import './onnx-encode.js';
 import { onnx } from './onnx-proto.js';
 import { BinaryReader } from './protobuf.js';
 import { enumerateGraphValues } from './model-editor.js';
-import { buildPrimGraphAttributeProto, PRIM_GRAPH_ATTRIBUTE_NAME } from './ambapb-prim-graph.js';
+import { buildPrimGraphAttributeProto, PRIM_GRAPH_ATTRIBUTE_NAME, parsePrimGraphJson } from './ambapb-prim-graph.js';
 // class to create the ONNXExportError
 // Holds the error message and has property ONNX Export Error
 // from parent class Error
@@ -639,10 +639,9 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
             immsTensors.push(...immsAttr.tensors);
         }
         const primGraphAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === 'prim_graph');
-        if (primGraphAttr && primGraphAttr.t && primGraphAttr.t.raw_data) {
+        if (primGraphAttr && primGraphAttr.t) {
             try {
-                const text = new TextDecoder().decode(primGraphAttr.t.raw_data);
-                primGraph = JSON.parse(text);
+                primGraph = parsePrimGraphJson(primGraphAttr.t);
             } catch {
                 // ignore
             }
