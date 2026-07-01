@@ -565,7 +565,7 @@ const collectArgumentValueNames = (argument) => {
     return names;
 };
 
-const buildNodeProtoFromModified = (modifiedNode, originalNodesByName = null, nestedSourceGraph = null, sourceProto) => {
+const buildNodeProtoFromModified = (modifiedNode, originalNodesByName = null, nestedSourceGraph = null) => {
     const node = new onnx.NodeProto();
     node.name = modifiedNode.name || '';
     node.op_type = modifiedNode.type ? (modifiedNode.type.identifier || modifiedNode.type.name) : '';
@@ -652,7 +652,7 @@ const syncNodeAttributesFromModified = (protoNode, modifiedNode, originalNodesBy
     return attributes;
 };
 
-const syncNodeFromModified = (protoNode, modifiedNode, originalNodesByName = null, nestedSourceGraph = null, sourceProto) => {
+const syncNodeFromModified = (protoNode, modifiedNode, originalNodesByName = null, nestedSourceGraph = null) => {
     syncNodeInputsOutputs(protoNode, modifiedNode);
     protoNode.name = modifiedNode.name || '';
     protoNode.op_type = modifiedNode.type ? (modifiedNode.type.identifier || modifiedNode.type.name) : protoNode.op_type;
@@ -796,10 +796,10 @@ const buildGraphProtoFromModifiedGraph = (modifiedGraph, sourceGraphProto, origi
             null;
         if (existing) {
             const clonedNode = cloneNodeProto(existing);
-            syncNodeFromModified(clonedNode, modifiedNode, originalNodesByName, sourceGraphProto, sourceProto);
+            syncNodeFromModified(clonedNode, modifiedNode, originalNodesByName, sourceGraphProto);
             nodes.push(clonedNode);
         } else {
-            nodes.push(buildNodeProtoFromModified(modifiedNode, originalNodesByName, sourceGraphProto, sourceProto));
+            nodes.push(buildNodeProtoFromModified(modifiedNode, originalNodesByName, sourceGraphProto));
         }
     }
     const sourceGraph = sourceGraphProto || {};
