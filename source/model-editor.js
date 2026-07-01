@@ -750,14 +750,14 @@ export const validateMarkedRangeNodes = (graph, beginNodes, endNodes) => {
     if (begins.length === 0 || ends.length === 0) {
         throw new SubgraphExtractError('At least one begin and one end node are required.');
     }
-    const levels = computeNodeLevels(graph);
-    assertSameLevel(begins, levels, 'Begin');
-    assertSameLevel(ends, levels, 'End');
-    const beginLevel = levels.get(begins[0]);
-    const endLevel = levels.get(ends[0]);
-    if (beginLevel > endLevel) {
-        throw new SubgraphExtractError('Begin nodes must not be deeper than end nodes.');
-    }
+    // const levels = computeNodeLevels(graph);
+    // assertSameLevel(begins, levels, 'Begin');
+    // assertSameLevel(ends, levels, 'End');
+    // const beginLevel = levels.get(begins[0]);
+    // const endLevel = levels.get(ends[0]);
+    // if (beginLevel > endLevel) {
+    //     throw new SubgraphExtractError('Begin nodes must not be deeper than end nodes.');
+    // }
     for (const end of ends) {
         if (!begins.some((begin) => isNodeReachable(graph, begin, end))) {
             throw new SubgraphExtractError(`End node '${nodeDisplayName(end)}' is not reachable from any marked begin node.`);

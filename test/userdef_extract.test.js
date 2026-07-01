@@ -2,6 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mockChainModel } from './fixtures/mock-graph.js';
 import { extractSubgraph, findValueConsumers, genUniqueNodeName } from '../source/model-editor.js';
+import { buildExtractWorkingGraph, stripInlineExpansionPrefixes } from '../source/ambapb-subgraph.js';
+import { inlineExpansionBatchCallName } from '../source/ambapb-batch-inline.js';
 
 // The identical implementation of findBoundaryNodes from view.js
 const findBoundaryNodes = (graph, selectedNodes) => {
@@ -239,5 +241,272 @@ describe('UserDefCall and boundary selection', () => {
         assert.equal(nextNodes[1].name, 'userDefCall');
         assert.equal(nextNodes[1].type.name, 'UserDefCall');
         assert.equal(nextNodes[2].name, 'Softmax1');
+    });
+
+    it('correctly extracts and combines BatchCall node and compatible normal node into UserDefCall', () => {
+        const tensor = (name) => ({ name, type: 'float32' });
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'producer',
+                    type: { name: 'CVFlowNVP' },
+                    attributes: [],
+                    inputs: [],
+                    outputs: [{ name: 'output', value: [tensor('producer_out')] }]
+                },
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{
+                        name: 'compiled_prim_graph',
+                        type: 'graph',
+                        value: {
+                            name: 'subgraph_body',
+                            inputs: [
+                                { name: 'sub_input_0', value: [tensor('sub_input_0')] }
+                            ],
+                            outputs: [
+                                { name: 'sub_output_0', value: [tensor('sub_output_0')] }
+                            ],
+                            nodes: [
+                                {
+                                    name: 'inner_nvp',
+                                    type: { name: 'CVFlowNVP' },
+                                    attributes: [],
+                                    inputs: [
+                                        { name: 'input0', value: [tensor('sub_input_0')] }
+                                    ],
+                                    outputs: [{ name: 'output', value: [tensor('sub_output_0')] }]
+                                }
+                            ]
+                        }
+                    }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'batch_call',
+                    type: { name: 'BatchCall' },
+                    attributes: [
+                        { name: 'graph_id', type: 'string', value: 'subgraph_body' },
+                        {
+                            name: 'src_mappings',
+                            type: 'string',
+                            value: JSON.stringify([
+                                { id: 'sub_input_0' }
+                            ])
+                        },
+                        {
+                            name: 'out_mappings',
+                            type: 'string',
+                            value: JSON.stringify([
+                                { id: 'sub_output_0' }
+                            ])
+                        }
+                    ],
+                    inputs: [
+                        { name: 'input0', value: [tensor('producer_out')] }
+                    ],
+                    outputs: [{ name: 'output', value: [tensor('batch_out')] }]
+                },
+                {
+                    name: 'consumer',
+                    type: { name: 'CVFlowNVP' },
+                    attributes: [],
+                    inputs: [{ name: 'input', value: [tensor('batch_out')] }],
+                    outputs: [{ name: 'output', value: [tensor('consumer_out')] }]
+                }
+            ]
+        };
+
+        const selectedNodeNames = new Set(['producer', 'batch_call']);
+
+        const callsToInline = new Set();
+        // DO NOT add selected BatchCall nodes to callsToInline, matching view.js
+
+        const workingGraph = buildExtractWorkingGraph(graph, callsToInline);
+
+        const selectedNodes = (workingGraph.nodes || []).filter(node => {
+            if (!node || !node.name) {
+                return false;
+            }
+            if (selectedNodeNames.has(node.name)) {
+                return true;
+            }
+            const batchCallName = inlineExpansionBatchCallName(node);
+            if (batchCallName && callsToInline.has(batchCallName)) {
+                return true;
+            }
+            return false;
+        });
+
+        assert.equal(selectedNodes.length, 2);
+        assert.ok(selectedNodes.some(n => n.name === 'producer'));
+        assert.ok(selectedNodes.some(n => n.name === 'batch_call'));
+
+        const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
+        let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
+        extracted = stripInlineExpansionPrefixes(extracted);
+
+        assert.equal(extracted.nodes.length, 2);
+        assert.ok(extracted.nodes.some(n => n.name === 'producer'));
+        assert.ok(extracted.nodes.some(n => n.name === 'batch_call'));
+
+        assert.equal(extracted.outputs.length, 1);
+        assert.equal(extracted.outputs[0].value[0].name, 'batch_out');
+
+        const subGraphId = 'userdefsubgraph_0';
+        extracted.name = subGraphId;
+        const callNodeName = 'userDefCall_0';
+
+        const userDefSubgraphNode = {
+            name: subGraphId,
+            type: { name: 'UserDefSubgraph' },
+            attributes: [{ name: 'graph', type: 'graph', value: extracted }],
+            inputs: [],
+            outputs: []
+        };
+
+        const src_mappings = [];
+        const userDefCallInputs = [];
+        for (let i = 0; i < extracted.inputs.length; i++) {
+            const input = extracted.inputs[i];
+            const valName = input.value && input.value[0] ? input.value[0].name : '';
+            src_mappings.push({ id: valName, index: i });
+            userDefCallInputs.push({
+                name: input.name,
+                value: input.value.map(val => Object.assign({}, val))
+            });
+        }
+
+        const out_mappings = [];
+        const userDefCallOutputs = [];
+        for (let i = 0; i < extracted.outputs.length; i++) {
+            const output = extracted.outputs[i];
+            const valName = output.value && output.value[0] ? output.value[0].name : '';
+            out_mappings.push({ id: valName, index: i });
+            userDefCallOutputs.push({
+                name: output.name,
+                value: output.value.map(val => Object.assign({}, val))
+            });
+        }
+
+        const userDefCallNode = {
+            name: callNodeName,
+            type: { name: 'UserDefCall' },
+            attributes: [
+                { name: 'graph_id', type: 'string', value: subGraphId },
+                { name: 'src_mappings', type: 'string', value: JSON.stringify(src_mappings) },
+                { name: 'out_mappings', type: 'string', value: JSON.stringify(out_mappings) }
+            ],
+            inputs: userDefCallInputs,
+            outputs: userDefCallOutputs
+        };
+
+        let rootNodeIndex = -1;
+        for (const node of selectedNodes) {
+            const idx = workingGraph.nodes.indexOf(node);
+            if (idx > rootNodeIndex) {
+                rootNodeIndex = idx;
+            }
+        }
+
+        const keepSet = new Set(selectedNodes);
+        const nextNodes = [];
+        for (let i = 0; i < workingGraph.nodes.length; i++) {
+            const node = workingGraph.nodes[i];
+            if (keepSet.has(node)) {
+                if (i === rootNodeIndex) {
+                    nextNodes.push(userDefCallNode);
+                }
+            } else {
+                nextNodes.push(node);
+            }
+        }
+
+        let insertIdx = 0;
+        for (let i = 0; i < nextNodes.length; i++) {
+            const node = nextNodes[i];
+            if (node && node.type && (node.type.name === 'FragSubgraph' || node.type.name === 'UserDefSubgraph')) {
+                insertIdx = i + 1;
+            }
+        }
+        nextNodes.splice(insertIdx, 0, userDefSubgraphNode);
+
+        const stripCallPrefixes = (name, calls) => {
+            if (!name || typeof name !== 'string' || calls.size === 0) {
+                return name;
+            }
+            let current = name;
+            let changed = true;
+            while (changed) {
+                changed = false;
+                for (const callName of calls) {
+                    const prefix = `inline::${callName}::`;
+                    if (current.startsWith(prefix)) {
+                        current = current.slice(prefix.length);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            return current;
+        };
+
+        const remapValue = (value) => {
+            if (!value || !value.name) {
+                return value;
+            }
+            const nextName = stripCallPrefixes(value.name, callsToInline);
+            if (nextName === value.name) {
+                return value;
+            }
+            return Object.assign({}, value, { name: nextName });
+        };
+
+        const remapArgument = (argument) => {
+            if (!argument) {
+                return argument;
+            }
+            const values = argument.value;
+            const mappedValues = Array.isArray(values) ? values.map((val) => remapValue(val)) : remapValue(values);
+            return Object.assign({}, argument, { value: mappedValues });
+        };
+
+        const stripNodePrefixes = (node) => {
+            if (!node) {
+                return node;
+            }
+            return Object.assign({}, node, {
+                name: stripCallPrefixes(node.name, callsToInline),
+                inputs: (node.inputs || []).map((input) => remapArgument(input)),
+                outputs: (node.outputs || []).map((output) => remapArgument(output))
+            });
+        };
+
+        const finalNodes = nextNodes.map(node => stripNodePrefixes(node));
+
+        assert.equal(finalNodes.length, 4);
+        assert.equal(finalNodes[0].name, 'frag');
+        assert.equal(finalNodes[0].type.name, 'FragSubgraph');
+        assert.equal(finalNodes[1].name, 'userdefsubgraph_0');
+        assert.equal(finalNodes[1].type.name, 'UserDefSubgraph');
+        assert.equal(finalNodes[2].name, 'userDefCall_0');
+        assert.equal(finalNodes[2].type.name, 'UserDefCall');
+        assert.equal(finalNodes[3].name, 'consumer');
+        assert.equal(finalNodes[3].type.name, 'CVFlowNVP');
+    });
+
+    it('allows selecting end nodes on different levels', () => {
+        const graph = mockChainModel.modules[0];
+        const beginNodes = [graph.nodes[0]]; // Conv1 (level 0)
+        const endNodes = [graph.nodes[1], graph.nodes[2]]; // Relu1 (level 1) and Softmax1 (level 2)
+        
+        assert.doesNotThrow(() => {
+            extractSubgraph(graph, beginNodes, endNodes);
+        });
     });
 });

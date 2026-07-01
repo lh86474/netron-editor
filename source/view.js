@@ -1512,8 +1512,12 @@ view.View = class {
         const items = [];
         const node = nodeView.value;
 
+        const graphIndex = 0;
+        const sourceGraph = this._editSession ? this._editSession.modified.getGraph(graphIndex) : null;
         const isUserDefSelected = this._userDefSelectedNodes && this._userDefSelectedNodes.has(node.name);
-        if (node && node.type?.name !== 'BatchCall' && node.type?.name !== 'UserDefCall') {
+        const isUserDefSelectable = isUserDefSelected || (sourceGraph && this._isNodeCompatibleForUserDef(sourceGraph, node));
+
+        if (node && node.type?.name !== 'UserDefCall' && node.type?.name !== 'UserDefSubgraph' && node.type?.name !== 'FragSubgraph' && isUserDefSelectable) {
             items.push({
                 label: isUserDefSelected ? 'Deselect Node for UserDefCall' : 'Select Node for UserDefCall',
                 action: () => {
@@ -1530,7 +1534,7 @@ view.View = class {
             });
             items.push({ separator: true });
         }
-        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0 &&node.type?.name !== 'BatchCall') {
+        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0 && node.type?.name !== 'UserDefCall') {
             items.push({
                 label: 'Create UserDefCall',
                 action: () => this._createUserDefCall()
@@ -1883,6 +1887,72 @@ view.View = class {
         }
     }
 
+    _isNodeCompatibleForUserDef(sourceGraph, node) {
+        if (!node) {
+            return false;
+        }
+        if (node.type?.name === 'UserDefCall' || node.type?.name === 'UserDefSubgraph' || node.type?.name === 'FragSubgraph') {
+            return false;
+        }
+        let selectedType = null;
+        for (const selectedNodeName of this._userDefSelectedNodes) {
+            const selNode = (sourceGraph.nodes || []).find(n => n.name === selectedNodeName);
+            if (!selNode) {
+                continue;
+            }
+            if (selNode.type?.name === 'BatchCall') {
+                const target = resolveBatchCallTarget(sourceGraph, selNode);
+                if (target && target.subGraph && target.subGraph.nodes && target.subGraph.nodes.length > 0) {
+                    const firstNode = target.subGraph.nodes[0];
+                    const t = firstNode.type?.name;
+                    if (t) {
+                        if (selectedType && selectedType !== t) {
+                            return false;
+                        }
+                        selectedType = t;
+                    }
+                }
+            } else {
+                const t = selNode.type?.name;
+                if (t) {
+                    if (selectedType && selectedType !== t) {
+                        return false;
+                    }
+                    selectedType = t;
+                }
+            }
+        }
+
+        if (node.type?.name === 'BatchCall') {
+            const target = resolveBatchCallTarget(sourceGraph, node);
+            if (!target || !target.subGraph || !target.subGraph.nodes || target.subGraph.nodes.length === 0) {
+                return false;
+            }
+            let candidateType = null;
+            for (const subNode of target.subGraph.nodes) {
+                const t = subNode.type?.name;
+                if (!t) return false;
+                if (candidateType && candidateType !== t) {
+                    return false;
+                }
+                candidateType = t;
+            }
+            if (selectedType && selectedType !== candidateType) {
+                return false;
+            }
+            return true;
+        } else {
+            const t = node.type?.name;
+            if (!t) {
+                return false;
+            }
+            if (selectedType && selectedType !== t) {
+                return false;
+            }
+            return true;
+        }
+    }
+
     _refreshUserDefSelectionStyles() {
         const graph = this._activePaneGraph();
         if (graph && graph.refreshUserDefSelectionStyles) {
@@ -1899,7 +1969,6 @@ view.View = class {
         const sourceGraph = this._editSession.modified.getGraph(graphIndex);
 
         const callsToInline = new Set();
-        // We scan selection to detect any inline prefixes
         const inlineRegex = /inline::([^:]+)::/g;
         for (const nodeName of this._userDefSelectedNodes) {
             let match;
@@ -1908,9 +1977,21 @@ view.View = class {
                 callsToInline.add(match[1]);
             }
         }
-        // make sure to build a workinggraph by inlining only the calls that contain the selected nodes
+
         const workingGraph = buildExtractWorkingGraph(sourceGraph, callsToInline);
-        const selectedNodes = (workingGraph.nodes || []).filter(node => node && node.name && this._userDefSelectedNodes.has(node.name));
+        const selectedNodes = (workingGraph.nodes || []).filter(node => {
+            if (!node || !node.name) {
+                return false;
+            }
+            if (this._userDefSelectedNodes.has(node.name)) {
+                return true;
+            }
+            const batchCallName = inlineExpansionBatchCallName(node);
+            if (batchCallName && callsToInline.has(batchCallName)) {
+                return true;
+            }
+            return false;
+        });
 
         if (selectedNodes.length === 0) {
             return;
@@ -1919,9 +2000,13 @@ view.View = class {
         try {
             const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
+            const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
+            let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
             extracted = stripInlineExpansionPrefixes(extracted);
             const subGraphId = genUniqueNodeName('userdefsubgraph', workingGraph);
+            const subGraphId = genUniqueNodeName('userdefsubgraph', workingGraph);
             extracted.name = subGraphId;
+            const callNodeName = genUniqueNodeName('userDefCall', workingGraph);
             const callNodeName = genUniqueNodeName('userDefCall', workingGraph);
 
             const userDefSubgraphNode = {
