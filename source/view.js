@@ -40,6 +40,8 @@ import {
     resolveMarkedNodesByName,
     stripInlineExpansionPrefixes
 } from './ambapb-subgraph.js';
+import { canonicalizeTensorTypeString, formatConnectionType, tensorTypeShapeDimensions } from './tensor-type.js';
+
 
 const view = {};
 const markdown = {};
@@ -1473,7 +1475,10 @@ view.View = class {
         if (change.entityType === 'attribute') {
             return false;
         }
-        if (change.entityType === 'value' && this.options.names) {
+        if (change.entityType === 'value' && change.property === 'type') {
+            return true;
+        }
+        if (change.entityType === 'value' && change.property === 'name' && this.options.names) {
             return true;
         }
         return false;
@@ -6433,13 +6438,11 @@ view.Value = class {
             for (let i = 0; i < this.to.length; i++) {
                 const to = this.to[i];
                 let content = '';
-                const type = this.value.type;
-                if (type &&
-                    type.shape &&
-                    type.shape.dimensions &&
-                    type.shape.dimensions.length > 0 &&
-                    type.shape.dimensions.every((dim) => !dim || Number.isInteger(dim) || typeof dim === 'bigint' || (typeof dim === 'string'))) {
-                    content = type.shape.dimensions.map((dim) => (dim !== null && dim !== undefined && dim !== -1 && dim !== -1n) ? dim : '?').join('\u00D7');
+                const dimensions = tensorTypeShapeDimensions(this.value.type);
+                if (Array.isArray(dimensions) &&
+                    dimensions.length > 0 &&
+                    dimensions.every((dim) => !dim || Number.isInteger(dim) || typeof dim === 'bigint' || typeof dim === 'string')) {
+                    content = dimensions.map((dim) => (dim !== null && dim !== undefined && dim !== -1 && dim !== -1n) ? dim : '?').join('\u00D7');
                     content = content.length > 16 ? '' : content;
                 }
                 if (this.context.options.names) {
@@ -7806,20 +7809,39 @@ view.EditableTextView = class extends view.Control {
         input.setAttribute('type', 'text');
         input.setAttribute('class', 'sidebar-editable-input');
         input.value = view.EditableAttributeView.formatValue(value);
-        const commit = () => {
-            const parsed = this._parse ? this._parse(input.value) : input.value;
+        const tryCommit = (showError) => {
+            let parsed = input.value;
+            try {
+                parsed = this._parse ? this._parse(input.value) : input.value;
+            } catch (error) {
+                if (showError) {
+                    input.value = view.EditableAttributeView.formatValue(this._committedValue);
+                    this.error(error, true);
+                }
+                return;
+            }
             if (!view.EditableAttributeView.valuesEqual(parsed, this._committedValue) && this._onCommit) {
                 this._committedValue = parsed;
+                input.value = view.EditableAttributeView.formatValue(parsed);
                 this._onCommit(parsed);
             }
         };
-        input.addEventListener('blur', commit);
+        input.addEventListener('blur', () => tryCommit(true));
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 input.blur();
             }
         });
+        if (options.liveCommit) {
+            let timer = null;
+            input.addEventListener('input', () => {
+                if (timer) {
+                    clearTimeout(timer);
+                }
+                timer = setTimeout(() => tryCommit(false), 400);
+            });
+        }
         line.appendChild(input);
         this.element.appendChild(line);
     }
@@ -8499,7 +8521,7 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
                     newValue: newName
                 });
             }, { style: 'nowrap' });
-            this.addEditableProperty('type', value.type !== undefined ? String(value.type) : '', (newType) => {
+            this.addEditableProperty('type', formatConnectionType(value.type), (newType) => {
                 this._view.applyEditorPatch({
                     entityId: valueId,
                     entityType: 'value',
@@ -8507,7 +8529,11 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
                     property: 'type',
                     newValue: newType
                 });
-            }, { style: 'nowrap' });
+            }, {
+                style: 'nowrap',
+                liveCommit: true,
+                parse: (text) => canonicalizeTensorTypeString(text)
+            });
             this.addEditableProperty('description', value.description !== undefined ? value.description : '', (newDescription) => {
                 this._view.applyEditorPatch({
                     entityId: valueId,

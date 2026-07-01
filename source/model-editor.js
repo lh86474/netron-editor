@@ -24,6 +24,7 @@ import {
     syncShellAttribute,
     validateAmbapbPatch
 } from './ambapb-editor.js';
+import { canonicalizeTensorTypeString, formatConnectionType } from './tensor-type.js';
 
 const readType = (type) => {
     if (!type) {
@@ -1650,7 +1651,13 @@ class EditorState {
             if (patch.property === 'name') {
                 setValueField(value, 'name', patch.newValue);
             } else if (patch.property === 'type') {
-                setValueField(value, 'type', patch.newValue);
+                let newType = patch.newValue;
+                if (newType === null || newType === undefined || newType === '') {
+                    newType = '';
+                } else {
+                    newType = canonicalizeTensorTypeString(formatConnectionType(newType));
+                }
+                setValueField(value, 'type', newType);
             } else if (patch.property === 'description') {
                 setValueField(value, 'description', patch.newValue);
             } else {

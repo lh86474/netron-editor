@@ -7,6 +7,7 @@ import { onnx } from './onnx-proto.js';
 import { BinaryReader } from './protobuf.js';
 import { enumerateGraphValues } from './model-editor.js';
 import { buildPrimGraphAttributeProto, PRIM_GRAPH_ATTRIBUTE_NAME } from './ambapb-prim-graph.js';
+import { canonicalizeTensorTypeString, tensorDataTypeByName } from './tensor-type.js';
 // class to create the ONNXExportError
 // Holds the error message and has property ONNX Export Error
 // from parent class Error
@@ -194,23 +195,22 @@ const buildAttributeProto = (name, type, value, sourceProto) => {
     }
     return attribute;
 };
+
 // returns a TypeProto, which is needed for the ONNX IR
 const parseTensorTypeString = (typeString) => {
-    if (!typeString || typeof typeString !== 'string') {
+    const canonical = canonicalizeTensorTypeString(typeString);
+    if (!canonical) {
         throw new OnnxExportError('Value type is required for export.');
     }
-    const bracket = typeString.indexOf('[');
-    const dataTypeName = bracket === -1 ? typeString.trim() : typeString.slice(0, bracket).trim();
-    const elemType = dataTypeByName.get(dataTypeName.toLowerCase());
-    if (elemType === undefined) {
-        throw new OnnxExportError(`Unsupported value type '${typeString}' for export.`);
-    }
+    const bracket = canonical.indexOf('[');
+    const dataTypeName = bracket === -1 ? canonical : canonical.slice(0, bracket);
+    const elemType = tensorDataTypeByName.get(dataTypeName);
     const type = new onnx.TypeProto();
     const tensor = new onnx.TypeProto.Tensor();
     tensor.elem_type = elemType;
-    if (bracket !== -1 && typeString.endsWith(']')) {
+    if (bracket !== -1) {
         const shape = new onnx.TensorShapeProto();
-        const inner = typeString.slice(bracket + 1, -1).trim();
+        const inner = canonical.slice(bracket + 1, -1).trim();
         if (inner.length > 0) {
             for (const part of inner.split(',')) {
                 const trimmed = part.trim();
