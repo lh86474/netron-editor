@@ -128,6 +128,17 @@ describe('ambapb checkpoint export', () => {
 
     it('exports subgraph with weights from prim_graph_imms', () => {
         const primGraph = loadSyntheticPrimGraph();
+        
+        const conv = primGraph.primitives.find((p) => p.id === 'conv0');
+        conv.raw = conv.raw || {};
+        conv.raw.immediates = [
+            {
+                'file-name': 'conv0.weight.bin',
+                'data-format': { sign: 1, bits: 8, expoff: 0, expbits: 0 },
+                'dimension': { w: 1, h: 1, d: 1, p: 1 }
+            }
+        ];
+
         const proto = buildCheckpointModelProto(primGraph);
         
         const extracted = {
@@ -139,8 +150,7 @@ describe('ambapb checkpoint export', () => {
                     name: 'conv0',
                     type: { name: 'Conv' },
                     inputs: [
-                        { name: 'input', value: [{ name: 'data' }] },
-                        { name: 'weight', value: [{ name: 'conv0.weight' }] }
+                        { name: 'input', value: [{ name: 'data' }] }
                     ],
                     outputs: [
                         { name: 'output', value: [{ name: 'conv0_out' }] }

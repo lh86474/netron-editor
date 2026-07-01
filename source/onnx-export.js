@@ -631,11 +631,37 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
         output.push(...buildGraphValueInfo(modifiedOutput, sourceGraph, usedNames));
     }
     const immsTensors = [];
-    for (const node of sourceGraph.node || []) {
-        if (node && node.op_type === 'CVFlowNVP') {
-            const immsAttr = (node.attribute || []).find((attr) => attr && attr.name === 'prim_graph_imms');
-            if (immsAttr && Array.isArray(immsAttr.tensors)) {
-                immsTensors.push(...immsAttr.tensors);
+    let primGraph = null;
+    const wrapperNode = sourceGraph.node.find((node) => node && node.op_type === 'CVFlowNVP');
+    if (wrapperNode) {
+        const immsAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === 'prim_graph_imms');
+        if (immsAttr && Array.isArray(immsAttr.tensors)) {
+            immsTensors.push(...immsAttr.tensors);
+        }
+        const primGraphAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === 'prim_graph');
+        if (primGraphAttr && primGraphAttr.t && primGraphAttr.t.raw_data) {
+            try {
+                const text = new TextDecoder().decode(primGraphAttr.t.raw_data);
+                primGraph = JSON.parse(text);
+            } catch {
+                // ignore
+            }
+        }
+    }
+    if (primGraph && Array.isArray(primGraph.primitives)) {
+        const nodeNames = new Set((modifiedGraph.nodes || []).map((node) => node.name));
+        for (const prim of primGraph.primitives) {
+            if (prim && nodeNames.has(prim.id) && prim.raw && Array.isArray(prim.raw.immediates)) {
+                for (const imm of prim.raw.immediates) {
+                    if (imm && imm['file-name']) {
+                        const baseName = imm['file-name'].replace(/\.bin$/, '');
+                        usedNames.add(baseName);
+                    }
+                    if (imm && imm['unquant-file-name']) {
+                        const baseName = imm['unquant-file-name'].replace(/\.bin$/, '');
+                        usedNames.add(baseName);
+                    }
+                }
             }
         }
     }
