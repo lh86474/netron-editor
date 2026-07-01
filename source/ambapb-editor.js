@@ -308,6 +308,15 @@ export function assertAmbapbAttributePatchAllowed(model, patch, options = {}) {
         return;
     }
     const context = resolvePatchNodeContext(model, patch);
+    const isCompiledNode = (context && isCompiledAmbapbGraph(context.graph)) ||
+        (context && context.nestedInlineCompiled) ||
+        options.viewingCompiledGraph === true;
+    if (isCompiledNode) {
+        if (patch.entityType === 'node' && (patch.property === 'insert' || patch.property === 'remove')) {
+            throw new Error('Checkpoint topology editing is not supported.');
+        }
+        return;
+    }
     if (context && context.nestedInlineCompiled) {
         if (patch.entityType === 'node' && patch.property === 'name') {
             throw new Error('Renaming inlined compiled nodes is not supported.');

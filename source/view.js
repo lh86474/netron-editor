@@ -872,14 +872,13 @@ view.View = class {
 
     _createNodeSidebar(node) {
         if (this._editSession && isAmbapbCheckpoint(this._model)) {
-            if (this._isViewingCompiledAmbapbGraph()) {
-                return new view.NodeSidebar(this, node);
-            }
-            if (this._canEditModelContent() && isAmbapbShellNode(node)) {
-                return new view.AmbaShellNodeSidebar(this, node, this._editSession);
-            }
-            if (this._canEditModelContent() && isAmbapbRuntimeShellNode(node)) {
-                return new view.EditableNodeSidebar(this, node, this._editSession);
+            if (this._canEditModelContent()) {
+                if (isAmbapbShellNode(node)) {
+                    return new view.AmbaShellNodeSidebar(this, node, this._editSession);
+                }
+                if (isAmbapbRuntimeShellNode(node) || this._isViewingCompiledAmbapbGraph() || sourceEntityIdForNode(node) !== null) {
+                    return new view.EditableNodeSidebar(this, node, this._editSession);
+                }
             }
             return new view.NodeSidebar(this, node);
         }

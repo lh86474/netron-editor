@@ -191,17 +191,50 @@ describe('ambapb shell editing', () => {
         }), /not supported/);
     });
 
-    it('rejects edits while viewing compiled graphs', () => {
+    it('allows edits while viewing compiled graphs', () => {
         const model = buildShellCheckpointModel();
         model._modules[0]._ambapbCompiledGraph = true;
         const session = ModelEditor.createSession(model);
-        assert.throws(() => validateAmbapbPatch(session.modified.model, {
+        validateAmbapbPatch(session.modified.model, {
             entityId: 'graph:0/node:0',
             entityType: 'node',
             changeType: 'modify',
             property: 'name',
             newValue: 'renamed'
-        }, { viewingCompiledGraph: true }), /read-only/);
+        }, { viewingCompiledGraph: true });
+    });
+
+    it('allows editing name, description, and attributes of compiled nodes', () => {
+        const model = buildShellCheckpointModel();
+        const compiledGraph = model._modules[0].nodes[0].attributes.find(entry => entry.name === 'compiled_prim_graph').value;
+        compiledGraph._ambapbCompiledGraph = true;
+        compiledGraph.nodes.push({
+            name: 'Conv_0',
+            type: { name: 'Conv' },
+            attributes: [{ name: 'strides', type: 'int64[]', value: [1, 1] }]
+        });
+
+        const session = ModelEditor.createSession(model);
+
+        // Edit name of the compiled node
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'Conv_0_edited'
+        });
+        assert.equal(compiledGraph.nodes[0].name, 'Conv_0_edited');
+
+        // Edit attribute of the compiled node
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0/attr:0',
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: 'attributes.strides',
+            newValue: [2, 2]
+        });
+        assert.deepEqual(compiledGraph.nodes[0].attributes[0].value, [2, 2]);
     });
 
     it('attachCheckpoint keeps shell graph and enables editing', () => {
