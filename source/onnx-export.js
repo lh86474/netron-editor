@@ -1061,7 +1061,7 @@ const applyStructuralNodeChanges = (graph, originalProto, editSession) => {
             syncNodeFromModified(existing, modifiedNode, originalNodesByName, null);
             rebuiltNodes.push(existing);
         } else {
-            rebuiltNodes.push(buildNodeProtoFromModified(modifiedNode, originalProto));
+            rebuiltNodes.push(buildNodeProtoFromModified(modifiedNode, originalNodesByName));
         }
     }
     graph.node = rebuiltNodes;
