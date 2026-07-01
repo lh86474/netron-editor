@@ -1841,10 +1841,6 @@ view.View = class {
         const callsToInline = new Set();
         const inlineRegex = /inline::([^:]+)::/g;
         for (const nodeName of this._userDefSelectedNodes) {
-            const node = (sourceGraph.nodes || []).find(n => n.name === nodeName);
-            if (node && node.type?.name === 'BatchCall') {
-                callsToInline.add(nodeName);
-            }
             let match;
             inlineRegex.lastIndex = 0;
             while ((match = inlineRegex.exec(nodeName)) !== null) {

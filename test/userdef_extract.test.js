@@ -325,12 +325,7 @@ describe('UserDefCall and boundary selection', () => {
         const selectedNodeNames = new Set(['producer', 'batch_call']);
 
         const callsToInline = new Set();
-        for (const name of selectedNodeNames) {
-            const node = graph.nodes.find(n => n.name === name);
-            if (node && node.type?.name === 'BatchCall') {
-                callsToInline.add(name);
-            }
-        }
+        // DO NOT add selected BatchCall nodes to callsToInline, matching view.js
 
         const workingGraph = buildExtractWorkingGraph(graph, callsToInline);
 
@@ -350,7 +345,7 @@ describe('UserDefCall and boundary selection', () => {
 
         assert.equal(selectedNodes.length, 2);
         assert.ok(selectedNodes.some(n => n.name === 'producer'));
-        assert.ok(selectedNodes.some(n => n.name === 'inline::batch_call::inner_nvp'));
+        assert.ok(selectedNodes.some(n => n.name === 'batch_call'));
 
         const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
         let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
@@ -358,7 +353,7 @@ describe('UserDefCall and boundary selection', () => {
 
         assert.equal(extracted.nodes.length, 2);
         assert.ok(extracted.nodes.some(n => n.name === 'producer'));
-        assert.ok(extracted.nodes.some(n => n.name === 'inner_nvp'));
+        assert.ok(extracted.nodes.some(n => n.name === 'batch_call'));
 
         assert.equal(extracted.outputs.length, 1);
         assert.equal(extracted.outputs[0].value[0].name, 'batch_out');
