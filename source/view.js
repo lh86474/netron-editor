@@ -2000,13 +2000,9 @@ view.View = class {
         try {
             const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
-            const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
-            let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
             extracted = stripInlineExpansionPrefixes(extracted);
             const subGraphId = genUniqueNodeName('userdefsubgraph', workingGraph);
-            const subGraphId = genUniqueNodeName('userdefsubgraph', workingGraph);
             extracted.name = subGraphId;
-            const callNodeName = genUniqueNodeName('userDefCall', workingGraph);
             const callNodeName = genUniqueNodeName('userDefCall', workingGraph);
 
             const userDefSubgraphNode = {
