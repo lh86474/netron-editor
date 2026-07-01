@@ -826,13 +826,29 @@ view.View = class {
     // this is used to get the graph for the pane because we want to support
     // svg and png export for both panes
     _paneGraph(paneId) {
+        const pane = this._paneById(paneId); 
+        return pane && pane.graph ? pane.graph : null;
+    }
+
+    // Pane resolver since we never covered the merge-workspace panes
+    _paneById(paneId) {
         if (paneId === 'original') {
-            return this._leftPane && this._leftPane.graph ? this._leftPane.graph : null;
+            return this._leftPane;
         }
         if (paneId === 'modified') {
-            return this._rightPane && this._rightPane.graph ? this._rightPane.graph : null;
+            return this._rightPane;
         }
-        return this._activePaneGraph();
+        const ws = this._mergeWorkspace;
+        if (paneId === 'merge-preview') {
+            return ws._previewPane;
+        }
+        if (paneId === 'merge-upstream') {
+            return ws._upstreamSourcePane;
+        }
+        if (paneId === 'merge-downstream') {
+            return ws._downstreamSourcePane;
+        }
+        return null;
     }
 
     // the basename is used to name the export image for the pane
@@ -2504,7 +2520,9 @@ view.View = class {
         if (options.skipShow) {
             this._ensureDefaultScreen();
         }
-        const pane = options.paneId === 'original' ? this._leftPane : this._rightPane;
+        const pane = this._paneById(options.paneId) || (options.paneId === 'original' ? this._leftPane : this._rightPane);
+        // since path names are named with merge-
+        const isMergePane = Boolean(options.paneId && options.paneId.startsWith('merge-'));
         const targetGraph = pane ? pane.graph : this._target;
         const origin = targetGraph ? targetGraph._origin : null;
         const snapshot = new Map();
@@ -2523,9 +2541,9 @@ view.View = class {
         const zoom = targetGraph ? targetGraph._zoom : 1;
         const blocks = targetGraph ? targetGraph.blocks : null;
 
-        const panePath = options.paneId === 'original' ? this._leftPath : this._rightPath;
-        const paneTarget = panePath && panePath.length > 0 ? panePath[0].target : this.activeTarget;
-        const paneSignature = panePath && panePath.length > 0 ? panePath[0].signature : this.activeSignature;
+        const panePath = isMergePane ? [] : (options.paneId === 'original' ? this._leftPath : this._rightPath);
+        const paneTarget = panePath.length > 0 ? panePath[0].target : ((targetGraph && targetGraph.target) || this.activeTarget);
+        const paneSignature = panePath.length > 0 ? panePath[0].signature : null;
 
         if (blocks && blocks.size > 0 && panePath.length > 0) {
             panePath[0].state = Object.assign(panePath[0].state || {}, { blocks });
@@ -2538,7 +2556,8 @@ view.View = class {
             const sourceGraph = pane.readOnly ? paneTarget : this._resolveModifiedTarget(paneTarget);
             const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
-            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
+            const renderModel = isMergePane && targetGraph ? targetGraph._renderModel : null;
+            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph, renderModel));
             viewGraph.blocks = targetGraph ? targetGraph.blocks : new Set();
             viewGraph.add(graph, paneSignature);
             viewGraph.addTunnels();
@@ -2582,11 +2601,11 @@ view.View = class {
                     }
                 }
             }
-        } else {
+        } else if (!isMergePane) {
             await this.render(this.activeTarget, this.activeSignature);
         }
         if (!options.skipShow) {
-            this.show(null);
+            this.show(this._page === 'merge-workspace' ? 'merge-workspace' : null);
         }
         const currentPaneGraph = pane ? pane.graph : this._target;
         if (currentPaneGraph) {
@@ -3058,7 +3077,7 @@ view.View = class {
             this._activePane = paneId;
         }
         if (graph && graph !== this.activeTarget && Array.isArray(graph.nodes)) {
-            const currentPaneGraph = (paneId === 'original' ? this._leftPane?.graph : this._rightPane?.graph) || this._target;
+            const currentPaneGraph = this._paneGraph(paneId) || this._target;
             if (currentPaneGraph) {
                 currentPaneGraph.select(null);
             }
