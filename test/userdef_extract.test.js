@@ -504,4 +504,14 @@ describe('UserDefCall and boundary selection', () => {
         assert.equal(finalNodes[3].name, 'consumer');
         assert.equal(finalNodes[3].type.name, 'CVFlowNVP');
     });
+
+    it('allows selecting end nodes on different levels', () => {
+        const graph = mockChainModel.modules[0];
+        const beginNodes = [graph.nodes[0]]; // Conv1 (level 0)
+        const endNodes = [graph.nodes[1], graph.nodes[2]]; // Relu1 (level 1) and Softmax1 (level 2)
+        
+        assert.doesNotThrow(() => {
+            extractSubgraph(graph, beginNodes, endNodes);
+        });
+    });
 });
