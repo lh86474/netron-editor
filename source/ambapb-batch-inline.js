@@ -269,6 +269,7 @@ const cloneValue = (value, prefix, valueMap, nameMap) => {
     if (value.visible === false) {
         cloned.visible = false;
     }
+    cloned._sourceValue = value;
     valueMap.set(value, cloned);
     nameMap.set(value.name, cloned);
     return cloned;
@@ -568,6 +569,16 @@ export const sourceNodeForEntity = (displayNode) => {
 
 export const sourceEntityIdForNode = (displayNode) => {
     return displayNode && displayNode._sourceEntityId ? displayNode._sourceEntityId : null;
+};
+
+export const sourceValueForEntity = (displayValue) => {
+    if (!displayValue) {
+        return null;
+    }
+    if (displayValue._sourceValue) {
+        return displayValue._sourceValue;
+    }
+    return displayValue;
 };
 
 // This is the main logic for the inline expansion. 

@@ -211,7 +211,15 @@ describe('ambapb shell editing', () => {
         compiledGraph.nodes.push({
             name: 'Conv_0',
             type: { name: 'Conv' },
-            attributes: [{ name: 'strides', type: 'int64[]', value: [1, 1] }]
+            attributes: [{ name: 'strides', type: 'int64[]', value: [1, 1] }],
+            inputs: [{
+                name: 'input',
+                value: [{ name: 'tensor_in', type: 'float32' }]
+            }],
+            outputs: [{
+                name: 'output',
+                value: [{ name: 'tensor_out', type: 'float32' }]
+            }]
         });
 
         const session = ModelEditor.createSession(model);
@@ -235,6 +243,16 @@ describe('ambapb shell editing', () => {
             newValue: [2, 2]
         });
         assert.deepEqual(compiledGraph.nodes[0].attributes[0].value, [2, 2]);
+
+        // Edit nested compiled connection name
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/value:0',
+            entityType: 'value',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'tensor_in_edited'
+        });
+        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].name, 'tensor_in_edited');
     });
 
     it('attachCheckpoint keeps shell graph and enables editing', () => {

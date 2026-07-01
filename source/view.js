@@ -30,6 +30,7 @@ import {
     isBatchCallNode,
     sourceEntityIdForNode,
     sourceNodeForEntity,
+    sourceValueForEntity,
     resolveBatchCallTarget,
     resolveInlinedSourceContext
 } from './ambapb-batch-inline.js';
@@ -911,7 +912,8 @@ view.View = class {
         if (!this._editSession || !value) {
             return null;
         }
-        return locateValueEntity(this._editSession.modified.model, value);
+        const modelValue = sourceValueForEntity(value);
+        return locateValueEntity(this._editSession.modified.model, modelValue);
     }
 
     _bindNodeSidebarEvents(sidebar, node) {
