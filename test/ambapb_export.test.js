@@ -2,16 +2,37 @@
  * This file tests the export logic for ambapb checkpoint graphs
  * Author: Luray He
  */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { onnx } from '../source/onnx-proto.js';
 import '../source/onnx-encode.js';
 import { BinaryReader } from '../source/protobuf.js';
 import { ModelEditor } from '../source/model-editor.js';
-import { exportModifiedOnnx } from '../source/onnx-export.js';
+import { exportModifiedOnnx, rebuildGraphProtoFromModified } from '../source/onnx-export.js';
 import { attachCheckpoint, parseCheckpoint } from '../source/ambapb.js';
-import { parsePrimGraphJson } from '../source/ambapb-prim-graph.js';
+import { parsePrimGraphJson, serializePrimGraphJson } from '../source/ambapb-prim-graph.js';
 import { PRIM_GRAPH_ATTRIBUTE } from '../source/ambapb-editor.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
+
+const loadSyntheticPrimGraph = () => {
+    const filePath = path.join(repoRoot, 'test', 'fixtures', 'ambapb-prim-graph.json');
+    return parsePrimGraphJson(JSON.stringify(JSON.parse(fs.readFileSync(filePath, 'utf8'))));
+};
+
+const buildEditedPrimGraphJson = (primGraph, primitiveId, attributeName, value) => {
+    const primitive = primGraph.primitives.find((p) => p.id === primitiveId);
+    primitive.attributes = primitive.attributes || {};
+    primitive.attributes[attributeName] = value;
+    const rawPrimitive = primGraph.raw.primitives.find((p) => p.id === primitiveId);
+    rawPrimitive.attributes = rawPrimitive.attributes || {};
+    rawPrimitive.attributes[attributeName] = value;
+    return serializePrimGraphJson(primGraph);
+};
 
 const buildCheckpointModelProto = (primGraph) => {
     const model = new onnx.ModelProto();
@@ -28,7 +49,18 @@ const buildCheckpointModelProto = (primGraph) => {
     tensor.dims = [BigInt(new TextEncoder().encode(JSON.stringify(primGraph.raw)).length)];
     tensor.raw_data = new TextEncoder().encode(JSON.stringify(primGraph.raw));
     attr.t = tensor;
-    node.attribute = [attr];
+
+    const immsAttr = new onnx.AttributeProto();
+    immsAttr.name = 'prim_graph_imms';
+    immsAttr.type = onnx.AttributeProto.AttributeType.TENSORS;
+    const weightTensor = new onnx.TensorProto();
+    weightTensor.name = 'conv0.weight';
+    weightTensor.data_type = onnx.TensorProto.DataType.FLOAT;
+    weightTensor.dims = [BigInt(4)];
+    weightTensor.float_data = [1.0, 2.0, 3.0, 4.0];
+    immsAttr.tensors = [weightTensor];
+
+    node.attribute = [attr, immsAttr];
     graph.node = [node];
     model.graph = graph;
     return model;
@@ -92,5 +124,36 @@ describe('ambapb checkpoint export', () => {
         const checkpoint = parseCheckpoint(decoded);
         const conv = checkpoint.primGraph.primitives.find((p) => p.id === 'conv0');
         assert.equal(conv.attributes.stride, '4');
+    });
+
+    it('exports subgraph with weights from prim_graph_imms', () => {
+        const primGraph = loadSyntheticPrimGraph();
+        const proto = buildCheckpointModelProto(primGraph);
+        
+        const extracted = {
+            name: 'subgraph',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'conv0',
+                    type: { name: 'Conv' },
+                    inputs: [
+                        { name: 'input', value: [{ name: 'data' }] },
+                        { name: 'weight', value: [{ name: 'conv0.weight' }] }
+                    ],
+                    outputs: [
+                        { name: 'output', value: [{ name: 'conv0_out' }] }
+                    ]
+                }
+            ]
+        };
+
+        const rebuilt = rebuildGraphProtoFromModified(extracted, proto);
+        assert.equal(rebuilt.node.length, 1);
+        assert.equal(rebuilt.node[0].name, 'conv0');
+        assert.equal(rebuilt.initializer.length, 1);
+        assert.equal(rebuilt.initializer[0].name, 'conv0.weight');
+        assert.deepEqual(Array.from(rebuilt.initializer[0].float_data), [1.0, 2.0, 3.0, 4.0]);
     });
 });

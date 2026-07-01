@@ -630,7 +630,17 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto) => {
     for (const modifiedOutput of modifiedGraph.outputs || []) {
         output.push(...buildGraphValueInfo(modifiedOutput, sourceGraph, usedNames));
     }
-    const initializer = (sourceGraph.initializer || []).filter((tensor) => tensor.name && usedNames.has(tensor.name));
+    const immsTensors = [];
+    for (const node of sourceGraph.node || []) {
+        if (node && node.op_type === 'CVFlowNVP') {
+            const immsAttr = (node.attribute || []).find((attr) => attr && attr.name === 'prim_graph_imms');
+            if (immsAttr && Array.isArray(immsAttr.tensors)) {
+                immsTensors.push(...immsAttr.tensors);
+            }
+        }
+    }
+    const allInitializers = [...(sourceGraph.initializer || []), ...immsTensors];
+    const initializer = allInitializers.filter((tensor) => tensor.name && usedNames.has(tensor.name));
     const value_info = (sourceGraph.value_info || []).filter((value) => value.name && usedNames.has(value.name));
     const sparse_initializer = (sourceGraph.sparse_initializer || []).filter((tensor) => {
         const valuesName = tensor.values && tensor.values.name;
