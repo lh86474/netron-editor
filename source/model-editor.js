@@ -63,6 +63,20 @@ const cloneAttributeValue = (value) => {
     return normalizeScalar(value);
 };
 
+const isGraphValue = (value) => {
+    return Boolean(value && typeof value === 'object' && Array.isArray(value.nodes));
+};
+
+const setValueField = (value, field, newValue) => {
+    const privateKey = `_${field}`;
+    const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(value), field);
+    if (privateKey in value || (descriptor && descriptor.get && !descriptor.set)) {
+        value[privateKey] = newValue;
+    } else {
+        value[field] = newValue;
+    }
+};
+
 export const stringifyEditorJSON = (value) => JSON.stringify(value, (_, item) => typeof item === 'bigint' ? item.toString() : item);
 
 const trackArgumentValues = (argument, track) => {
@@ -109,11 +123,22 @@ export const enumerateGraphValues = (graph, graphIndex) => {
 
 const readModel = (model) => {
     const valueMap = new Map();
+    let readGraph;
+    const readAttributeValue = (attribute) => {
+        const source = attribute.value;
+        if (attribute.type === 'graph' && isGraphValue(source)) {
+            return readGraph(source);
+        }
+        if (attribute.type === 'graph[]' && Array.isArray(source)) {
+            return source.map((entry) => (isGraphValue(entry) ? readGraph(entry) : cloneAttributeValue(entry)));
+        }
+        return cloneAttributeValue(source);
+    };
     const readAttribute = (attribute) => {
         const result = {
             name: attribute.name,
             type: attribute.type,
-            value: cloneAttributeValue(attribute.value)
+            value: readAttributeValue(attribute)
         };
         if (attribute.visible === false) {
             result.visible = false;
@@ -176,6 +201,9 @@ const readModel = (model) => {
             inputs: (node.inputs || []).map((input) => readArgument(input)),
             outputs: (node.outputs || []).map((output) => readArgument(output))
         };
+        if (Array.isArray(node.blocks) && node.blocks.length > 0) {
+            result.blocks = node.blocks.map((block) => readAttribute(block));
+        }
         if (node.description !== undefined) {
             result.description = node.description;
         }
@@ -187,7 +215,7 @@ const readModel = (model) => {
         }
         return result;
     };
-    const readGraph = (graph) => {
+    readGraph = (graph) => {
         const result = {
             name: graph.name,
             identifier: graph.identifier,
@@ -1620,11 +1648,11 @@ class EditorState {
                 throw new Error(`Value not found for entityId: ${entityId}`);
             }
             if (patch.property === 'name') {
-                value.name = patch.newValue;
+                setValueField(value, 'name', patch.newValue);
             } else if (patch.property === 'type') {
-                value.type = patch.newValue;
+                setValueField(value, 'type', patch.newValue);
             } else if (patch.property === 'description') {
-                value.description = patch.newValue;
+                setValueField(value, 'description', patch.newValue);
             } else {
                 throw new Error(`Unsupported value property: ${patch.property}`);
             }
