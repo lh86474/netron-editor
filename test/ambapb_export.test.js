@@ -14,7 +14,7 @@ import { ModelEditor } from '../source/model-editor.js';
 import { exportModifiedOnnx, rebuildGraphProtoFromModified } from '../source/onnx-export.js';
 import { attachCheckpoint, parseCheckpoint } from '../source/ambapb.js';
 import { parsePrimGraphJson, serializePrimGraphJson } from '../source/ambapb-prim-graph.js';
-import { PRIM_GRAPH_ATTRIBUTE } from '../source/ambapb-editor.js';
+import { COMPILED_PRIM_GRAPH_ATTRIBUTE, PRIM_GRAPH_ATTRIBUTE } from '../source/ambapb-editor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -84,6 +84,106 @@ const buildCheckpointViewModel = (proto, primGraph) => {
                 inputs: [],
                 outputs: []
             }]
+        }],
+        get modules() { return this._modules; },
+        get exportable() { return this._exportable; },
+        get proto() { return proto; }
+    };
+    attachCheckpoint(viewModel, proto);
+    return viewModel;
+};
+
+const buildCheckpointWithCompiledGraph = (primGraph) => {
+    const proto = buildCheckpointModelProto(primGraph);
+    const wrapper = proto.graph.node[0];
+    const compiledAttr = new onnx.AttributeProto();
+    compiledAttr.name = COMPILED_PRIM_GRAPH_ATTRIBUTE;
+    compiledAttr.type = onnx.AttributeProto.AttributeType.GRAPH;
+    const compiledGraph = new onnx.GraphProto();
+    compiledGraph.name = 'runtime';
+    const convNode = new onnx.NodeProto();
+    convNode.name = 'Conv_0';
+    convNode.op_type = 'Conv';
+    convNode.input = ['tensor_in'];
+    convNode.output = ['tensor_out'];
+    const stridesAttr = new onnx.AttributeProto();
+    stridesAttr.name = 'strides';
+    stridesAttr.type = onnx.AttributeProto.AttributeType.INTS;
+    stridesAttr.ints = [BigInt(1), BigInt(1)];
+    convNode.attribute = [stridesAttr];
+    const nvpNode = new onnx.NodeProto();
+    nvpNode.name = 'mobilenetv2_prim_nvp0';
+    nvpNode.op_type = 'CVFlowNVP';
+    nvpNode.output = ['nvp_out'];
+    const primGraphAttr = new onnx.AttributeProto();
+    primGraphAttr.name = PRIM_GRAPH_ATTRIBUTE;
+    primGraphAttr.type = onnx.AttributeProto.AttributeType.TENSOR;
+    const nestedPrimGraph = {
+        primitives: [{
+            id: 'prim_0',
+            type: 'input',
+            attributes: { test: 'val' }
+        }]
+    };
+    const nestedBytes = new TextEncoder().encode(JSON.stringify(nestedPrimGraph));
+    const nestedTensor = new onnx.TensorProto();
+    nestedTensor.data_type = onnx.TensorProto.DataType.UINT8;
+    nestedTensor.dims = [BigInt(nestedBytes.length)];
+    nestedTensor.raw_data = nestedBytes;
+    primGraphAttr.t = nestedTensor;
+    nvpNode.attribute = [primGraphAttr];
+    compiledGraph.node = [convNode, nvpNode];
+    compiledAttr.g = compiledGraph;
+    wrapper.attribute.push(compiledAttr);
+
+    const viewModel = {
+        format: 'ONNX',
+        _exportable: true,
+        _kind: 'amba-checkpoint',
+        get kind() { return this._kind; },
+        _modules: [{
+            name: 'shell',
+            nodes: [{
+                name: 'data',
+                type: { name: 'CVFlowNVP', identifier: 'CVFlowNVP' },
+                attributes: [
+                    { name: 'prim_graph', type: 'tensor', value: {} },
+                    { name: 'prim_graph_imms', type: 'tensor[]', value: [] },
+                    {
+                        name: COMPILED_PRIM_GRAPH_ATTRIBUTE,
+                        type: 'graph',
+                        value: {
+                            name: 'runtime',
+                            inputs: [],
+                            outputs: [],
+                            nodes: [
+                                {
+                                    name: 'Conv_0',
+                                    type: { name: 'Conv' },
+                                    attributes: [{ name: 'strides', type: 'int64[]', value: [1, 1] }],
+                                    inputs: [{ name: 'input', value: [{ name: 'tensor_in', type: 'float32' }] }],
+                                    outputs: [{ name: 'output', value: [{ name: 'tensor_out', type: 'float32' }] }]
+                                },
+                                {
+                                    name: 'mobilenetv2_prim_nvp0',
+                                    type: { name: 'CVFlowNVP' },
+                                    attributes: [{
+                                        name: PRIM_GRAPH_ATTRIBUTE,
+                                        type: 'string',
+                                        value: JSON.stringify(nestedPrimGraph)
+                                    }],
+                                    inputs: [],
+                                    outputs: [{ name: 'output', value: [{ name: 'nvp_out', type: 'float32' }] }]
+                                }
+                            ]
+                        }
+                    }
+                ],
+                inputs: [],
+                outputs: []
+            }],
+            inputs: [],
+            outputs: []
         }],
         get modules() { return this._modules; },
         get exportable() { return this._exportable; },
@@ -173,6 +273,43 @@ describe('ambapb checkpoint export', () => {
         assert.equal(parsed.primitives.length, 2);
         assert.ok(parsed.primitives.some((prim) => prim.id === 'conv0'));
         assert.ok(parsed.primitives.some((prim) => prim.id === 'data'));
+    });
+
+    it('exports flat runtime graph without re-wrapping in a CVFlowNVP shell', () => {
+        const primGraph = loadSyntheticPrimGraph();
+        const proto = buildCheckpointModelProto(primGraph);
+        const model = buildCheckpointViewModel(proto, primGraph);
+        const session = ModelEditor.createSession(model);
+        const flatRuntime = {
+            name: 'runtime',
+            inputs: [{ name: 'data', value: [{ name: 'data', type: 'float32' }] }],
+            outputs: [{ name: 'conv0_out', value: [{ name: 'conv0_out', type: 'float32' }] }],
+            nodes: [
+                {
+                    name: 'conv0',
+                    type: { name: 'Conv' },
+                    attributes: [],
+                    inputs: [{ name: 'input', value: [{ name: 'data' }] }],
+                    outputs: [{ name: 'output', value: [{ name: 'conv0_out' }] }]
+                },
+                {
+                    name: 'batch_call',
+                    type: { name: 'BatchCall' },
+                    attributes: [{ name: 'graph_id', type: 'string', value: 'subgraph_body' }],
+                    inputs: [{ name: 'input0', value: [{ name: 'conv0_out' }] }],
+                    outputs: [{ name: 'output', value: [{ name: 'batch_out' }] }]
+                }
+            ]
+        };
+        session.replaceGraph(0, flatRuntime);
+        const bytes = exportModifiedOnnx(model, session);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        assert.ok(decoded.graph.node.length >= 2);
+        const soleWrapper = decoded.graph.node.length === 1 &&
+            decoded.graph.node[0].op_type === 'CVFlowNVP';
+        assert.ok(!soleWrapper);
+        assert.ok(decoded.graph.node.some((node) => node.name === 'conv0'));
+        assert.ok(decoded.graph.node.some((node) => node.name === 'batch_call'));
     });
 
     it('exports extracted checkpoint subgraph through exportModifiedOnnx', () => {
@@ -377,5 +514,66 @@ describe('ambapb checkpoint export', () => {
         assert.equal(rebuiltGraphAttr.g.name, 'subgraph_body');
         assert.equal(rebuiltGraphAttr.g.node.length, 1);
         assert.equal(rebuiltGraphAttr.g.node[0].name, 'inner_nvp');
+    });
+
+    it('exports compiled_prim_graph attribute edits through exportModifiedOnnx', () => {
+        const primGraph = loadSyntheticPrimGraph();
+        const model = buildCheckpointWithCompiledGraph(primGraph);
+        const session = ModelEditor.createSession(model);
+
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'Conv_0_edited'
+        });
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0/attr:0',
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: 'attributes.strides',
+            newValue: [2, 2]
+        });
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/value:0',
+            entityType: 'value',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'tensor_in_edited'
+        });
+
+        const updatedNvpJson = JSON.stringify({
+            primitives: [{
+                id: 'prim_0_edited',
+                type: 'input',
+                attributes: { test: 'val2' }
+            }]
+        });
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:1/attr:0',
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: `attributes.${PRIM_GRAPH_ATTRIBUTE}`,
+            newValue: updatedNvpJson
+        });
+
+        const bytes = exportModifiedOnnx(model, session);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        const wrapper = decoded.graph.node[0];
+        const compiledAttr = wrapper.attribute.find((attr) => attr.name === COMPILED_PRIM_GRAPH_ATTRIBUTE);
+        assert.ok(compiledAttr && compiledAttr.g);
+        const convNode = compiledAttr.g.node.find((node) => node.name === 'Conv_0_edited');
+        assert.ok(convNode);
+        assert.deepEqual(Array.from(convNode.input), ['tensor_in_edited']);
+        const strides = convNode.attribute.find((attr) => attr.name === 'strides');
+        assert.ok(strides);
+        assert.deepEqual(Array.from(strides.ints), [BigInt(2), BigInt(2)]);
+        const nvpNode = compiledAttr.g.node.find((node) => node.name === 'mobilenetv2_prim_nvp0');
+        assert.ok(nvpNode);
+        const nestedPrimGraphAttr = nvpNode.attribute.find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
+        assert.ok(nestedPrimGraphAttr && nestedPrimGraphAttr.t);
+        const parsedNested = parsePrimGraphJson(nestedPrimGraphAttr.t);
+        assert.equal(parsedNested.primitives[0].id, 'prim_0_edited');
     });
 });
