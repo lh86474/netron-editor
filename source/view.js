@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, findValueConsumers } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint, canExportCheckpoint } from './ambapb.js';
 import {
@@ -19,6 +19,7 @@ import {
     validateAmbapbPatch
 } from './ambapb-editor.js';
 import { AmbapbMetadataResolver } from './ambapb-metadata.js';
+import { parsePrimGraphJson } from './ambapb-prim-graph.js';
 import { stripExportExtension, buildSubgraphExportBasename, normalizeExportFilename } from './export-filename.js';
 import { validateNodeInsert } from './onnx-operator-validation.js';
 import { GraphPane } from './graph-pane.js';
@@ -30,6 +31,7 @@ import {
     isBatchCallNode,
     sourceEntityIdForNode,
     sourceNodeForEntity,
+    sourceValueForEntity,
     resolveBatchCallTarget,
     resolveInlinedSourceContext
 } from './ambapb-batch-inline.js';
@@ -991,14 +993,19 @@ view.View = class {
 
     _createNodeSidebar(node) {
         if (this._editSession && isAmbapbCheckpoint(this._model)) {
-            if (this._isViewingCompiledAmbapbGraph()) {
-                return new view.NodeSidebar(this, node);
-            }
-            if (this._canEditModelContent() && isAmbapbShellNode(node)) {
-                return new view.AmbaShellNodeSidebar(this, node, this._editSession);
-            }
-            if (this._canEditModelContent() && isAmbapbRuntimeShellNode(node)) {
-                return new view.EditableNodeSidebar(this, node, this._editSession);
+            if (this._canEditModelContent()) {
+                const entity = this._resolveNodeEntity(node);
+                const isCompiled = entity && (
+                    this._isViewingCompiledAmbapbGraph() ||
+                    sourceEntityIdForNode(node) !== null ||
+                    (entity.nested && (entity.graphAttrName === 'compiled_prim_graph' || entity.graphAttrName === 'graph'))
+                );
+                if (isAmbapbShellNode(node)) {
+                    return new view.AmbaShellNodeSidebar(this, node, this._editSession);
+                }
+                if (isAmbapbRuntimeShellNode(node) || isCompiled) {
+                    return new view.EditableNodeSidebar(this, node, this._editSession);
+                }
             }
             return new view.NodeSidebar(this, node);
         }
@@ -1031,7 +1038,8 @@ view.View = class {
         if (!this._editSession || !value) {
             return null;
         }
-        return locateValueEntity(this._editSession.modified.model, value);
+        const modelValue = sourceValueForEntity(value);
+        return locateValueEntity(this._editSession.modified.model, modelValue);
     }
 
     _bindNodeSidebarEvents(sidebar, node) {
@@ -2272,6 +2280,16 @@ view.View = class {
         const session = this._editSession;
         if (!session || !target) {
             return target;
+        }
+        if (locateGraphPath(session.modified.model, target)) {
+            return target;
+        }
+        const pathInfo = locateGraphPath(session.original, target);
+        if (pathInfo) {
+            const resolved = getGraphByPath(session.modified.model, pathInfo);
+            if (resolved) {
+                return resolved;
+            }
         }
         const modules = session.original.modules || [];
         for (let i = 0; i < modules.length; i++) {
@@ -7091,7 +7109,25 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
     render() {
         const node = this._node;
         const nodeId = this._entity ? this._entity.nodeId : null;
-        const ambapb = this._editSession.modified.model._ambapb;
+        let ambapb = node._ambapb;
+        if (!ambapb) {
+            const primGraphAttr = (node.attributes || []).find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
+            if (primGraphAttr && primGraphAttr.value) {
+                try {
+                    ambapb = {
+                        primGraph: parsePrimGraphJson(primGraphAttr.value),
+                        canEdit: this._editSession.modified.model._ambapb?.canEdit ?? true,
+                        metadata: this._editSession.modified.model._ambapb?.metadata ?? {}
+                    };
+                    node._ambapb = ambapb;
+                } catch {
+                    // Ignore
+                }
+            }
+        }
+        if (!ambapb) {
+            ambapb = this._editSession.modified.model._ambapb;
+        }
         if (node.type) {
             const type = node.type;
             const item = this.addProperty('type', node.type.identifier || node.type.name);
@@ -7173,6 +7209,12 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
                                 property: `attributes.${attribute.name}`,
                                 newValue: value
                             });
+                            try {
+                                if (node._ambapb) {
+                                    node._ambapb.primGraph = parsePrimGraphJson(value);
+                                }
+                            } catch {
+                            }
                         }
                     });
                     this.addEntry(attribute.name, item);

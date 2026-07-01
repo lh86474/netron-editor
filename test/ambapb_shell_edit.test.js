@@ -191,17 +191,119 @@ describe('ambapb shell editing', () => {
         }), /not supported/);
     });
 
-    it('rejects edits while viewing compiled graphs', () => {
+    it('allows edits while viewing compiled graphs', () => {
         const model = buildShellCheckpointModel();
         model._modules[0]._ambapbCompiledGraph = true;
         const session = ModelEditor.createSession(model);
-        assert.throws(() => validateAmbapbPatch(session.modified.model, {
+        validateAmbapbPatch(session.modified.model, {
             entityId: 'graph:0/node:0',
             entityType: 'node',
             changeType: 'modify',
             property: 'name',
             newValue: 'renamed'
-        }, { viewingCompiledGraph: true }), /read-only/);
+        }, { viewingCompiledGraph: true });
+    });
+
+    it('allows editing name, description, and attributes of compiled nodes', () => {
+        const model = buildShellCheckpointModel();
+        const compiledGraph = model._modules[0].nodes[0].attributes.find(entry => entry.name === 'compiled_prim_graph').value;
+        compiledGraph._ambapbCompiledGraph = true;
+        compiledGraph.nodes.push({
+            name: 'Conv_0',
+            type: { name: 'Conv' },
+            attributes: [{ name: 'strides', type: 'int64[]', value: [1, 1] }],
+            inputs: [{
+                name: 'input',
+                value: [{ name: 'tensor_in', type: 'float32' }]
+            }],
+            outputs: [{
+                name: 'output',
+                value: [{ name: 'tensor_out', type: 'float32' }]
+            }]
+        });
+
+        const nestedNvpJson = JSON.stringify({
+            primitives: [{
+                id: 'prim_0',
+                type: 'input',
+                attributes: { test: 'val' }
+            }]
+        });
+
+        compiledGraph.nodes.push({
+            name: 'mobilenetv2_prim_nvp0',
+            type: { name: 'CVFlowNVP' },
+            attributes: [{ name: 'prim_graph', type: 'string', value: nestedNvpJson }]
+        });
+
+        const session = ModelEditor.createSession(model);
+
+        // Edit name of the compiled node
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'Conv_0_edited'
+        });
+        assert.equal(compiledGraph.nodes[0].name, 'Conv_0_edited');
+
+        // Edit attribute of the compiled node
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0/attr:0',
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: 'attributes.strides',
+            newValue: [2, 2]
+        });
+        assert.deepEqual(compiledGraph.nodes[0].attributes[0].value, [2, 2]);
+
+        // Edit nested compiled connection name
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/value:0',
+            entityType: 'value',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'tensor_in_edited'
+        });
+        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].name, 'tensor_in_edited');
+
+        // Add an attribute to the nested connection
+        session.applyPatch({
+            parentId: 'graph:0/node:0/compiled_prim_graph/value:0',
+            entityType: 'attribute',
+            changeType: 'add',
+            property: 'attributes.test_attr',
+            newValue: '42'
+        });
+        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes[0].name, 'test_attr');
+        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes[0].value, '42');
+
+        // Delete an attribute of the nested connection
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/value:0/attr:0',
+            entityType: 'attribute',
+            changeType: 'delete',
+            property: 'attributes.test_attr'
+        });
+        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes.length, 0);
+
+        // Edit prim_graph of nested NVP node
+        const updatedNvpJson = JSON.stringify({
+            primitives: [{
+                id: 'prim_0_edited',
+                type: 'input',
+                attributes: { test: 'val2' }
+            }]
+        });
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:1/attr:0',
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: 'attributes.prim_graph',
+            newValue: updatedNvpJson
+        });
+        assert.equal(compiledGraph.nodes[1].attributes[0].value, updatedNvpJson);
     });
 
     it('attachCheckpoint keeps shell graph and enables editing', () => {
