@@ -10,21 +10,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { onnx } from '../source/onnx-proto.js';
 import '../source/onnx-encode.js';
-import { buildPrimGraphAttributeProto, parsePrimGraphFromAttribute} from '../source/ambapb-prim-graph.js';
+import {
+    buildDependencyGraph,
+    buildPrimGraphAttributeProto,
+    enumeratePrimPorts,
+    parsePrimGraphFromAttribute,
+    parsePrimGraphImms,
+    parsePrimGraphJson,
+    resolveKeptPrimitiveIds,
+    serializePrimGraphJson,
+    slicePrimGraph,
+    validatePrimGraph
+} from '../source/ambapb-prim-graph.js';
 import { BinaryReader } from '../source/protobuf.js';
 import {
     attachCheckpoint,
     parseCheckpoint
 } from '../source/ambapb.js';
-import {
-    buildDependencyGraph,
-    enumeratePrimPorts,
-    parsePrimGraphFromAttribute,
-    parsePrimGraphImms,
-    parsePrimGraphJson,
-    serializePrimGraphJson,
-    validatePrimGraph
-} from '../source/ambapb-prim-graph.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -89,6 +91,63 @@ describe('ambapb prim graph parser', () => {
         assert.equal(roundTrip.primitives.length, primGraph.primitives.length);
     });
 
+    it('resolveKeptPrimitiveIds closes transitive sources before slicePrimGraph validates', () => {
+        const raw = {
+            primitives: [
+                {
+                    id: 'data',
+                    'mangled-id': 'data',
+                    type: 'input',
+                    oports: [{ id: 'data', 'additional-dep-prim-ids': [] }],
+                    attributes: {}
+                },
+                {
+                    id: '/multi_scale_deform_attention/value_proj/MatMul_output_0:Add_output_0',
+                    'mangled-id': '/multi_scale_deform_attention/value_proj/MatMul_output_0:Add_output_0',
+                    type: 'conv2ibesbcp',
+                    sources: [{ id: 'data', port: 0 }],
+                    oports: [{ id: 'matmul_out', 'additional-dep-prim-ids': [] }],
+                    attributes: {}
+                },
+                {
+                    id: '/multi_scale_deform_attention/Transpose_output_0',
+                    'mangled-id': '/multi_scale_deform_attention/Transpose_output_0',
+                    type: 'conv2ibesbcp',
+                    sources: [{
+                        id: '/multi_scale_deform_attention/value_proj/MatMul_output_0:Add_output_0',
+                        port: 0
+                    }],
+                    oports: [{ id: 'transpose_out', 'additional-dep-prim-ids': [] }],
+                    attributes: {}
+                }
+            ],
+            trackers: [],
+            graph_input: 'data',
+            graph_output: '/multi_scale_deform_attention/Transpose_output_0',
+            subgraphs: []
+        };
+        const primGraph = parsePrimGraphJson(JSON.stringify(raw));
+        const modifiedGraph = {
+            inputs: [],
+            outputs: [],
+            nodes: [{
+                name: '/multi_scale_deform_attention/Transpose_output_0',
+                type: { name: 'CVFlowNVP' },
+                attributes: [],
+                inputs: [],
+                outputs: [{ name: 'output', value: [{ name: 'transpose_out' }] }]
+            }]
+        };
+        const keptIds = resolveKeptPrimitiveIds(modifiedGraph, primGraph);
+        assert.ok(keptIds.has('/multi_scale_deform_attention/Transpose_output_0'));
+        assert.ok(keptIds.has('/multi_scale_deform_attention/value_proj/MatMul_output_0:Add_output_0'));
+        assert.ok(keptIds.has('data'));
+        const sliced = slicePrimGraph(primGraph, keptIds);
+        const validation = validatePrimGraph(sliced.primitives);
+        assert.equal(validation.ok, true, validation.errors.join('\n'));
+        assert.doesNotThrow(() => buildPrimGraphAttributeProto(serializePrimGraphJson(sliced)));
+    });
+
     it('attachCheckpoint populates primGraph and imms on view model', () => {
         const mobilenetPath = resolveMobilenetFixture();
         if (!mobilenetPath) {
@@ -139,8 +198,9 @@ describe('ambapb prim graph integration', () => {
         deepEqualJson(roundTrip.raw, checkpoint.primGraph.raw);
     });
     it('encodes prim_graph JSON into tensor raw_data', () => {
-        const originalAttr = buildPrimGraphAttributeProto(JSON.stringify(fixture.raw));
-        const edited = JSON.parse(JSON.stringify(fixture.raw));
+        const fixture = loadSyntheticFixture();
+        const originalAttr = buildPrimGraphAttributeProto(JSON.stringify(fixture));
+        const edited = JSON.parse(JSON.stringify(fixture));
         edited.primitives[1].attributes.stride = '4';
         const rebuilt = buildPrimGraphAttributeProto(JSON.stringify(edited), originalAttr);
         const roundTrip = parsePrimGraphFromAttribute(rebuilt);

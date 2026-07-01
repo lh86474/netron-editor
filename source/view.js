@@ -1638,23 +1638,25 @@ view.View = class {
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
 
             const cloneFragSubgraph = (fragNode) => {
-                return {
-                    name: fragNode.name,
-                    type: fragNode.type ? Object.assign({}, fragNode.type) : null,
-                    attributes: (fragNode.attributes || []).map((attribute) => {
-                        if (attribute.type === 'graph' && attribute.value) {
-                            return {
-                                name: attribute.name,
-                                type: attribute.type,
-                                value: cloneGraph(attribute.value)
-                            };
-                        }
+                const cloneGraphAttribute = (attribute) => {
+                    if (attribute.type === 'graph' && attribute.value) {
                         return {
                             name: attribute.name,
                             type: attribute.type,
-                            value: attribute.value
+                            value: cloneGraph(attribute.value)
                         };
-                    }),
+                    }
+                    return {
+                        name: attribute.name,
+                        type: attribute.type,
+                        value: attribute.value
+                    };
+                };
+                return {
+                    name: fragNode.name,
+                    type: fragNode.type ? Object.assign({}, fragNode.type) : null,
+                    attributes: (fragNode.attributes || []).map(cloneGraphAttribute),
+                    blocks: (fragNode.blocks || []).map(cloneGraphAttribute),
                     inputs: (fragNode.inputs || []).map((input) => ({
                         name: input.name,
                         value: (input.value || []).map((val) => Object.assign({}, val))
@@ -1664,6 +1666,19 @@ view.View = class {
                         value: (output.value || []).map((val) => Object.assign({}, val))
                     }))
                 };
+            };
+
+            const ensureFragSubgraphGraphAttributes = (graph) => {
+                for (const node of graph.nodes || []) {
+                    if (node.type?.name !== 'FragSubgraph') {
+                        continue;
+                    }
+                    for (const entry of [...(node.attributes || []), ...(node.blocks || [])]) {
+                        if (entry.type === 'graph' && entry.value) {
+                            entry.value = cloneGraph(entry.value);
+                        }
+                    }
+                }
             };
 
             const keepFragSubgraphs = [];
@@ -1704,6 +1719,7 @@ view.View = class {
             }
 
             extracted = stripInlineExpansionPrefixes(extracted);
+            ensureFragSubgraphGraphAttributes(extracted);
             this._checkpointEditHistory();
             const ambapbPrimGraph = this._model && this._model._ambapb ? this._model._ambapb.primGraph : null;
             if (extractContext.replaceTarget) {

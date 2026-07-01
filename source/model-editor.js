@@ -736,13 +736,25 @@ const cloneExtractValue = (value, valueMap) => {
     return cloned;
 };
 
+const cloneExtractAttributeValue = (attribute) => {
+    if (attribute && attribute.type === 'graph' && attribute.value) {
+        return cloneGraph(attribute.value);
+    }
+    return cloneAttributeValue(attribute.value);
+};
+
 const cloneExtractNode = (node, valueMap) => ({
     name: node.name,
     type: readType(node.type),
     attributes: (node.attributes || []).map((attribute) => ({
         name: attribute.name,
         type: attribute.type,
-        value: cloneAttributeValue(attribute.value)
+        value: cloneExtractAttributeValue(attribute)
+    })),
+    blocks: (node.blocks || []).map((attribute) => ({
+        name: attribute.name,
+        type: attribute.type,
+        value: cloneExtractAttributeValue(attribute)
     })),
     inputs: (node.inputs || []).map((input) => ({
         name: input.name,

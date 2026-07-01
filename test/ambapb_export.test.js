@@ -210,4 +210,172 @@ describe('ambapb checkpoint export', () => {
         assert.equal(checkpoint.primGraphImmsAttribute.tensors.length, 1);
         assert.equal(checkpoint.primGraphImmsAttribute.tensors[0].name, 'conv0.weight');
     });
+
+    it('preserves FragSubgraph graph attributes during graph rebuild', () => {
+        const model = new onnx.ModelProto();
+        const graph = new onnx.GraphProto();
+        graph.name = 'runtime';
+        const fragNode = new onnx.NodeProto();
+        fragNode.name = 'frag_node';
+        fragNode.op_type = 'FragSubgraph';
+        const graphAttr = new onnx.AttributeProto();
+        graphAttr.name = 'graph';
+        graphAttr.type = onnx.AttributeProto.AttributeType.GRAPH;
+        const nestedGraph = new onnx.GraphProto();
+        nestedGraph.name = 'subgraph_body';
+        const innerNode = new onnx.NodeProto();
+        innerNode.name = 'inner_nvp';
+        innerNode.op_type = 'CVFlowNVP';
+        innerNode.input = ['sub_input_0'];
+        innerNode.output = ['sub_output_0'];
+        nestedGraph.node = [innerNode];
+        graphAttr.g = nestedGraph;
+        fragNode.attribute = [graphAttr];
+        graph.node = [fragNode];
+        model.graph = graph;
+
+        const extracted = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [{
+                name: 'frag_node',
+                type: { name: 'FragSubgraph' },
+                attributes: [{
+                    name: 'graph',
+                    type: 'graph',
+                    value: {
+                        name: 'subgraph_body',
+                        inputs: [],
+                        outputs: [],
+                        nodes: [{
+                            name: 'inner_nvp',
+                            type: { name: 'CVFlowNVP' },
+                            attributes: [],
+                            inputs: [{ name: 'input0', value: [{ name: 'sub_input_0' }] }],
+                            outputs: [{ name: 'output', value: [{ name: 'sub_output_0' }] }]
+                        }]
+                    }
+                }],
+                inputs: [],
+                outputs: []
+            }]
+        };
+
+        const rebuilt = rebuildGraphProtoFromModified(extracted, model);
+        const rebuiltFrag = rebuilt.node.find((node) => node.name === 'frag_node');
+        assert.ok(rebuiltFrag);
+        const rebuiltGraphAttr = rebuiltFrag.attribute.find((attr) => attr.name === 'graph');
+        assert.ok(rebuiltGraphAttr && rebuiltGraphAttr.g);
+        assert.equal(rebuiltGraphAttr.g.name, 'subgraph_body');
+        assert.equal(rebuiltGraphAttr.g.node.length, 1);
+        assert.equal(rebuiltGraphAttr.g.node[0].name, 'inner_nvp');
+    });
+
+    it('preserves FragSubgraph graph attributes during checkpoint compiled graph rebuild', () => {
+        const primGraph = loadSyntheticPrimGraph();
+        primGraph.raw.primitives.push({
+            id: 'inner_nvp',
+            'mangled-id': 'inner_nvp',
+            type: 'conv2ibesbcp',
+            'vas-sequence-number': 99,
+            'fragment-id': '',
+            sources: [{ id: 'data', port: 0 }],
+            oports: [{ id: 'sub_output_0', 'additional-dep-prim-ids': [] }],
+            attributes: {}
+        });
+        primGraph.primitives.push({
+            id: 'inner_nvp',
+            mangledId: 'inner_nvp',
+            type: 'conv2ibesbcp',
+            vasSequenceNumber: 99,
+            fragmentId: '',
+            sources: [{ id: 'data', port: 0 }],
+            oports: [{ id: 'sub_output_0', additionalDepPrimIds: [] }],
+            attributes: {},
+            raw: primGraph.raw.primitives[primGraph.raw.primitives.length - 1]
+        });
+        const proto = buildCheckpointModelProto(primGraph);
+        const wrapper = proto.graph.node[0];
+        const compiledAttr = new onnx.AttributeProto();
+        compiledAttr.name = 'compiled_prim_graph';
+        compiledAttr.type = onnx.AttributeProto.AttributeType.GRAPH;
+        const compiledGraph = new onnx.GraphProto();
+        compiledGraph.name = 'runtime';
+        const fragNode = new onnx.NodeProto();
+        fragNode.name = 'frag_node';
+        fragNode.op_type = 'FragSubgraph';
+        const graphAttr = new onnx.AttributeProto();
+        graphAttr.name = 'graph';
+        graphAttr.type = onnx.AttributeProto.AttributeType.GRAPH;
+        const nestedGraph = new onnx.GraphProto();
+        nestedGraph.name = 'subgraph_body';
+        const innerNode = new onnx.NodeProto();
+        innerNode.name = 'inner_nvp';
+        innerNode.op_type = 'CVFlowNVP';
+        innerNode.input = ['sub_input_0'];
+        innerNode.output = ['sub_output_0'];
+        nestedGraph.node = [innerNode];
+        graphAttr.g = nestedGraph;
+        fragNode.attribute = [graphAttr];
+        const batchNode = new onnx.NodeProto();
+        batchNode.name = 'batch_call';
+        batchNode.op_type = 'BatchCall';
+        const graphIdAttr = new onnx.AttributeProto();
+        graphIdAttr.name = 'graph_id';
+        graphIdAttr.type = onnx.AttributeProto.AttributeType.STRING;
+        graphIdAttr.s = new TextEncoder().encode('subgraph_body');
+        batchNode.attribute = [graphIdAttr];
+        compiledGraph.node = [fragNode, batchNode];
+        compiledAttr.g = compiledGraph;
+        wrapper.attribute.push(compiledAttr);
+
+        const extracted = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'frag_node',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{
+                        name: 'graph',
+                        type: 'graph',
+                        value: {
+                            name: 'subgraph_body',
+                            inputs: [],
+                            outputs: [],
+                            nodes: [{
+                                name: 'inner_nvp',
+                                type: { name: 'CVFlowNVP' },
+                                attributes: [],
+                                inputs: [{ name: 'input0', value: [{ name: 'sub_input_0' }] }],
+                                outputs: [{ name: 'output', value: [{ name: 'sub_output_0' }] }]
+                            }]
+                        }
+                    }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'batch_call',
+                    type: { name: 'BatchCall' },
+                    attributes: [{ name: 'graph_id', type: 'string', value: 'subgraph_body' }],
+                    inputs: [{ name: 'input0', value: [{ name: 'producer_out' }] }],
+                    outputs: [{ name: 'output', value: [{ name: 'batch_out' }] }]
+                }
+            ]
+        };
+
+        const rebuilt = rebuildGraphProtoFromModified(extracted, proto);
+        const rebuiltCompiled = rebuilt.node[0].attribute.find((attr) => attr.name === 'compiled_prim_graph');
+        assert.ok(rebuiltCompiled && rebuiltCompiled.g);
+        const rebuiltFrag = rebuiltCompiled.g.node.find((node) => node.name === 'frag_node');
+        assert.ok(rebuiltFrag);
+        const rebuiltGraphAttr = rebuiltFrag.attribute.find((attr) => attr.name === 'graph');
+        assert.ok(rebuiltGraphAttr && rebuiltGraphAttr.g);
+        assert.equal(rebuiltGraphAttr.g.name, 'subgraph_body');
+        assert.equal(rebuiltGraphAttr.g.node.length, 1);
+        assert.equal(rebuiltGraphAttr.g.node[0].name, 'inner_nvp');
+    });
 });

@@ -317,6 +317,74 @@ const collectArgumentValueNamesFromGraph = (graph) => {
     return names;
 };
 
+const collectRuntimeNodeNamesDeep = (graph) => {
+    const names = new Set();
+    const visit = (entry) => {
+        if (!entry) {
+            return;
+        }
+        for (const node of entry.nodes || []) {
+            if (node && node.name) {
+                names.add(node.name);
+            }
+            for (const attribute of [...(node.attributes || []), ...(node.blocks || [])]) {
+                if (attribute && attribute.type === 'graph' && attribute.value) {
+                    visit(attribute.value);
+                }
+            }
+        }
+    };
+    visit(graph);
+    return names;
+};
+
+const runtimeNameMatchesPrimitive = (nodeName, prim) => {
+    if (!nodeName || !prim) {
+        return false;
+    }
+    if (nodeName === prim.id || nodeName === prim.mangledId) {
+        return true;
+    }
+    if (prim.id && (nodeName.startsWith(`${prim.id}_`) || nodeName.startsWith(`${prim.id}:`))) {
+        return true;
+    }
+    if (prim.mangledId && (nodeName.startsWith(`${prim.mangledId}_`) || nodeName.startsWith(`${prim.mangledId}:`))) {
+        return true;
+    }
+    if (prim.fragmentId && nodeName.includes(prim.fragmentId)) {
+        return true;
+    }
+    return false;
+};
+
+const closePrimGraphDependencies = (kept, byId) => {
+    let growing = true;
+    while (growing) {
+        growing = false;
+        for (const id of kept) {
+            const prim = byId.get(id);
+            if (!prim) {
+                continue;
+            }
+            for (const source of prim.sources || []) {
+                if (source.id && byId.has(source.id) && !kept.has(source.id)) {
+                    kept.add(source.id);
+                    growing = true;
+                }
+            }
+            for (const oport of prim.oports || []) {
+                for (const depId of oport.additionalDepPrimIds || []) {
+                    if (depId && byId.has(depId) && !kept.has(depId)) {
+                        kept.add(depId);
+                        growing = true;
+                    }
+                }
+            }
+        }
+    }
+    return kept;
+};
+
 export const resolveKeptPrimitiveIds = (modifiedGraph, primGraph) => {
     const kept = new Set();
     if (!modifiedGraph || !primGraph || !Array.isArray(primGraph.primitives)) {
@@ -324,7 +392,7 @@ export const resolveKeptPrimitiveIds = (modifiedGraph, primGraph) => {
     }
     const primitives = primGraph.primitives;
     const byId = new Map(primitives.map((prim) => [prim.id, prim]));
-    const nodeNames = new Set((modifiedGraph.nodes || []).map((node) => node.name).filter(Boolean));
+    const nodeNames = collectRuntimeNodeNamesDeep(modifiedGraph);
     const valueNames = collectArgumentValueNamesFromGraph(modifiedGraph);
 
     const add = (id) => {
@@ -341,8 +409,10 @@ export const resolveKeptPrimitiveIds = (modifiedGraph, primGraph) => {
     }
 
     for (const prim of primitives) {
-        if (nodeNames.has(prim.id) || (prim.mangledId && nodeNames.has(prim.mangledId))) {
-            add(prim.id);
+        for (const nodeName of nodeNames) {
+            if (runtimeNameMatchesPrimitive(nodeName, prim)) {
+                add(prim.id);
+            }
         }
         for (const oport of prim.oports || []) {
             if (oport.id && valueNames.has(oport.id)) {
@@ -354,42 +424,26 @@ export const resolveKeptPrimitiveIds = (modifiedGraph, primGraph) => {
         }
     }
 
-    let growing = true;
-    while (growing) {
-        growing = false;
-        for (const id of kept) {
-            const prim = byId.get(id);
-            if (!prim) {
-                continue;
-            }
-            for (const source of prim.sources || []) {
-                if (source.id && !kept.has(source.id)) {
-                    const upstream = byId.get(source.id);
-                    if (upstream && (upstream.type === 'input' || valueNames.has(source.id) || keptHasProducer(kept, byId, source.id, valueNames))) {
-                        kept.add(source.id);
-                        growing = true;
-                    }
-                }
-            }
-        }
-    }
+    closePrimGraphDependencies(kept, byId);
 
     return kept;
 };
 
-const keptHasProducer = (kept, byId, valueName, valueNames) => {
-    for (const id of kept) {
-        const prim = byId.get(id);
-        if (!prim) {
+const sanitizeSlicedPrimGraphRaw = (slicedRaw, idSet) => {
+    for (const entry of slicedRaw.primitives || []) {
+        if (!entry || !entry.id) {
             continue;
         }
-        for (const oport of prim.oports || []) {
-            if (oport.id === valueName) {
-                return true;
+        if (Array.isArray(entry.sources)) {
+            entry.sources = entry.sources.filter((source) => source && source.id && idSet.has(source.id));
+        }
+        for (const oport of entry.oports || []) {
+            if (!oport || !Array.isArray(oport['additional-dep-prim-ids'])) {
+                continue;
             }
+            oport['additional-dep-prim-ids'] = oport['additional-dep-prim-ids'].filter((depId) => depId && idSet.has(depId));
         }
     }
-    return valueNames.has(valueName);
 };
 
 export const collectImmediateTensorNames = (primitives) => {
@@ -420,6 +474,7 @@ export const slicePrimGraph = (primGraph, keptIds) => {
     const slicedRaw = Object.assign({}, primGraph.raw, {
         primitives: primGraph.raw.primitives.filter((entry) => entry && idSet.has(entry.id))
     });
+    sanitizeSlicedPrimGraphRaw(slicedRaw, idSet);
 
     const inputPrim = slicedRaw.primitives.find((entry) => entry.type === 'input');
     const outputPrim = slicedRaw.primitives.find((entry) => entry.type === 'output');
