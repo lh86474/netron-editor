@@ -208,6 +208,164 @@ const cloneAttributeProto = (attribute) => {
     return onnx.ModelProto.decode(BinaryReader.open(bytes)).graph.node[0].attribute[0];
 };
 
+const cloneTensorProto = (tensor) => {
+    if (!tensor) {
+        return null;
+    }
+    const attribute = new onnx.AttributeProto();
+    attribute.name = '_tensor';
+    attribute.type = onnx.AttributeProto.AttributeType.TENSOR;
+    attribute.t = tensor;
+    const cloned = cloneAttributeProto(attribute);
+    return cloned && cloned.t ? cloned.t : null;
+};
+
+const buildImmsAttributeProto = (tensors, originalAttribute) => {
+    const attribute = new onnx.AttributeProto();
+    attribute.name = PRIM_GRAPH_IMMS_ATTRIBUTE;
+    attribute.type = onnx.AttributeProto.AttributeType.TENSORS;
+    attribute.tensors = tensors;
+    if (originalAttribute && originalAttribute.doc_string) {
+        attribute.doc_string = originalAttribute.doc_string;
+    }
+    return attribute;
+};
+
+const isEditorTensorProtoLike = (value) => Boolean(
+    value && typeof value === 'object' && (
+        value.raw_data !== undefined ||
+        value.float_data !== undefined ||
+        value.int32_data !== undefined ||
+        value.int64_data !== undefined ||
+        Array.isArray(value.dims) ||
+        value.data_type !== undefined ||
+        value.dataType !== undefined
+    )
+);
+
+const resolveEditorTensorProto = (value) => {
+    if (!value) {
+        return null;
+    }
+    if (isEditorTensorProtoLike(value)) {
+        return cloneTensorProto(value);
+    }
+    if (typeof value === 'object' && value.values !== undefined) {
+        try {
+            const raw = value.values;
+            if (raw instanceof Uint8Array) {
+                const tensor = new onnx.TensorProto();
+                tensor.data_type = onnx.TensorProto.DataType.UINT8;
+                tensor.dims = [BigInt(raw.length)];
+                tensor.raw_data = raw.slice();
+                if (typeof value.name === 'string' && value.name.length > 0) {
+                    tensor.name = value.name;
+                }
+                return tensor;
+            }
+            if (ArrayBuffer.isView(raw) || Array.isArray(raw)) {
+                const tensor = new onnx.TensorProto();
+                tensor.data_type = onnx.TensorProto.DataType.FLOAT;
+                tensor.float_data = Array.from(raw);
+                const shape = value.type && value.type.shape ? value.type.shape.dimensions : null;
+                if (Array.isArray(shape) && shape.length > 0) {
+                    tensor.dims = shape.map((dim) => BigInt(dim));
+                } else {
+                    tensor.dims = [BigInt(tensor.float_data.length)];
+                }
+                if (typeof value.name === 'string' && value.name.length > 0) {
+                    tensor.name = value.name;
+                }
+                return tensor;
+            }
+        } catch {
+            return null;
+        }
+    }
+    return null;
+};
+
+const resolveImmsTensorsFromModified = (value) => {
+    if (!Array.isArray(value) || value.length === 0) {
+        return [];
+    }
+    const tensors = [];
+    for (const entry of value) {
+        const tensor = resolveEditorTensorProto(entry);
+        if (tensor) {
+            tensors.push(tensor);
+        }
+    }
+    return tensors;
+};
+
+const buildImmsAttributeFromModified = (value, originalAttribute) => {
+    const modifiedTensors = resolveImmsTensorsFromModified(value);
+    if (modifiedTensors.length > 0) {
+        return buildImmsAttributeProto(modifiedTensors, originalAttribute);
+    }
+    if (originalAttribute && Array.isArray(originalAttribute.tensors) && originalAttribute.tensors.length > 0) {
+        return buildImmsAttributeProto(
+            originalAttribute.tensors.map((tensor) => cloneTensorProto(tensor)).filter((tensor) => tensor !== null),
+            originalAttribute
+        );
+    }
+    if (originalAttribute) {
+        return cloneAttributeProto(originalAttribute);
+    }
+    return null;
+};
+
+const buildGenericTensorAttributeProto = (name, tensor, originalAttribute) => {
+    const attribute = new onnx.AttributeProto();
+    attribute.name = name;
+    attribute.type = onnx.AttributeProto.AttributeType.TENSOR;
+    attribute.t = tensor;
+    if (originalAttribute && originalAttribute.doc_string) {
+        attribute.doc_string = originalAttribute.doc_string;
+    }
+    return attribute;
+};
+
+const buildGenericTensorsAttributeProto = (name, tensors, originalAttribute) => {
+    const attribute = new onnx.AttributeProto();
+    attribute.name = name;
+    attribute.type = onnx.AttributeProto.AttributeType.TENSORS;
+    attribute.tensors = tensors;
+    if (originalAttribute && originalAttribute.doc_string) {
+        attribute.doc_string = originalAttribute.doc_string;
+    }
+    return attribute;
+};
+
+const buildGenericTensorAttributeFromModified = (name, type, value, originalAttribute) => {
+    if (type === 'tensor[]') {
+        const modifiedTensors = resolveImmsTensorsFromModified(value);
+        if (modifiedTensors.length > 0) {
+            return buildGenericTensorsAttributeProto(name, modifiedTensors, originalAttribute);
+        }
+        if (originalAttribute && Array.isArray(originalAttribute.tensors) && originalAttribute.tensors.length > 0) {
+            return buildGenericTensorsAttributeProto(
+                name,
+                originalAttribute.tensors.map((tensor) => cloneTensorProto(tensor)).filter(Boolean),
+                originalAttribute
+            );
+        }
+    } else {
+        const tensor = resolveEditorTensorProto(value);
+        if (tensor) {
+            return buildGenericTensorAttributeProto(name, tensor, originalAttribute);
+        }
+        if (originalAttribute && originalAttribute.t) {
+            return buildGenericTensorAttributeProto(name, cloneTensorProto(originalAttribute.t), originalAttribute);
+        }
+    }
+    if (originalAttribute) {
+        return cloneAttributeProto(originalAttribute);
+    }
+    return null;
+};
+
 const modifiedGraphArguments = (node) => {
     if (!node) {
         return [];
@@ -258,9 +416,44 @@ const protoHasCompiledPrimGraph = (wrapperNode) => {
     return wrapperNode.attribute.some((attribute) => attribute && attribute.name === COMPILED_PRIM_GRAPH_ATTRIBUTE);
 };
 
-const buildTensorAttributeProto = (name, value, originalAttribute) => {
-    if (name === PRIM_GRAPH_ATTRIBUTE_NAME && typeof value === 'string') {
+const buildPrimGraphAttributeFromModified = (value, originalAttribute) => {
+    if (typeof value === 'string') {
         return buildPrimGraphAttributeProto(value, originalAttribute);
+    }
+    try {
+        const primGraph = parsePrimGraphJson(value);
+        return buildPrimGraphAttributeProto(serializePrimGraphJson(primGraph), originalAttribute);
+    } catch (error) {
+        if (originalAttribute && originalAttribute.t) {
+            try {
+                const primGraph = parsePrimGraphJson(originalAttribute.t);
+                return buildPrimGraphAttributeProto(serializePrimGraphJson(primGraph), originalAttribute);
+            } catch {
+                // fall through
+            }
+        }
+        if (originalAttribute) {
+            return cloneAttributeProto(originalAttribute);
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        throw new OnnxExportError(`Unsupported tensor attribute '${PRIM_GRAPH_ATTRIBUTE_NAME}' for export (${message}).`);
+    }
+};
+
+const buildTensorAttributeProto = (name, value, originalAttribute, attributeType = 'tensor') => {
+    if (name === PRIM_GRAPH_ATTRIBUTE_NAME) {
+        return buildPrimGraphAttributeFromModified(value, originalAttribute);
+    }
+    if (name === PRIM_GRAPH_IMMS_ATTRIBUTE) {
+        const immsAttribute = buildImmsAttributeFromModified(value, originalAttribute);
+        if (immsAttribute) {
+            return immsAttribute;
+        }
+        throw new OnnxExportError(`Unsupported tensor attribute '${name}' for export.`);
+    }
+    const genericAttribute = buildGenericTensorAttributeFromModified(name, attributeType, value, originalAttribute);
+    if (genericAttribute) {
+        return genericAttribute;
     }
     if (originalAttribute) {
         return cloneAttributeProto(originalAttribute);
@@ -690,8 +883,35 @@ const syncNodeAttributesFromModified = (protoNode, modifiedNode, originalNodesBy
         }
         handled.add(modifiedAttribute.name);
         const originalAttribute = originalByName.get(modifiedAttribute.name);
-        if (modifiedAttribute.name === PRIM_GRAPH_ATTRIBUTE_NAME && typeof modifiedAttribute.value === 'string') {
-            attributes.push(buildPrimGraphAttributeProto(modifiedAttribute.value, originalAttribute));
+        if (modifiedAttribute.name === PRIM_GRAPH_ATTRIBUTE_NAME) {
+            if (typeof modifiedAttribute.value === 'string') {
+                attributes.push(buildPrimGraphAttributeFromModified(modifiedAttribute.value, originalAttribute));
+                continue;
+            }
+            if (isTensorAttributeType(modifiedAttribute.type)) {
+                try {
+                    attributes.push(buildPrimGraphAttributeFromModified(modifiedAttribute.value, originalAttribute));
+                } catch (error) {
+                    if (originalAttribute) {
+                        throw error;
+                    }
+                    // Ignore unparseable view placeholders; checkpoint wrapper rebuild owns prim_graph.
+                }
+                continue;
+            }
+        }
+        if (modifiedAttribute.name === PRIM_GRAPH_IMMS_ATTRIBUTE && isTensorAttributeType(modifiedAttribute.type)) {
+            try {
+                const immsAttribute = buildImmsAttributeFromModified(modifiedAttribute.value, originalAttribute);
+                if (immsAttribute) {
+                    attributes.push(immsAttribute);
+                }
+            } catch (error) {
+                if (originalAttribute) {
+                    throw error;
+                }
+                // Ignore empty view placeholders; checkpoint wrapper rebuild owns prim_graph_imms.
+            }
             continue;
         }
         if (isGraphAttributeType(modifiedAttribute.type) && modifiedAttribute.value) {
@@ -712,11 +932,22 @@ const syncNodeAttributesFromModified = (protoNode, modifiedNode, originalNodesBy
             continue;
         }
         if (isTensorAttributeType(modifiedAttribute.type)) {
-            attributes.push(buildTensorAttributeProto(
-                modifiedAttribute.name,
-                modifiedAttribute.value,
-                originalAttribute
-            ));
+            try {
+                const tensorAttribute = buildTensorAttributeProto(
+                    modifiedAttribute.name,
+                    modifiedAttribute.value,
+                    originalAttribute,
+                    modifiedAttribute.type
+                );
+                if (tensorAttribute) {
+                    attributes.push(tensorAttribute);
+                }
+            } catch (error) {
+                if (originalAttribute) {
+                    throw error;
+                }
+                // Ignore unencodable view placeholders without proto fallback.
+            }
             continue;
         }
         if (originalAttribute && shouldPreserveOriginalAttribute(originalAttribute)) {
@@ -962,17 +1193,6 @@ const loadCheckpointImmsTensors = (wrapperNode) => {
         return [];
     }
     return immsAttr.tensors;
-};
-
-const buildImmsAttributeProto = (tensors, originalAttribute) => {
-    const attribute = new onnx.AttributeProto();
-    attribute.name = PRIM_GRAPH_IMMS_ATTRIBUTE;
-    attribute.type = onnx.AttributeProto.AttributeType.TENSORS;
-    attribute.tensors = tensors;
-    if (originalAttribute && originalAttribute.doc_string) {
-        attribute.doc_string = originalAttribute.doc_string;
-    }
-    return attribute;
 };
 
 const buildCompiledGraphAttributeProto = (graphBody, originalAttribute) => {

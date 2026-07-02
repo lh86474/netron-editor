@@ -427,6 +427,220 @@ describe('ambapb checkpoint export', () => {
         assert.equal(compiledAttr.g.node.length, 3);
     });
 
+    it('exports UserDefSubgraph with tensor-valued prim_graph after CVFlowNVP + BatchCall selection', () => {
+        const primGraph = loadSyntheticPrimGraph();
+        const producerPrimGraph = {
+            primitives: [{
+                id: 'producer_prim',
+                type: 'input',
+                attributes: { name: 'data_in' }
+            }]
+        };
+        const producerPrimGraphBytes = new TextEncoder().encode(JSON.stringify(producerPrimGraph));
+        const producerPrimGraphTensor = {
+            data_type: onnx.TensorProto.DataType.UINT8,
+            dims: [BigInt(producerPrimGraphBytes.length)],
+            raw_data: producerPrimGraphBytes
+        };
+        const producerImmsTensor = {
+            name: 'producer.weight',
+            data_type: onnx.TensorProto.DataType.FLOAT,
+            dims: [BigInt(2)],
+            float_data: [0.5, 1.5]
+        };
+
+        const proto = buildCheckpointModelProto(primGraph);
+        const wrapper = proto.graph.node[0];
+        const compiledAttr = new onnx.AttributeProto();
+        compiledAttr.name = COMPILED_PRIM_GRAPH_ATTRIBUTE;
+        compiledAttr.type = onnx.AttributeProto.AttributeType.GRAPH;
+        const compiledGraph = new onnx.GraphProto();
+        compiledGraph.name = 'runtime';
+
+        const producerNode = new onnx.NodeProto();
+        producerNode.name = 'producer';
+        producerNode.op_type = 'CVFlowNVP';
+        producerNode.output = ['producer_out'];
+        const producerPrimGraphAttr = new onnx.AttributeProto();
+        producerPrimGraphAttr.name = PRIM_GRAPH_ATTRIBUTE;
+        producerPrimGraphAttr.type = onnx.AttributeProto.AttributeType.TENSOR;
+        const producerTensor = new onnx.TensorProto();
+        producerTensor.data_type = onnx.TensorProto.DataType.UINT8;
+        producerTensor.dims = [BigInt(producerPrimGraphBytes.length)];
+        producerTensor.raw_data = producerPrimGraphBytes;
+        producerPrimGraphAttr.t = producerTensor;
+        const producerImmsAttr = new onnx.AttributeProto();
+        producerImmsAttr.name = 'prim_graph_imms';
+        producerImmsAttr.type = onnx.AttributeProto.AttributeType.TENSORS;
+        producerImmsAttr.tensors = [producerImmsTensor];
+        producerNode.attribute = [producerPrimGraphAttr, producerImmsAttr];
+
+        const fragNode = new onnx.NodeProto();
+        fragNode.name = 'frag';
+        fragNode.op_type = 'FragSubgraph';
+        const fragGraphAttr = new onnx.AttributeProto();
+        fragGraphAttr.name = COMPILED_PRIM_GRAPH_ATTRIBUTE;
+        fragGraphAttr.type = onnx.AttributeProto.AttributeType.GRAPH;
+        const fragInnerGraph = new onnx.GraphProto();
+        fragInnerGraph.name = 'subgraph_body';
+        const innerNode = new onnx.NodeProto();
+        innerNode.name = 'inner_nvp';
+        innerNode.op_type = 'CVFlowNVP';
+        innerNode.input = ['sub_input_0'];
+        innerNode.output = ['sub_output_0'];
+        fragInnerGraph.node = [innerNode];
+        fragGraphAttr.g = fragInnerGraph;
+        fragNode.attribute = [fragGraphAttr];
+
+        const batchCallNode = new onnx.NodeProto();
+        batchCallNode.name = 'batch_call';
+        batchCallNode.op_type = 'BatchCall';
+        batchCallNode.input = ['producer_out'];
+        batchCallNode.output = ['batch_out'];
+
+        const consumerNode = new onnx.NodeProto();
+        consumerNode.name = 'consumer';
+        consumerNode.op_type = 'CVFlowNVP';
+        consumerNode.input = ['batch_out'];
+        consumerNode.output = ['consumer_out'];
+
+        compiledGraph.node = [fragNode, producerNode, batchCallNode, consumerNode];
+        compiledAttr.g = compiledGraph;
+        wrapper.attribute.push(compiledAttr);
+
+        const extractedSubgraph = {
+            name: 'userdefsubgraph_0',
+            inputs: [],
+            outputs: [{ name: 'output', value: [{ name: 'batch_out' }] }],
+            nodes: [
+                {
+                    name: 'producer',
+                    type: { name: 'CVFlowNVP', identifier: 'CVFlowNVP' },
+                    attributes: [
+                        {
+                            name: PRIM_GRAPH_ATTRIBUTE,
+                            type: 'tensor',
+                            value: producerPrimGraphTensor
+                        },
+                        {
+                            name: 'prim_graph_imms',
+                            type: 'tensor[]',
+                            value: [producerImmsTensor]
+                        },
+                        {
+                            name: 'vas_vdg',
+                            type: 'tensor',
+                            value: {
+                                data_type: onnx.TensorProto.DataType.UINT8,
+                                dims: [BigInt(4)],
+                                raw_data: new Uint8Array([1, 2, 3, 4])
+                            }
+                        }
+                    ],
+                    inputs: [],
+                    outputs: [{ name: 'output', value: [{ name: 'producer_out' }] }]
+                },
+                {
+                    name: 'batch_call',
+                    type: { name: 'BatchCall', identifier: 'BatchCall' },
+                    attributes: [
+                        { name: 'graph_id', type: 'string', value: 'subgraph_body' },
+                        { name: 'src_mappings', type: 'string', value: JSON.stringify([{ id: 'sub_input_0', index: 0 }]) },
+                        { name: 'out_mappings', type: 'string', value: JSON.stringify([{ id: 'sub_output_0', index: 0 }]) }
+                    ],
+                    inputs: [{ name: 'input0', value: [{ name: 'producer_out' }] }],
+                    outputs: [{ name: 'output', value: [{ name: 'batch_out' }] }]
+                },
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph', identifier: 'FragSubgraph' },
+                    attributes: [{
+                        name: COMPILED_PRIM_GRAPH_ATTRIBUTE,
+                        type: 'graph',
+                        value: {
+                            name: 'subgraph_body',
+                            inputs: [{ name: 'sub_input_0', value: [{ name: 'sub_input_0' }] }],
+                            outputs: [{ name: 'sub_output_0', value: [{ name: 'sub_output_0' }] }],
+                            nodes: [{
+                                name: 'inner_nvp',
+                                type: { name: 'CVFlowNVP' },
+                                attributes: [],
+                                inputs: [{ name: 'input0', value: [{ name: 'sub_input_0' }] }],
+                                outputs: [{ name: 'output', value: [{ name: 'sub_output_0' }] }]
+                            }]
+                        }
+                    }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+
+        const runtimeGraph = {
+            name: 'runtime',
+            _ambapbCompiledGraph: true,
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph', identifier: 'FragSubgraph' },
+                    attributes: extractedSubgraph.nodes[2].attributes,
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'userdefsubgraph_0',
+                    type: { name: 'UserDefSubgraph', identifier: 'UserDefSubgraph', module: 'com.ambarella' },
+                    attributes: [{ name: 'graph', type: 'graph', value: extractedSubgraph }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'userDefCall_0',
+                    type: { name: 'UserDefCall', identifier: 'UserDefCall', module: 'com.ambarella' },
+                    attributes: [
+                        { name: 'graph_id', type: 'string', value: 'userdefsubgraph_0' },
+                        { name: 'src_mappings', type: 'string', value: JSON.stringify([{ id: 'producer_out', index: 0 }]) },
+                        { name: 'out_mappings', type: 'string', value: JSON.stringify([{ id: 'batch_out', index: 0 }]) }
+                    ],
+                    inputs: [{ name: 'input0', value: [{ name: 'producer_out' }] }],
+                    outputs: [{ name: 'output', value: [{ name: 'batch_out' }] }]
+                },
+                {
+                    name: 'consumer',
+                    type: { name: 'CVFlowNVP', identifier: 'CVFlowNVP' },
+                    attributes: [],
+                    inputs: [{ name: 'input', value: [{ name: 'batch_out' }] }],
+                    outputs: [{ name: 'output', value: [{ name: 'consumer_out' }] }]
+                }
+            ]
+        };
+
+        const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(runtimeGraph, proto, primGraph);
+        assert.ok(rebuilt && rebuilt.graph);
+        const compiled = rebuilt.graph.node[0].attribute.find((attr) => attr.name === COMPILED_PRIM_GRAPH_ATTRIBUTE);
+        assert.ok(compiled && compiled.g);
+        const userDefSubgraphNode = compiled.g.node.find((node) => node.name === 'userdefsubgraph_0');
+        assert.ok(userDefSubgraphNode);
+        const graphAttr = userDefSubgraphNode.attribute.find((attr) => attr.name === 'graph');
+        assert.ok(graphAttr && graphAttr.g);
+        const nestedProducer = graphAttr.g.node.find((node) => node.name === 'producer');
+        assert.ok(nestedProducer);
+        const nestedPrimGraphAttr = nestedProducer.attribute.find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
+        assert.ok(nestedPrimGraphAttr && nestedPrimGraphAttr.t);
+        const parsed = parsePrimGraphJson(nestedPrimGraphAttr.t);
+        assert.equal(parsed.primitives[0].id, 'producer_prim');
+        const nestedImmsAttr = nestedProducer.attribute.find((attr) => attr.name === 'prim_graph_imms');
+        assert.ok(nestedImmsAttr && Array.isArray(nestedImmsAttr.tensors));
+        assert.equal(nestedImmsAttr.tensors.length, 1);
+        assert.equal(nestedImmsAttr.tensors[0].name, 'producer.weight');
+        assert.deepEqual(Array.from(nestedImmsAttr.tensors[0].float_data), [0.5, 1.5]);
+        const nestedVasVdgAttr = nestedProducer.attribute.find((attr) => attr.name === 'vas_vdg');
+        assert.ok(nestedVasVdgAttr && nestedVasVdgAttr.t);
+        assert.deepEqual(Array.from(nestedVasVdgAttr.t.raw_data), [1, 2, 3, 4]);
+    });
+
     it('preserves FragSubgraph graph attributes during graph rebuild', () => {
         const model = new onnx.ModelProto();
         const graph = new onnx.GraphProto();
