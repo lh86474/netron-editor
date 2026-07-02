@@ -1145,6 +1145,13 @@ export const rebuildGraphProtoFromModifiedWithAmbapb = (modifiedGraph, sourcePro
     );
 };
 
+const applyCheckpointGraphFromModified = (graph, originalProto, editSession, ambapbPrimGraph) => {
+    const modifiedGraph = editSession.modified.getGraph(0);
+    const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(modifiedGraph, originalProto, ambapbPrimGraph);
+    Object.assign(graph, rebuilt.graph);
+    return rebuilt.slicedPrimGraph;
+};
+
 // This supports node insertions and deletions by rebuilding graph.node from the modified graph.
 const applyStructuralNodeChanges = (graph, originalProto, editSession) => {
     const changes = editSession.delta.getChanges();
@@ -1191,9 +1198,10 @@ const applyStructuralNodeChanges = (graph, originalProto, editSession) => {
 
 // This applies the changes to the graph
 // delta is our tracker that contains what we have changed. 
-const applyChanges = (cloned, originalProto, editSession) => {
+const applyChanges = (cloned, originalProto, editSession, options = {}) => {
     const graph = cloned.graph;
     const changes = editSession.delta.getChanges();
+    const checkpointWrapper = findCVFlowNVPNode(originalProto.graph);
 
     for (const change of changes) {
         if (change.entityType === 'node' && change.property === 'name') {
@@ -1273,7 +1281,11 @@ const applyChanges = (cloned, originalProto, editSession) => {
         renameInGraph(graph, oldName, newName);
     }
 
-    applyStructuralNodeChanges(graph, originalProto, editSession);
+    if (checkpointWrapper) {
+        applyCheckpointGraphFromModified(graph, originalProto, editSession, options.ambapbPrimGraph || null);
+    } else {
+        applyStructuralNodeChanges(graph, originalProto, editSession);
+    }
 };
 
 export const canExportOnnx = (model) => {
@@ -1318,7 +1330,9 @@ export const exportModifiedOnnx = (model, editSession) => {
             model._ambapb.primGraph = rebuilt.slicedPrimGraph;
         }
     } else {
-        applyChanges(cloned, proto, editSession);
+        applyChanges(cloned, proto, editSession, {
+            ambapbPrimGraph: model._ambapb && model._ambapb.primGraph ? model._ambapb.primGraph : null
+        });
     }
     normalizeGraphReferences(cloned.graph);
     validateModel(cloned);

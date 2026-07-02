@@ -2555,7 +2555,16 @@ view.View = class {
             this._editSession.replaceGraph(graphIndex, modifiedGraph);
 
             if (this._model && this._model.proto) {
-                this._model.proto.graph = rebuildGraphProtoFromModified(modifiedGraph, this._model.proto);
+                const ambapbPrimGraph = this._model._ambapb ? this._model._ambapb.primGraph : null;
+                const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
+                    modifiedGraph,
+                    this._model.proto,
+                    ambapbPrimGraph
+                );
+                this._model.proto.graph = rebuilt.graph;
+                if (rebuilt.slicedPrimGraph && this._model._ambapb) {
+                    this._model._ambapb.primGraph = rebuilt.slicedPrimGraph;
+                }
             }
 
             for (const callName of callsToInline) {
