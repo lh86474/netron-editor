@@ -22,7 +22,7 @@ import {
     PRIM_GRAPH_IMMS_ATTRIBUTE,
     resolveCheckpointRuntimeGraph
 } from './ambapb-editor.js';
-import { canonicalizeTensorTypeString, tensorDataTypeByName } from './tensor-type.js';
+import { canonicalizeTensorTypeString, formatConnectionType, tensorDataTypeByName } from './tensor-type.js';
 // class to create the ONNXExportError
 // Holds the error message and has property ONNX Export Error
 // from parent class Error
@@ -971,6 +971,9 @@ const syncNodeAttributesFromModified = (protoNode, modifiedNode, originalNodesBy
 const syncNodeFromModified = (protoNode, modifiedNode, originalNodesByName = null, nestedSourceGraph = null) => {
     syncNodeInputsOutputs(protoNode, modifiedNode);
     protoNode.name = modifiedNode.name || '';
+    if (modifiedNode.description !== undefined && modifiedNode.description !== null) {
+        protoNode.doc_string = String(modifiedNode.description);
+    }
     protoNode.op_type = modifiedNode.type ? (modifiedNode.type.identifier || modifiedNode.type.name) : protoNode.op_type;
     if (modifiedNode.type && modifiedNode.type.module && modifiedNode.type.module !== 'ai.onnx') {
         protoNode.domain = modifiedNode.type.module;
@@ -1061,6 +1064,39 @@ const buildGraphValueInfo = (argument, sourceGraph, usedNames) => {
     return infos;
 };
 
+const buildValueInfoFromModifiedGraph = (modifiedGraph, sourceGraph, usedNames, graphIndex = 0) => {
+    const valueInfoByName = new Map();
+    for (const valueInfo of sourceGraph.value_info || []) {
+        if (valueInfo.name && usedNames.has(valueInfo.name)) {
+            valueInfoByName.set(valueInfo.name, copyValueInfo(valueInfo));
+        }
+    }
+    for (const [value] of enumerateGraphValues(modifiedGraph, graphIndex)) {
+        const name = value && value.name;
+        if (!name || !usedNames.has(name)) {
+            continue;
+        }
+        let valueInfo = valueInfoByName.get(name);
+        if (!valueInfo) {
+            valueInfo = new onnx.ValueInfoProto();
+            valueInfo.name = name;
+            valueInfoByName.set(name, valueInfo);
+        }
+        const typeText = formatConnectionType(value.type);
+        if (typeText) {
+            try {
+                valueInfo.type = parseTensorTypeString(typeText);
+            } catch {
+                // Keep the source type when the modified type cannot be parsed for export.
+            }
+        }
+        if (value.description !== undefined && value.description !== null) {
+            valueInfo.doc_string = String(value.description);
+        }
+    }
+    return Array.from(valueInfoByName.values());
+};
+
 const syncGraphBoundaryFromModified = (graph, modifiedGraph, sourceGraph) => {
     const usedNames = collectArgumentValueNamesFromGraph(modifiedGraph);
     const input = [];
@@ -1073,7 +1109,7 @@ const syncGraphBoundaryFromModified = (graph, modifiedGraph, sourceGraph) => {
     }
     graph.input = input;
     graph.output = output;
-    graph.value_info = (sourceGraph.value_info || []).filter((value) => value.name && usedNames.has(value.name));
+    graph.value_info = buildValueInfoFromModifiedGraph(modifiedGraph, sourceGraph, usedNames);
     graph.initializer = (sourceGraph.initializer || []).filter((tensor) => tensor.name && usedNames.has(tensor.name));
     graph.sparse_initializer = (sourceGraph.sparse_initializer || []).filter((tensor) => {
         const valuesName = tensor.values && tensor.values.name;
@@ -1148,7 +1184,7 @@ const buildGraphProtoFromModifiedGraph = (modifiedGraph, sourceGraphProto, origi
     for (const modifiedOutput of modifiedGraph.outputs || []) {
         output.push(...buildGraphValueInfo(modifiedOutput, sourceGraph, usedNames));
     }
-    const value_info = (sourceGraph.value_info || []).filter((value) => value.name && usedNames.has(value.name));
+    const value_info = buildValueInfoFromModifiedGraph(modifiedGraph, sourceGraph, usedNames);
     const sparse_initializer = (sourceGraph.sparse_initializer || []).filter((tensor) => {
         const valuesName = tensor.values && tensor.values.name;
         const indicesName = tensor.indices && tensor.indices.name;
@@ -1215,15 +1251,19 @@ const rebuildCheckpointWrapperAttributes = (wrapperNode, modifiedGraph, sourceGr
     const keptIds = resolveKeptPrimitiveIds(runtimeGraph, primGraph);
     const slicedPrimGraph = keptIds.size > 0 ? slicePrimGraph(primGraph, keptIds) : primGraph;
     const slicedPrimitives = slicedPrimGraph.primitives || [];
-    const weightNames = collectImmediateTensorNames(slicedPrimitives);
+    const immWeightNames = collectImmediateTensorNames(slicedPrimitives);
+    const immsTensors = loadCheckpointImmsTensors(wrapperNode);
+    let filteredImms = keptIds.size > 0 ?
+        immsTensors.filter((tensor) => tensor.name && immWeightNames.has(tensor.name)) :
+        immsTensors;
+    if (keptIds.size > 0 && filteredImms.length === 0 && immsTensors.length > 0) {
+        filteredImms = immsTensors;
+    }
+    const weightNames = new Set(immWeightNames);
     const valueNames = collectArgumentValueNamesFromGraph(runtimeGraph);
     for (const name of valueNames) {
         weightNames.add(name);
     }
-    const immsTensors = loadCheckpointImmsTensors(wrapperNode);
-    const filteredImms = keptIds.size > 0 ?
-        immsTensors.filter((tensor) => tensor.name && weightNames.has(tensor.name)) :
-        immsTensors;
 
     const originalByName = collectOriginalNodesByName(sourceGraph, wrapperNode);
     const originalCompiledAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === COMPILED_PRIM_GRAPH_ATTRIBUTE) || null;

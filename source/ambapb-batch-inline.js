@@ -539,6 +539,42 @@ export const resolveInlinedSourceContext = (sourceGraph, displayNode) => {
     };
 };
 
+const attachDisplayValueSourceRefs = (displayGraph) => {
+    for (const node of displayGraph.nodes || []) {
+        if (!node._sourceNode) {
+            continue;
+        }
+        const batchCallName = inlineExpansionBatchCallName(node);
+        const prefix = batchCallName ? `inline::${batchCallName}::` : '';
+        const resolveSourceValue = (displayValue) => {
+            if (!displayValue || !displayValue.name) {
+                return null;
+            }
+            const innerName = prefix && displayValue.name.startsWith(prefix) ?
+                displayValue.name.slice(prefix.length) :
+                displayValue.name;
+            for (const argument of [...(node._sourceNode.inputs || []), ...(node._sourceNode.outputs || [])]) {
+                for (const sourceValue of argumentValues(argument)) {
+                    if (sourceValue && sourceValue.name === innerName) {
+                        return sourceValue;
+                    }
+                }
+            }
+            return null;
+        };
+        for (const argument of [...(node.inputs || []), ...(node.outputs || [])]) {
+            for (const displayValue of argumentValues(argument)) {
+                if (displayValue && !displayValue._sourceValue) {
+                    const sourceValue = resolveSourceValue(displayValue);
+                    if (sourceValue) {
+                        displayValue._sourceValue = sourceValue;
+                    }
+                }
+            }
+        }
+    }
+};
+
 const attachDisplayNodeSourceRefs = (displayGraph, sourceGraph, graphIndex = 0) => {
     const sourceByName = new Map();
     for (const node of sourceGraph.nodes || []) {
@@ -569,6 +605,7 @@ const attachDisplayNodeSourceRefs = (displayGraph, sourceGraph, graphIndex = 0) 
         }
         node._sourceNode = sourceByName.get(node.name) || null;
     }
+    attachDisplayValueSourceRefs(displayGraph);
 };
 
 export const sourceNodeForEntity = (displayNode) => {

@@ -1342,11 +1342,11 @@ view.View = class {
         if (this._editSession && isAmbapbCheckpoint(this._model)) {
             if (this._canEditModelContent()) {
                 const entity = this._resolveNodeEntity(node);
-                const isCompiled = entity && (
-                    this._isViewingCompiledAmbapbGraph() ||
+                const isCompiled = this._isViewingCompiledAmbapbGraph() ||
                     sourceEntityIdForNode(node) !== null ||
-                    (entity.nested && (entity.graphAttrName === 'compiled_prim_graph' || entity.graphAttrName === 'graph'))
-                );
+                    Boolean(node._inlineExpanded) ||
+                    (entity && entity.nested &&
+                        (entity.graphAttrName === 'compiled_prim_graph' || entity.graphAttrName === 'graph'));
                 if (isAmbapbShellNode(node)) {
                     return new view.AmbaShellNodeSidebar(this, node, this._editSession);
                 }
@@ -1368,17 +1368,33 @@ view.View = class {
         }
         const nestedEntityId = sourceEntityIdForNode(node);
         const modelNode = sourceNodeForEntity(node);
-        if (!modelNode) {
-            return null;
+        if (modelNode) {
+            const entity = locateNodeEntity(this._editSession.modified.model, modelNode);
+            if (entity && nestedEntityId) {
+                return {
+                    ...entity,
+                    nodeId: nestedEntityId
+                };
+            }
+            return entity;
         }
-        const entity = locateNodeEntity(this._editSession.modified.model, modelNode);
-        if (entity && nestedEntityId) {
-            return {
-                ...entity,
-                nodeId: nestedEntityId
-            };
+        if (nestedEntityId) {
+            const match = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)/.exec(nestedEntityId);
+            if (match) {
+                return {
+                    graphIndex: Number(match[1]),
+                    nodeIndex: Number(match[4]),
+                    nodeId: nestedEntityId,
+                    nested: true,
+                    hostNodeIndex: Number(match[2]),
+                    graphAttrName: match[3]
+                };
+            }
         }
-        return entity;
+        if (node._inlineExpanded !== true) {
+            return locateNodeEntity(this._editSession.modified.model, node);
+        }
+        return null;
     }
 
     _resolveValueEntity(value) {
@@ -1483,9 +1499,15 @@ view.View = class {
             return true;
         }
         if (change.entityType === 'attribute') {
-            return false;
+            return change.entityId && change.entityId.includes('/value:') &&
+                this._batchInlineExpanded.size > 0;
         }
         if (change.entityType === 'value' && change.property === 'type') {
+            return true;
+        }
+        if (change.entityType === 'value' &&
+            (change.property === 'description' || change.property === 'name') &&
+            this._batchInlineExpanded.size > 0) {
             return true;
         }
         if (change.entityType === 'value' && change.property === 'name' && this.options.names) {

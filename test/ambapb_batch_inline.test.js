@@ -14,7 +14,8 @@ import {
     parseMappingAttribute,
     resolveBatchCallTarget,
     sourceEntityIdForNode,
-    sourceNodeForEntity
+    sourceNodeForEntity,
+    sourceValueForEntity
 } from '../source/ambapb-batch-inline.js';
 
 const tensor = (name) => ({ name, type: 'float32' });
@@ -310,6 +311,18 @@ describe('ambapb batch inline expansion', () => {
         const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
 
         assert.equal(inner.description, sourceInner.description);
+    });
+
+    it('attaches source value refs on inlined connection values', () => {
+        const graph = buildRuntimeGraph();
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+        const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
+        assert.ok(inner);
+        assert.ok(inner._sourceNode);
+        const inputValue = inner.inputs[0].value[0];
+        assert.ok(inputValue._sourceValue);
+        assert.equal(inputValue._sourceValue.name, 'sub_input_0');
+        assert.equal(sourceValueForEntity(inputValue), inputValue._sourceValue);
     });
 
     it('supports inline-expanding UserDefCall nodes referencing UserDefSubgraph', () => {

@@ -869,4 +869,39 @@ describe('ambapb checkpoint export', () => {
         const parsedNested = parsePrimGraphJson(nestedPrimGraphAttr.t);
         assert.equal(parsedNested.primitives[0].id, 'prim_0_edited');
     });
+
+    it('exports compiled node description and connection type edits', () => {
+        const primGraph = loadSyntheticPrimGraph();
+        const model = buildCheckpointWithCompiledGraph(primGraph);
+        const session = ModelEditor.createSession(model);
+
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'description',
+            newValue: '{"coproc":{"payload-id":"dram"}}'
+        });
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/value:0',
+            entityType: 'value',
+            changeType: 'modify',
+            property: 'type',
+            newValue: 'float32[1,3,224,224]'
+        });
+
+        const bytes = exportModifiedOnnx(model, session);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        const wrapper = decoded.graph.node[0];
+        const compiledAttr = wrapper.attribute.find((attr) => attr.name === COMPILED_PRIM_GRAPH_ATTRIBUTE);
+        assert.ok(compiledAttr && compiledAttr.g);
+        const convNode = compiledAttr.g.node.find((node) => node.name === 'Conv_0');
+        assert.ok(convNode);
+        assert.equal(convNode.doc_string, '{"coproc":{"payload-id":"dram"}}');
+        const valueInfo = (compiledAttr.g.value_info || []).find((entry) => entry.name === 'tensor_in');
+        assert.ok(valueInfo && valueInfo.type && valueInfo.type.tensor_type);
+        assert.equal(Number(valueInfo.type.tensor_type.elem_type), 1);
+        const dims = valueInfo.type.tensor_type.shape.dim.map((dimension) => Number(dimension.dim_value));
+        assert.deepEqual(dims, [1, 3, 224, 224]);
+    });
 });
