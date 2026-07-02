@@ -2,7 +2,7 @@
 import * as base from './base.js';
 import * as grapher from './grapher.js';
 import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, findValueConsumers } from './model-editor.js';
-import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModifiedWithAmbapb } from './onnx-export.js';
+import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified, rebuildGraphProtoFromModifiedWithAmbapb } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint, canExportCheckpoint } from './ambapb.js';
 import {
     buildPrimGraphJsonAfterAttributeEdit,
