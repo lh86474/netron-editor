@@ -15,6 +15,7 @@ import {
     isViewingCompiledAmbapbGraph,
     PRIM_GRAPH_ATTRIBUTE,
     READ_ONLY_SHELL_ATTRIBUTES,
+    resolveCheckpointRuntimeGraph,
     resolveSelectedPrimitiveId,
     validateAmbapbPatch
 } from './ambapb-editor.js';
@@ -38,7 +39,6 @@ import {
     resolveMarkedNodesByName,
     stripInlineExpansionPrefixes,
     resolveExtractGraphContext,
-    applyExtractedGraph,
     promoteNestedGraphOutputs,
     appendReferencedSubgraphDefinitions,
     ensureFragSubgraphGraphAttributes,
@@ -543,12 +543,16 @@ view.View = class {
     debugEditorState() {
         const session = this._editSession;
         const graph = session ? session.modified.getGraph() : null;
+        const runtimeGraph = session && graph && isAmbapbCheckpoint(this._model) ?
+            resolveCheckpointRuntimeGraph(graph) :
+            graph;
         return {
             enabled: Boolean(session),
             error: this._editSessionError ? this._editSessionError.message : null,
             modelFormat: this._model ? this._model.format : null,
             graphCount: session ? session.modified.model.modules.length : 0,
             nodeCount: graph && Array.isArray(graph.nodes) ? graph.nodes.length : 0,
+            runtimeNodeCount: runtimeGraph && Array.isArray(runtimeGraph.nodes) ? runtimeGraph.nodes.length : 0,
             activePane: this._activePane,
             panes: {
                 original: this._leftPane ? this._leftPane.getDebugState() : { nodeCount: 0, edgeCount: 0, zoom: 1, rendered: false },
@@ -1696,16 +1700,13 @@ view.View = class {
             extracted = promoteNestedGraphOutputs(extracted);
             this._checkpointEditHistory();
             const ambapbPrimGraph = this._model && this._model._ambapb ? this._model._ambapb.primGraph : null;
-            if (extractContext.replaceTarget) {
-                applyExtractedGraph(rootGraph, extractContext.replaceTarget, extracted);
-                this._editSession.replaceGraph(graphIndex, rootGraph);
-            } else {
-                this._editSession.replaceGraph(graphIndex, extracted);
+            if (extractSourceGraph && extractSourceGraph._ambapbCompiledGraph) {
+                extracted._ambapbCompiledGraph = true;
             }
+            this._editSession.replaceGraph(graphIndex, cloneGraph(extracted));
             if (this._model && this._model.proto) {
-                const graphForRebuild = extractContext.replaceTarget ? extracted : this._editSession.modified.getGraph(graphIndex);
                 const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
-                    graphForRebuild,
+                    this._editSession.modified.getGraph(graphIndex),
                     this._model.proto,
                     ambapbPrimGraph
                 );
@@ -1727,7 +1728,7 @@ view.View = class {
             this._persistBatchInlineState();
             this._sidebar.close();
             this._bindEditorSession();
-            await this._refreshModifiedPane();
+            await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
         } catch (error) {
             const message = error instanceof SubgraphExtractError ? error.message : (error && error.message ? error.message : error.toString());
             await this._host.message(message, true, 'OK');
@@ -1858,6 +1859,7 @@ view.View = class {
         });
 
         if (selectedNodes.length === 0) {
+            await this._host.message('Selected nodes are no longer available in the working graph.', true, 'OK');
             return;
         }
 
@@ -2050,20 +2052,15 @@ view.View = class {
             promoteNestedGraphOutputs(modifiedGraph);
 
             this._checkpointEditHistory();
-            if (extractContext.replaceTarget) {
-                applyExtractedGraph(rootGraph, extractContext.replaceTarget, modifiedGraph);
-                this._editSession.replaceGraph(graphIndex, rootGraph);
-            } else {
-                this._editSession.replaceGraph(graphIndex, modifiedGraph);
+            if (extractSourceGraph && extractSourceGraph._ambapbCompiledGraph) {
+                modifiedGraph._ambapbCompiledGraph = true;
             }
+            this._editSession.replaceGraph(graphIndex, cloneGraph(modifiedGraph));
 
             if (this._model && this._model.proto) {
                 const ambapbPrimGraph = this._model._ambapb ? this._model._ambapb.primGraph : null;
-                const graphForRebuild = extractContext.replaceTarget ?
-                    modifiedGraph :
-                    this._editSession.modified.getGraph(graphIndex);
                 const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
-                    graphForRebuild,
+                    this._editSession.modified.getGraph(graphIndex),
                     this._model.proto,
                     ambapbPrimGraph
                 );
@@ -2076,7 +2073,7 @@ view.View = class {
             this._userDefSelectedMarkers.clear();
             this._sidebar.close();
             this._bindEditorSession();
-            await this._refreshModifiedPane();
+            await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
         } catch (error) {
             await this._host.message(error.message || error.toString(), true, 'OK');
         }
@@ -2191,7 +2188,7 @@ view.View = class {
             if (previous && this._target === previous) {
                 previous.unregister();
             }
-            await this._rightPane.render(this._resolveModifiedTarget(this.activeTarget), this.activeSignature, state);
+            await this._rightPane.render(this.activeTarget, this.activeSignature, state);
             if (this._rightPane.graph) {
                 this._rightPane.graph.zoom = zoom;
                 this._rightPane.graph.register();
@@ -2202,6 +2199,30 @@ view.View = class {
                 }
             }
         });
+    }
+
+    _resetPanePathsToModuleGraph(moduleGraph, signature) {
+        if (!moduleGraph) {
+            return;
+        }
+        const entry = {
+            target: moduleGraph,
+            signature: signature || this.activeSignature,
+            state: null
+        };
+        this._leftPath = [{ ...entry, state: null }];
+        this._rightPath = [{ ...entry, state: null }];
+        this._activePane = 'modified';
+    }
+
+    async _refreshGraphPanesAfterStructuralEdit(graphIndex = 0) {
+        if (!this._editSession) {
+            return;
+        }
+        this._invalidateDisplayGraphCache();
+        const moduleGraph = this._editSession.modified.getGraph(graphIndex);
+        this._resetPanePathsToModuleGraph(moduleGraph, this.activeSignature);
+        await this.render(moduleGraph, this.activeSignature);
     }
 
     _resolveGraphIndex(target) {
@@ -2215,8 +2236,14 @@ view.View = class {
             }
         }
         const originalModules = this._editSession.original.modules || [];
+        const baselineModules = this._editSession.originalModules || originalModules;
         for (let i = 0; i < originalModules.length; i++) {
             if (originalModules[i] === target) {
+                return i;
+            }
+        }
+        for (let i = 0; i < baselineModules.length; i++) {
+            if (baselineModules[i] === target) {
                 return i;
             }
         }
@@ -2248,23 +2275,64 @@ view.View = class {
         if (!session || !target) {
             return target;
         }
-        const modules = session.original.modules || [];
-        for (let i = 0; i < modules.length; i++) {
-            if (modules[i] === target) {
-                return session.modified.getGraph(i);
+        const modifiedModules = session.modified.model.modules || [];
+        for (let i = 0; i < modifiedModules.length; i++) {
+            if (modifiedModules[i] === target) {
+                return this._resolveCheckpointModifiedGraph(modifiedModules[i]);
+            }
+        }
+        const originalModules = session.original.modules || [];
+        for (let i = 0; i < originalModules.length; i++) {
+            if (originalModules[i] === target) {
+                return this._resolveCheckpointModifiedGraph(session.modified.getGraph(i));
             }
         }
         const name = target.name || target.identifier;
         if (name) {
-            const modifiedModules = session.modified.model.modules || [];
             for (const graph of modifiedModules) {
+                const result = this._findGraphByName(graph, name);
+                if (result) {
+                    return this._resolveCheckpointModifiedGraph(result);
+                }
+            }
+        }
+        return this._resolveCheckpointModifiedGraph(session.modified.getGraph(0));
+    }
+
+    _resolveCheckpointModifiedGraph(graph) {
+        if (!isAmbapbCheckpoint(this._model)) {
+            return graph;
+        }
+        return resolveCheckpointRuntimeGraph(graph);
+    }
+
+    _resolveOriginalTarget(target) {
+        const session = this._editSession;
+        if (!session || !target) {
+            return this._resolveCheckpointModifiedGraph(target);
+        }
+        const baselineModules = session.originalModules || session.original.modules || [];
+        const shellModules = session.original.modules || [];
+        for (let i = 0; i < shellModules.length; i++) {
+            if (shellModules[i] === target) {
+                return baselineModules[i] || this._resolveCheckpointModifiedGraph(shellModules[i]);
+            }
+        }
+        for (let i = 0; i < baselineModules.length; i++) {
+            if (baselineModules[i] === target) {
+                return baselineModules[i];
+            }
+        }
+        const name = target.name || target.identifier;
+        if (name) {
+            for (const graph of baselineModules) {
                 const result = this._findGraphByName(graph, name);
                 if (result) {
                     return result;
                 }
             }
         }
-        return session.modified.getGraph(0);
+        return baselineModules[0] || null;
     }
 
     _findGraphByName(graph, name) {
@@ -2313,7 +2381,9 @@ view.View = class {
         if (target) {
             const document = this._host.document;
             this._restoreBatchInlineState(state);
-            const sourceGraph = target;
+            const sourceGraph = pane.readOnly ?
+                this._resolveOriginalTarget(target) :
+                this._resolveModifiedTarget(target);
             const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph, model));
@@ -2411,7 +2481,9 @@ view.View = class {
         if (origin && paneTarget && pane) {
             previous = origin.getScreenCTM();
             const oldChildren = Array.from(origin.children);
-            const sourceGraph = pane.readOnly ? paneTarget : this._resolveModifiedTarget(paneTarget);
+            const sourceGraph = pane.readOnly ?
+                this._resolveOriginalTarget(paneTarget) :
+                this._resolveModifiedTarget(paneTarget);
             const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
@@ -2971,9 +3043,7 @@ view.View = class {
             const leftSignature = leftEntry.signature || signature;
             const rightSignature = rightEntry.signature || signature;
 
-            const modifiedRightTarget = this._resolveModifiedTarget(rightTarget);
-
-            status = await this._rightPane.render(modifiedRightTarget, rightSignature, rightState);
+            status = await this._rightPane.render(rightTarget, rightSignature, rightState);
             const leftStatus = await this._leftPane.render(leftTarget, leftSignature, leftState);
             if (status === '') {
                 status = leftStatus;

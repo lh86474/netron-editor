@@ -18,7 +18,8 @@ import {
 } from './ambapb-prim-graph.js';
 import {
     COMPILED_PRIM_GRAPH_ATTRIBUTE,
-    PRIM_GRAPH_IMMS_ATTRIBUTE
+    PRIM_GRAPH_IMMS_ATTRIBUTE,
+    resolveCheckpointRuntimeGraph
 } from './ambapb-editor.js';
 // class to create the ONNXExportError
 // Holds the error message and has property ONNX Export Error
@@ -885,11 +886,12 @@ const rebuildCheckpointWrapperAttributes = (wrapperNode, modifiedGraph, sourceGr
     if (!primGraph) {
         return null;
     }
-    const keptIds = resolveKeptPrimitiveIds(modifiedGraph, primGraph);
+    const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
+    const keptIds = resolveKeptPrimitiveIds(runtimeGraph, primGraph);
     const slicedPrimGraph = keptIds.size > 0 ? slicePrimGraph(primGraph, keptIds) : primGraph;
     const slicedPrimitives = slicedPrimGraph.primitives || [];
     const weightNames = collectImmediateTensorNames(slicedPrimitives);
-    const valueNames = collectArgumentValueNamesFromGraph(modifiedGraph);
+    const valueNames = collectArgumentValueNamesFromGraph(runtimeGraph);
     for (const name of valueNames) {
         weightNames.add(name);
     }
@@ -902,7 +904,7 @@ const rebuildCheckpointWrapperAttributes = (wrapperNode, modifiedGraph, sourceGr
     const originalCompiledAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === COMPILED_PRIM_GRAPH_ATTRIBUTE) || null;
     const originalCompiledGraph = originalCompiledAttr && originalCompiledAttr.g ? originalCompiledAttr.g : null;
     const compiledBody = buildGraphProtoFromModifiedGraph(
-        modifiedGraph,
+        runtimeGraph,
         originalCompiledGraph || sourceGraph,
         originalByName
     );
@@ -939,14 +941,15 @@ const rebuildCheckpointWrapperAttributes = (wrapperNode, modifiedGraph, sourceGr
 };
 
 const rebuildFlatGraphProtoFromModified = (modifiedGraph, sourceGraph, wrapperNode) => {
+    const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
     const originalByName = collectOriginalNodesByName(sourceGraph, wrapperNode);
-    const usedNames = collectArgumentValueNamesFromGraph(modifiedGraph);
-    const body = buildRuntimeGraphBody(modifiedGraph, sourceGraph, originalByName);
+    const usedNames = collectArgumentValueNamesFromGraph(runtimeGraph);
+    const body = buildRuntimeGraphBody(runtimeGraph, sourceGraph, originalByName);
 
     const immsTensors = wrapperNode ? loadCheckpointImmsTensors(wrapperNode) : [];
     let primGraph = wrapperNode ? loadCheckpointPrimGraph(wrapperNode, null) : null;
     if (primGraph && Array.isArray(primGraph.primitives)) {
-        const keptIds = resolveKeptPrimitiveIds(modifiedGraph, primGraph);
+        const keptIds = resolveKeptPrimitiveIds(runtimeGraph, primGraph);
         for (const prim of primGraph.primitives) {
             if (!prim || !keptIds.has(prim.id)) {
                 continue;
@@ -962,8 +965,9 @@ const rebuildFlatGraphProtoFromModified = (modifiedGraph, sourceGraph, wrapperNo
 };
 
 const rebuildCheckpointGraphProtoFromModified = (modifiedGraph, sourceProto, wrapperNode, ambapbPrimGraph) => {
+    const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
     const sourceGraph = sourceProto.graph;
-    const wrapperUpdate = rebuildCheckpointWrapperAttributes(wrapperNode, modifiedGraph, sourceGraph, ambapbPrimGraph);
+    const wrapperUpdate = rebuildCheckpointWrapperAttributes(wrapperNode, runtimeGraph, sourceGraph, ambapbPrimGraph);
     if (!wrapperUpdate) {
         return {
             graph: rebuildFlatGraphProtoFromModified(modifiedGraph, sourceGraph, wrapperNode),
@@ -1033,7 +1037,7 @@ export const rebuildGraphProtoFromModifiedWithAmbapb = (modifiedGraph, sourcePro
 };
 
 const applyCheckpointGraphFromModified = (graph, originalProto, editSession, ambapbPrimGraph) => {
-    const modifiedGraph = editSession.modified.getGraph(0);
+    const modifiedGraph = resolveCheckpointRuntimeGraph(editSession.modified.getGraph(0));
     const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(modifiedGraph, originalProto, ambapbPrimGraph);
     Object.assign(graph, rebuilt.graph);
     return rebuilt.slicedPrimGraph;

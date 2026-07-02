@@ -7,6 +7,7 @@ import {
     getPrimGraphSnapshotValue,
     isAmbapbShellNode,
     PRIM_GRAPH_ATTRIBUTE,
+    resolveCheckpointRuntimeGraph,
     syncShellAttribute,
     validateAmbapbPatch
 } from './ambapb-editor.js';
@@ -96,10 +97,16 @@ export const enumerateGraphValues = (graph, graphIndex) => {
 const readModel = (model) => {
     const valueMap = new Map();
     const readAttribute = (attribute) => {
+        let value;
+        if (attribute.type === 'graph' && attribute.value && typeof attribute.value === 'object') {
+            value = readGraph(attribute.value);
+        } else {
+            value = cloneAttributeValue(attribute.value);
+        }
         const result = {
             name: attribute.name,
             type: attribute.type,
-            value: cloneAttributeValue(attribute.value)
+            value
         };
         if (attribute.visible === false) {
             result.visible = false;
@@ -1556,10 +1563,26 @@ class EditableModel {
     }
 }
 
+const buildOriginalBaselineModules = (original) => {
+    const frozen = readModel(original);
+    if (!original || !original._ambapb) {
+        return frozen.modules;
+    }
+    return frozen.modules.map((graph) => {
+        const runtime = resolveCheckpointRuntimeGraph(graph);
+        const baseline = cloneGraph(runtime);
+        if (runtime._ambapbCompiledGraph) {
+            baseline._ambapbCompiledGraph = true;
+        }
+        return baseline;
+    });
+};
+
 class EditorState {
 
     constructor(original) {
         this._original = original;
+        this._originalBaselineModules = buildOriginalBaselineModules(original);
         const normalized = readModel(original);
         if (original._ambapb) {
             attachAmbapbEditingState(normalized, original._ambapb);
@@ -1573,6 +1596,10 @@ class EditorState {
 
     get original() {
         return this._original;
+    }
+
+    get originalModules() {
+        return this._originalBaselineModules;
     }
 
     replaceGraph(graphIndex, newGraph) {
