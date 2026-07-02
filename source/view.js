@@ -2660,21 +2660,20 @@ view.View = class {
             const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
             const previous = this._rightPane.graph;
             const zoom = previous ? previous.zoom : 1;
-            const container = this._rightPane.container;
-            const scrollLeft = container ? container.scrollLeft : 0;
-            const scrollTop = container ? container.scrollTop : 0;
+            const scrollContainer = this._paneScrollContainer(this._rightPane) || this._rightPane.container;
+            const restoreState = Object.assign({}, state || {}, {
+                zoom,
+                scrollLeft: scrollContainer ? scrollContainer.scrollLeft : 0,
+                scrollTop: scrollContainer ? scrollContainer.scrollTop : 0,
+            });
             if (previous && this._target === previous) {
                 previous.unregister();
             }
-            await this._rightPane.render(this.activeTarget, this.activeSignature, state);
+            await this._rightPane.render(this.activeTarget, this.activeSignature, restoreState);
             if (this._rightPane.graph) {
                 this._rightPane.graph.zoom = zoom;
                 this._rightPane.graph.register();
                 this.target = this._rightPane.graph;
-                if (container) {
-                    container.scrollLeft = scrollLeft;
-                    container.scrollTop = scrollTop;
-                }
             }
         });
     }
@@ -2954,7 +2953,11 @@ view.View = class {
                 }
             }
         }
-        const container = pane ? pane.container : null;
+        const scrollContainer = pane ? (this._paneScrollContainer(pane) || pane.container) : null;
+        const savedScroll = !anchor && scrollContainer ? {
+            left: scrollContainer.scrollLeft,
+            top: scrollContainer.scrollTop
+        } : null;
         const zoom = targetGraph ? targetGraph._zoom : 1;
         const blocks = targetGraph ? targetGraph.blocks : null;
 
@@ -2997,7 +3000,14 @@ view.View = class {
                     viewGraph._background.setAttribute('height', 0);
                 }
                 const state = panePath && panePath.length > 0 ? panePath[0].state : null;
-                viewGraph.restore(state);
+                const restoreState = savedScroll ?
+                    Object.assign({}, state, {
+                        scrollLeft: savedScroll.left,
+                        scrollTop: savedScroll.top,
+                        zoom
+                    }) :
+                    state;
+                viewGraph.restore(restoreState);
                 viewGraph.refreshDeltaStyles();
                 viewGraph.refreshRangeMarkerStyles();
                 viewGraph.refreshInlineExpandedStyles();
@@ -3032,18 +3042,18 @@ view.View = class {
         const currentPaneGraph = pane ? pane.graph : this._target;
         if (currentPaneGraph) {
             currentPaneGraph.zoom = zoom;
-            if (container && anchor) {
+            if (scrollContainer && anchor) {
                 const anchorNode = currentPaneGraph.find(anchor.value);
                 if (anchorNode instanceof grapher.Node && anchorNode.element) {
                     let newRect = anchorNode.element.getBoundingClientRect();
                     if (anchorNode.definition && anchorNode.definition.element) {
                         newRect = anchorNode.definition.element.getBoundingClientRect();
                     }
-                    if (container.scrollWidth > container.clientWidth) {
-                        container.scrollLeft += (newRect.left - anchor.rect.left);
+                    if (scrollContainer.scrollWidth > scrollContainer.clientWidth) {
+                        scrollContainer.scrollLeft += (newRect.left - anchor.rect.left);
                     }
-                    if (container.scrollHeight > container.clientHeight) {
-                        container.scrollTop += (newRect.top - anchor.rect.top);
+                    if (scrollContainer.scrollHeight > scrollContainer.clientHeight) {
+                        scrollContainer.scrollTop += (newRect.top - anchor.rect.top);
                     }
                 }
                 delete currentPaneGraph._scrollLeft;
@@ -5642,6 +5652,16 @@ view.Graph = class extends grapher.Graph {
         canvas.setAttribute('height', height);
         this._zoom = state ? state.zoom : 1;
         this._updateZoom(this._zoom);
+        
+        const preserveScroll = state &&
+            typeof state.scrollLeft === 'number' &&
+            typeof state.scrollTop === 'number';
+        if (preserveScroll) {
+            container.scrollLeft = state.scrollLeft;
+            container.scrollTop = state.scrollTop;
+            return;
+        }
+
         const contextNode = state && state.context ? this._table.get(state.context) : null;
         if (contextNode && contextNode.element) {
             this.scrollTo([contextNode.element], 'instant');
