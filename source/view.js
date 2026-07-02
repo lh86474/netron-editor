@@ -41,7 +41,10 @@ import {
     stripInlineExpansionPrefixes,
     resolveExtractGraphContext,
     applyExtractedGraph,
-    promoteNestedGraphOutputs
+    promoteNestedGraphOutputs,
+    appendReferencedSubgraphDefinitions,
+    ensureFragSubgraphGraphAttributes,
+    isSubgraphDefinitionNode
 } from './ambapb-subgraph.js';
 import { canonicalizeTensorTypeString, formatConnectionType, tensorTypeShapeDimensions } from './tensor-type.js';
 
@@ -86,7 +89,7 @@ view.View = class {
         this._rangeEnds = [];
         // expanded batch call names are here
         this._batchInlineExpanded = new Set();
-        this._userDefSelectedNodes = new Set();
+        this._userDefSelectedMarkers = new Map();
         this._displayGraphCache = null;
         this._displayGraphRevision = 0;
         this._refreshPromise = null;
@@ -1855,29 +1858,39 @@ view.View = class {
         const items = [];
         const node = nodeView.value;
 
-        const graphIndex = 0;
-        const sourceGraph = this._editSession ? this._editSession.modified.getGraph(graphIndex) : null;
-        const isUserDefSelected = this._userDefSelectedNodes && this._userDefSelectedNodes.has(node.name);
+        const graphIndex = nodeView.context && nodeView.context.graphIndex !== undefined ?
+            nodeView.context.graphIndex :
+            this._resolveGraphIndex(this.activeTarget);
+        const sourceGraph = this._editSession ?
+            this._resolveUserDefSourceGraph(graphIndex, nodeView) :
+            null;
+        const marker = this._createRangeMarker(nodeView);
+        const isUserDefSelected = marker && marker.nodeId ?
+            this._userDefSelectedMarkers.has(marker.nodeId) :
+            false;
         const isUserDefSelectable = isUserDefSelected || (sourceGraph && this._isNodeCompatibleForUserDef(sourceGraph, node));
 
         if (node && node.type?.name !== 'UserDefCall' && node.type?.name !== 'UserDefSubgraph' && node.type?.name !== 'FragSubgraph' && isUserDefSelectable) {
             items.push({
                 label: isUserDefSelected ? 'Deselect Node for UserDefCall' : 'Select Node for UserDefCall',
                 action: () => {
+                    if (!marker || !marker.nodeId) {
+                        return;
+                    }
                     if (isUserDefSelected) {
-                        this._userDefSelectedNodes.delete(node.name);
+                        this._userDefSelectedMarkers.delete(marker.nodeId);
                         if (nodeView.context && nodeView.context.select) {
                             nodeView.context.select(null);
                         }
                     } else {
-                        this._userDefSelectedNodes.add(node.name);
+                        this._userDefSelectedMarkers.set(marker.nodeId, marker);
                     }
                     this._refreshUserDefSelectionStyles();
                 }
             });
             items.push({ separator: true });
         }
-        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0 && node.type?.name !== 'UserDefCall') {
+        if (this._userDefSelectedMarkers.size > 0 && node.type?.name !== 'UserDefCall') {
             items.push({
                 label: 'Create UserDefCall',
                 action: () => this._createUserDefCall()
@@ -2140,86 +2153,12 @@ view.View = class {
             const endNodes = resolveMarkedNodesByName(workingGraph, this._rangeEnds);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
 
-            const cloneFragSubgraph = (fragNode) => {
-                const cloneGraphAttribute = (attribute) => {
-                    if (attribute.type === 'graph' && attribute.value) {
-                        return {
-                            name: attribute.name,
-                            type: attribute.type,
-                            value: cloneGraph(attribute.value)
-                        };
-                    }
-                    return {
-                        name: attribute.name,
-                        type: attribute.type,
-                        value: attribute.value
-                    };
-                };
-                return {
-                    name: fragNode.name,
-                    type: fragNode.type ? Object.assign({}, fragNode.type) : null,
-                    attributes: (fragNode.attributes || []).map(cloneGraphAttribute),
-                    blocks: (fragNode.blocks || []).map(cloneGraphAttribute),
-                    inputs: (fragNode.inputs || []).map((input) => ({
-                        name: input.name,
-                        value: (input.value || []).map((val) => Object.assign({}, val))
-                    })),
-                    outputs: (fragNode.outputs || []).map((output) => ({
-                        name: output.name,
-                        value: (output.value || []).map((val) => Object.assign({}, val))
-                    }))
-                };
-            };
-
-            const ensureFragSubgraphGraphAttributes = (graph) => {
-                for (const node of graph.nodes || []) {
-                    if (node.type?.name !== 'FragSubgraph') {
-                        continue;
-                    }
-                    for (const entry of [...(node.attributes || []), ...(node.blocks || [])]) {
-                        if (entry.type === 'graph' && entry.value) {
-                            entry.value = cloneGraph(entry.value);
-                        }
-                    }
-                }
-            };
-
-            const keepFragSubgraphs = [];
-
-            // 1. Identify FragSubgraphs for non-inlined BatchCalls
-            for (const node of extracted.nodes || []) {
-                if (node.type?.name === 'BatchCall' || node.type?.name === 'UserDefCall') {
-                    const target = resolveBatchCallTarget(workingGraph, node);
-                    if (target && target.fragSubgraphNode) {
-                        const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
-                        if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
-                            keepFragSubgraphs.push(target.fragSubgraphNode);
-                        }
-                    }
-                }
-            }
-
-            // 2. Identify FragSubgraphs for already-inlined BatchCalls
-            for (const node of extracted.nodes || []) {
-                const batchCallName = inlineExpansionBatchCallName(node);
-                if (batchCallName) {
-                    const originalBatchCall = (extractSourceGraph.nodes || []).find((n) => n.name === batchCallName);
-                    if (originalBatchCall) {
-                        const target = resolveBatchCallTarget(extractSourceGraph, originalBatchCall);
-                        if (target && target.fragSubgraphNode && target.fragSubgraphNode.type?.name !== 'UserDefSubgraph') {
-                            const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
-                            if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
-                                keepFragSubgraphs.push(target.fragSubgraphNode);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Automatically keep all identified FragSubgraphs
-            for (const fragNode of keepFragSubgraphs) {
-                extracted.nodes.push(cloneFragSubgraph(fragNode));
-            }
+            extracted = appendReferencedSubgraphDefinitions(
+                extracted,
+                workingGraph,
+                extractSourceGraph,
+                { callsToInline: this._batchInlineExpanded }
+            );
 
             extracted = stripInlineExpansionPrefixes(extracted);
             ensureFragSubgraphGraphAttributes(extracted);
@@ -2264,6 +2203,16 @@ view.View = class {
         }
     }
 
+    _resolveUserDefSourceGraph(graphIndex, nodeView) {
+        const rootGraph = this._editSession.modified.getGraph(graphIndex);
+        const marker = nodeView ? this._createRangeMarker(nodeView) : null;
+        if (!marker) {
+            return rootGraph;
+        }
+        const context = resolveExtractGraphContext(rootGraph, marker);
+        return context.extractGraph || rootGraph;
+    }
+
     _isNodeCompatibleForUserDef(sourceGraph, node) {
         if (!node) {
             return false;
@@ -2272,8 +2221,8 @@ view.View = class {
             return false;
         }
         let selectedType = null;
-        for (const selectedNodeName of this._userDefSelectedNodes) {
-            const selNode = (sourceGraph.nodes || []).find(n => n.name === selectedNodeName);
+        for (const marker of this._userDefSelectedMarkers.values()) {
+            const selNode = (sourceGraph.nodes || []).find((entry) => entry.name === marker.nodeName);
             if (!selNode) {
                 continue;
             }
@@ -2339,28 +2288,36 @@ view.View = class {
 
     // before, only resolved selections from sourceGraph. Now, we resolve selections from workingGraph.
     async _createUserDefCall() {
-        if (!this._editSession || !this._userDefSelectedNodes || this._userDefSelectedNodes.size === 0) {
+        if (!this._editSession || this._userDefSelectedMarkers.size === 0) {
             return;
         }
-        const graphIndex = 0;
-        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+        const markers = Array.from(this._userDefSelectedMarkers.values());
+        const graphIndex = markers[0].graphIndex;
+        if (markers.some((entry) => entry.graphIndex !== graphIndex)) {
+            await this._host.message('All selected nodes must be in the same graph.', true, 'OK');
+            return;
+        }
+        const rootGraph = this._editSession.modified.getGraph(graphIndex);
+        const extractContext = resolveExtractGraphContext(rootGraph, markers[0]);
+        const extractSourceGraph = extractContext.extractGraph || rootGraph;
+        const selectedNodeNames = new Set(markers.map((entry) => entry.nodeName));
 
-        const callsToInline = new Set();
+        const callsToInline = new Set(this._batchInlineExpanded || []);
         const inlineRegex = /inline::([^:]+)::/g;
-        for (const nodeName of this._userDefSelectedNodes) {
+        for (const marker of markers) {
             let match;
             inlineRegex.lastIndex = 0;
-            while ((match = inlineRegex.exec(nodeName)) !== null) {
+            while ((match = inlineRegex.exec(marker.nodeName)) !== null) {
                 callsToInline.add(match[1]);
             }
         }
 
-        const workingGraph = buildExtractWorkingGraph(sourceGraph, callsToInline);
-        const selectedNodes = (workingGraph.nodes || []).filter(node => {
+        const workingGraph = buildExtractWorkingGraph(extractSourceGraph, callsToInline);
+        const selectedNodes = (workingGraph.nodes || []).filter((node) => {
             if (!node || !node.name) {
                 return false;
             }
-            if (this._userDefSelectedNodes.has(node.name)) {
+            if (selectedNodeNames.has(node.name)) {
                 return true;
             }
             const batchCallName = inlineExpansionBatchCallName(node);
@@ -2377,7 +2334,15 @@ view.View = class {
         try {
             const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
+            extracted = appendReferencedSubgraphDefinitions(
+                extracted,
+                workingGraph,
+                extractSourceGraph,
+                { callsToInline }
+            );
             extracted = stripInlineExpansionPrefixes(extracted);
+            ensureFragSubgraphGraphAttributes(extracted);
+            extracted = promoteNestedGraphOutputs(extracted);
             const subGraphId = genUniqueNodeName('userdefsubgraph', workingGraph);
             extracted.name = subGraphId;
             const callNodeName = genUniqueNodeName('userDefCall', workingGraph);
@@ -2470,6 +2435,10 @@ view.View = class {
             const nextNodes = [];
             for (let i = 0; i < workingGraph.nodes.length; i++) {
                 const node = workingGraph.nodes[i];
+                if (isSubgraphDefinitionNode(node)) {
+                    nextNodes.push(node);
+                    continue;
+                }
                 if (keepSet.has(node)) {
                     if (i === rootNodeIndex) {
                         nextNodes.push(userDefCallNode);
@@ -2550,14 +2519,23 @@ view.View = class {
                 outputs: (workingGraph.outputs || []).map((output) => remapArgument(output)),
                 nodes: finalNodes
             };
+            promoteNestedGraphOutputs(modifiedGraph);
 
             this._checkpointEditHistory();
-            this._editSession.replaceGraph(graphIndex, modifiedGraph);
+            if (extractContext.replaceTarget) {
+                applyExtractedGraph(rootGraph, extractContext.replaceTarget, modifiedGraph);
+                this._editSession.replaceGraph(graphIndex, rootGraph);
+            } else {
+                this._editSession.replaceGraph(graphIndex, modifiedGraph);
+            }
 
             if (this._model && this._model.proto) {
                 const ambapbPrimGraph = this._model._ambapb ? this._model._ambapb.primGraph : null;
+                const graphForRebuild = extractContext.replaceTarget ?
+                    modifiedGraph :
+                    this._editSession.modified.getGraph(graphIndex);
                 const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
-                    modifiedGraph,
+                    graphForRebuild,
                     this._model.proto,
                     ambapbPrimGraph
                 );
@@ -2573,7 +2551,7 @@ view.View = class {
             this._persistBatchInlineState();
             this._syncBatchInlineToSession();
 
-            this._userDefSelectedNodes.clear();
+            this._userDefSelectedMarkers.clear();
             this._sidebar.close();
             this._bindEditorSession();
             await this._refreshModifiedPane();
@@ -6035,7 +6013,9 @@ view.Node = class extends grapher.Node {
             return;
         }
         const view = this.context.view;
-        const isSelected = view._userDefSelectedNodes && view._userDefSelectedNodes.has(this.value.name);
+        const entity = view._resolveNodeEntity(this.value);
+        const nodeId = entity && entity.nodeId;
+        const isSelected = Boolean(nodeId && view._userDefSelectedMarkers.has(nodeId));
         this.element.classList.toggle('userdef-selected', Boolean(isSelected));
     }
 

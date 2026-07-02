@@ -12,7 +12,8 @@ import {
     stripInlineExpansionName,
     stripInlineExpansionPrefixes,
     resolveExtractGraphContext,
-    applyExtractedGraph
+    applyExtractedGraph,
+    appendReferencedSubgraphDefinitions
 } from '../source/ambapb-subgraph.js';
 import { extractSubgraph, ModelEditor, SubgraphExtractError } from '../source/model-editor.js';
 
@@ -189,5 +190,18 @@ describe('ambapb subgraph extract', () => {
         const compiled = updated.nodes[1].attributes[0].value;
         assert.equal(compiled.nodes.length, 1);
         assert.equal(compiled.nodes[0].name, 'inner_nvp');
+    });
+
+    it('appendReferencedSubgraphDefinitions clones FragSubgraph definitions into extracted bodies', () => {
+        const source = buildRuntimeGraph();
+        const extracted = {
+            name: 'slice',
+            inputs: [],
+            outputs: [],
+            nodes: [source.nodes.find((node) => node.name === 'batch_call')]
+        };
+        const result = appendReferencedSubgraphDefinitions(extracted, source, source);
+        assert.equal(result.nodes.length, 2);
+        assert.ok(result.nodes.some((node) => node.name === 'frag'));
     });
 });
