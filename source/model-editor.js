@@ -885,11 +885,18 @@ export const extractSubgraph = (graph, beginNodes, endNodes) => {
     }
 
     // Always promote marked end-node outputs (e.g. BatchCall -> runtime2:0),
-    // not only when boundaryOutputs is empty.
+    // not only when boundaryOutputs is empty. Skip tensors consumed inside keepSet
+    // (e.g. CVFlowNVP :0/:2 wired to BatchCall in the same extracted subgraph).
     for (const endNode of ends) {
         for (const output of endNode.outputs || []) {
             for (const value of argumentValues(output)) {
                 if (!value || !value.name || boundaryOutputs.has(value.name)) {
+                    continue;
+                }
+                const hasInternalConsumer = findValueConsumers(graph, value).some(
+                    (consumer) => consumer.node && keepSet.has(consumer.node)
+                );
+                if (hasInternalConsumer) {
                     continue;
                 }
                 boundaryOutputs.set(value.name, {
