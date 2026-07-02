@@ -5,8 +5,53 @@ import {
     ModelEditor,
     collectNodesBetween,
     extractSubgraph,
+    promoteVisibleGraphOutputs,
     SubgraphExtractError
 } from '../source/model-editor.js';
+import { promoteNestedGraphOutputs } from '../source/ambapb-subgraph.js';
+
+const tensor = (name) => ({ name, type: 'float32' });
+
+const buildAmbaShellGraph = () => ({
+    name: 'runtime',
+    inputs: [],
+    outputs: [{ name: 'output', value: [tensor('output')] }],
+    nodes: [
+        {
+            name: 'conti_1320_prim_nvp0',
+            type: { name: 'CVFlowNVP' },
+            attributes: [],
+            inputs: [],
+            outputs: [
+                { name: 'out0', value: [tensor('conti_1320_prim_nvp0:0')] },
+                { name: 'out1', value: [tensor('conti_1320_prim_nvp0:1')] },
+                { name: 'out2', value: [tensor('conti_1320_prim_nvp0:2')] },
+                { name: 'out3', value: [tensor('conti_1320_prim_nvp0:3')] }
+            ]
+        },
+        {
+            name: 'conti_1320_prim_runtime2',
+            type: { name: 'BatchCall' },
+            attributes: [],
+            inputs: [
+                { name: 'in0', value: [tensor('conti_1320_prim_nvp0:0')] },
+                { name: 'in1', value: [tensor('conti_1320_prim_nvp0:2')] }
+            ],
+            outputs: [{ name: 'out0', value: [tensor('conti_1320_prim_runtime2:0')] }]
+        },
+        {
+            name: 'conti_1320_prim_nvp1',
+            type: { name: 'CVFlowNVP' },
+            attributes: [],
+            inputs: [
+                { name: 'in0', value: [tensor('conti_1320_prim_runtime2:0')] },
+                { name: 'in1', value: [tensor('conti_1320_prim_nvp0:3')] },
+                { name: 'in2', value: [tensor('conti_1320_prim_nvp0:1')] }
+            ],
+            outputs: [{ name: 'output', value: [tensor('output')] }]
+        }
+    ]
+});
 
 describe('subgraph extract', () => {
     it('collects all nodes on a linear chain from begin to end', () => {
@@ -67,5 +112,74 @@ describe('subgraph extract', () => {
         editor.replaceGraph(0, extracted);
         assert.equal(editor.delta.getChanges().length, 0);
         assert.equal(editor.modified.getGraph().nodes.length, 3);
+    });
+
+    it('extractSubgraph promotes CVFlowNVP and BatchCall cut outputs for display', () => {
+        const graph = buildAmbaShellGraph();
+        const nvp0 = graph.nodes[0];
+        const batch = graph.nodes[1];
+        const extracted = extractSubgraph(graph, [nvp0], [batch]);
+        const names = extracted.outputs.map((entry) => entry.value[0].name).sort();
+        assert.deepEqual(names, [
+            'conti_1320_prim_nvp0:1',
+            'conti_1320_prim_nvp0:3',
+            'conti_1320_prim_runtime2:0'
+        ]);
+    });
+
+    it('promoteVisibleGraphOutputs adds terminals for orphan node outputs', () => {
+        const graph = {
+            name: 'g',
+            inputs: [],
+            outputs: [],
+            nodes: [{
+                name: 'nvp0',
+                type: { name: 'CVFlowNVP' },
+                inputs: [],
+                outputs: [
+                    { name: 'out1', value: [tensor('conti_1320_prim_nvp0:1')] },
+                    { name: 'out3', value: [tensor('conti_1320_prim_nvp0:3')] }
+                ]
+            }]
+        };
+        promoteVisibleGraphOutputs(graph);
+        assert.equal(graph.outputs.length, 2);
+        assert.ok(graph.outputs.some((entry) => entry.value[0].name === 'conti_1320_prim_nvp0:3'));
+    });
+
+    it('promoteNestedGraphOutputs promotes cut outputs inside nested graph attributes', () => {
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [{
+                name: 'frag',
+                type: { name: 'FragSubgraph' },
+                attributes: [{
+                    name: 'graph',
+                    type: 'graph',
+                    value: {
+                        name: 'inner',
+                        inputs: [],
+                        outputs: [],
+                        nodes: [{
+                            name: 'inner_nvp',
+                            type: { name: 'CVFlowNVP' },
+                            inputs: [],
+                            outputs: [
+                                { name: 'out0', value: [tensor('sub_out_a')] },
+                                { name: 'out1', value: [tensor('sub_out_b')] }
+                            ]
+                        }]
+                    }
+                }],
+                inputs: [],
+                outputs: []
+            }]
+        };
+        promoteNestedGraphOutputs(graph);
+        const inner = graph.nodes[0].attributes[0].value;
+        assert.equal(inner.outputs.length, 2);
+        assert.ok(inner.outputs.some((entry) => entry.value[0].name === 'sub_out_b'));
     });
 });

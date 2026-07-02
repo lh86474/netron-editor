@@ -6,9 +6,33 @@
  * Author: Luray He
  */
 import { applyBatchInlineExpansions } from './ambapb-batch-inline.js';
-import { SubgraphExtractError } from './model-editor.js';
+import { SubgraphExtractError, promoteVisibleGraphOutputs } from './model-editor.js';
 
 const INLINE_NAME_PREFIX = /^inline::[^:]+::(.*)$/;
+
+const graphArguments = (node) => {
+    if (!node) {
+        return [];
+    }
+    return (node.attributes || []).concat(node.blocks || []);
+};
+
+const promoteNestedGraphOutputs = (graph) => {
+    if (!graph) {
+        return graph;
+    }
+    promoteVisibleGraphOutputs(graph);
+    for (const node of graph.nodes || []) {
+        for (const entry of graphArguments(node)) {
+            if (entry && entry.type === 'graph' && entry.value) {
+                promoteNestedGraphOutputs(entry.value);
+            }
+        }
+    }
+    return graph;
+};
+
+export { promoteNestedGraphOutputs };
 
 const argumentValues = (argument) => {
     if (!argument || argument.value === null || argument.value === undefined) {
@@ -23,6 +47,48 @@ export const stripInlineExpansionName = (name) => {
     }
     const match = INLINE_NAME_PREFIX.exec(name);
     return match ? match[1] : name;
+};
+
+export const resolveExtractGraphContext = (rootGraph, marker) => {
+    if (!rootGraph || !marker || !marker.nodeId) {
+        return { extractGraph: rootGraph, replaceTarget: null };
+    }
+    const match = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:\d+$/.exec(marker.nodeId);
+    if (!match) {
+        return { extractGraph: rootGraph, replaceTarget: null };
+    }
+    const hostNodeIndex = Number(match[2]);
+    const attrName = match[3];
+    const hostNode = (rootGraph.nodes || [])[hostNodeIndex];
+    if (!hostNode) {
+        return { extractGraph: rootGraph, replaceTarget: null };
+    }
+    const graphEntry = [...(hostNode.attributes || []), ...(hostNode.blocks || [])]
+        .find((entry) => entry.name === attrName && entry.type === 'graph' && entry.value);
+    if (!graphEntry) {
+        return { extractGraph: rootGraph, replaceTarget: null };
+    }
+    return {
+        extractGraph: graphEntry.value,
+        replaceTarget: { hostNodeIndex, attrName }
+    };
+};
+
+export const applyExtractedGraph = (rootGraph, replaceTarget, extracted) => {
+    if (!replaceTarget) {
+        return extracted;
+    }
+    const hostNode = (rootGraph.nodes || [])[replaceTarget.hostNodeIndex];
+    if (!hostNode) {
+        return rootGraph;
+    }
+    for (const entry of [...(hostNode.attributes || []), ...(hostNode.blocks || [])]) {
+        if (entry.name === replaceTarget.attrName && entry.type === 'graph') {
+            entry.value = extracted;
+            break;
+        }
+    }
+    return rootGraph;
 };
 
 export const buildExtractWorkingGraph = (sourceGraph, batchInlineExpanded) => {

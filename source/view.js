@@ -2,7 +2,7 @@
 import * as base from './base.js';
 import * as grapher from './grapher.js';
 import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, findValueConsumers } from './model-editor.js';
-import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
+import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModifiedWithAmbapb } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint, canExportCheckpoint } from './ambapb.js';
 import {
     buildPrimGraphJsonAfterAttributeEdit,
@@ -36,7 +36,10 @@ import {
 import {
     buildExtractWorkingGraph,
     resolveMarkedNodesByName,
-    stripInlineExpansionPrefixes
+    stripInlineExpansionPrefixes,
+    resolveExtractGraphContext,
+    applyExtractedGraph,
+    promoteNestedGraphOutputs
 } from './ambapb-subgraph.js';
 
 const view = {};
@@ -1660,30 +1663,34 @@ view.View = class {
             return;
         }
         try {
-            const sourceGraph = this._editSession.modified.getGraph(graphIndex);
-            const workingGraph = buildExtractWorkingGraph(sourceGraph, this._batchInlineExpanded);
+            const rootGraph = this._editSession.modified.getGraph(graphIndex);
+            const extractContext = resolveExtractGraphContext(rootGraph, this._rangeBegins[0]);
+            const extractSourceGraph = extractContext.extractGraph || rootGraph;
+            const workingGraph = buildExtractWorkingGraph(extractSourceGraph, this._batchInlineExpanded);
             const beginNodes = resolveMarkedNodesByName(workingGraph, this._rangeBegins);
             const endNodes = resolveMarkedNodesByName(workingGraph, this._rangeEnds);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
 
             const cloneFragSubgraph = (fragNode) => {
-                return {
-                    name: fragNode.name,
-                    type: fragNode.type ? Object.assign({}, fragNode.type) : null,
-                    attributes: (fragNode.attributes || []).map((attribute) => {
-                        if (attribute.type === 'graph' && attribute.value) {
-                            return {
-                                name: attribute.name,
-                                type: attribute.type,
-                                value: cloneGraph(attribute.value)
-                            };
-                        }
+                const cloneGraphAttribute = (attribute) => {
+                    if (attribute.type === 'graph' && attribute.value) {
                         return {
                             name: attribute.name,
                             type: attribute.type,
-                            value: attribute.value
+                            value: cloneGraph(attribute.value)
                         };
-                    }),
+                    }
+                    return {
+                        name: attribute.name,
+                        type: attribute.type,
+                        value: attribute.value
+                    };
+                };
+                return {
+                    name: fragNode.name,
+                    type: fragNode.type ? Object.assign({}, fragNode.type) : null,
+                    attributes: (fragNode.attributes || []).map(cloneGraphAttribute),
+                    blocks: (fragNode.blocks || []).map(cloneGraphAttribute),
                     inputs: (fragNode.inputs || []).map((input) => ({
                         name: input.name,
                         value: (input.value || []).map((val) => Object.assign({}, val))
@@ -1693,6 +1700,19 @@ view.View = class {
                         value: (output.value || []).map((val) => Object.assign({}, val))
                     }))
                 };
+            };
+
+            const ensureFragSubgraphGraphAttributes = (graph) => {
+                for (const node of graph.nodes || []) {
+                    if (node.type?.name !== 'FragSubgraph') {
+                        continue;
+                    }
+                    for (const entry of [...(node.attributes || []), ...(node.blocks || [])]) {
+                        if (entry.type === 'graph' && entry.value) {
+                            entry.value = cloneGraph(entry.value);
+                        }
+                    }
+                }
             };
 
             const keepFragSubgraphs = [];
@@ -1714,9 +1734,9 @@ view.View = class {
             for (const node of extracted.nodes || []) {
                 const batchCallName = inlineExpansionBatchCallName(node);
                 if (batchCallName) {
-                    const originalBatchCall = (sourceGraph.nodes || []).find((n) => n.name === batchCallName);
+                    const originalBatchCall = (extractSourceGraph.nodes || []).find((n) => n.name === batchCallName);
                     if (originalBatchCall) {
-                        const target = resolveBatchCallTarget(sourceGraph, originalBatchCall);
+                        const target = resolveBatchCallTarget(extractSourceGraph, originalBatchCall);
                         if (target && target.fragSubgraphNode) {
                             const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
                             if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
@@ -1733,10 +1753,27 @@ view.View = class {
             }
 
             extracted = stripInlineExpansionPrefixes(extracted);
+            ensureFragSubgraphGraphAttributes(extracted);
+            extracted = promoteNestedGraphOutputs(extracted);
             this._checkpointEditHistory();
-            this._editSession.replaceGraph(graphIndex, extracted);
+            const ambapbPrimGraph = this._model && this._model._ambapb ? this._model._ambapb.primGraph : null;
+            if (extractContext.replaceTarget) {
+                applyExtractedGraph(rootGraph, extractContext.replaceTarget, extracted);
+                this._editSession.replaceGraph(graphIndex, rootGraph);
+            } else {
+                this._editSession.replaceGraph(graphIndex, extracted);
+            }
             if (this._model && this._model.proto) {
-                this._model.proto.graph = rebuildGraphProtoFromModified(extracted, this._model.proto);
+                const graphForRebuild = extractContext.replaceTarget ? extracted : this._editSession.modified.getGraph(graphIndex);
+                const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
+                    graphForRebuild,
+                    this._model.proto,
+                    ambapbPrimGraph
+                );
+                this._model.proto.graph = rebuilt.graph;
+                if (rebuilt.slicedPrimGraph && this._model._ambapb) {
+                    this._model._ambapb.primGraph = rebuilt.slicedPrimGraph;
+                }
             }
             const exportBase = stripExportExtension(this._host.document.title || 'model');
             this._exportBasenameOverride = buildSubgraphExportBasename(
@@ -4550,6 +4587,40 @@ view.Graph = class extends grapher.Graph {
                             this.createValue(value).to.push(viewOutput);
                         }
                     }
+                }
+            }
+        }
+        this._promoteOrphanOutputTerminals(graph);
+    }
+
+    _promoteOrphanOutputTerminals(graph) {
+        const covered = new Set();
+        for (const output of graph.outputs || []) {
+            for (const value of output.value || []) {
+                if (value && value.name) {
+                    covered.add(value.name);
+                }
+            }
+        }
+
+        for (const node of graph.nodes || []) {
+            for (const output of node.outputs || []) {
+                for (const value of output.value || []) {
+                    if (!value || !value.name || covered.has(value.name)) {
+                        continue;
+                    }
+                    const viewValue = this._values.get(value.name);
+                    if (!viewValue || !viewValue.from || viewValue.to.length > 0) {
+                        continue;
+                    }
+                    const argument = {
+                        name: value.name,
+                        value: [{ name: value.name, type: value.type }]
+                    };
+                    const viewOutput = this.createOutput(argument);
+                    this.setNode(viewOutput);
+                    viewValue.to.push(viewOutput);
+                    covered.add(value.name);
                 }
             }
         }
