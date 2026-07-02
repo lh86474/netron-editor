@@ -18,6 +18,7 @@ import * as fs from 'node:fs/promises';
 import { mockModel, mockChainModel, identityNodeSpec } from './fixtures/mock-graph.js';
 import { onnxShapedModel } from './fixtures/onnx-shaped-mock.js';
 import { ModelEditor, AttributeSchemaResolver, locateValueEntity, buildNodeFromMetadata, analyzeDeleteNode, canDeleteNode, deleteNode, findDanglingNodes, NodeDeleteError } from '../source/model-editor.js';
+import { canonicalizeTensorTypeString, tensorTypeShapeDimensions, TensorTypeError } from '../source/tensor-type.js';
 
 // makes sure that when we have the second split-view pane, we have a different model object
 // the modified model is not equal to the original model, despite being structurally the same
@@ -191,7 +192,41 @@ describe('EditorState', () => {
         assert.equal(change.oldValue, 'hidden');
         assert.equal(change.newValue, 'renamed_hidden');
     });
-    // We rename some node
+
+    it('modify value type records canonical delta', () => {
+        const editor = ModelEditor.createSession(mockModel);
+        const value = editor.modified.getGraph().nodes[0].outputs[0].value[0];
+        value.type = 'float32[1]';
+        const entity = locateValueEntity(editor.modified.model, value);
+        assert.ok(entity);
+        editor.applyPatch({
+            entityId: entity.valueId,
+            entityType: 'value',
+            changeType: 'modify',
+            property: 'type',
+            newValue: 'float32[1,2]'
+        });
+        assert.equal(value.type, 'float32[1,2]');
+        const change = editor.delta.getChanges()[0];
+        assert.equal(change.property, 'type');
+        assert.equal(change.newValue, 'float32[1,2]');
+    });
+
+    it('rejects invalid value type on patch', () => {
+        const editor = ModelEditor.createSession(mockModel);
+        const value = editor.modified.getGraph().nodes[0].outputs[0].value[0];
+        value.type = 'float32[1]';
+        const entity = locateValueEntity(editor.modified.model, value);
+        assert.throws(() => editor.applyPatch({
+            entityId: entity.valueId,
+            entityType: 'value',
+            changeType: 'modify',
+            property: 'type',
+            newValue: 'not_a_type'
+        }), TensorTypeError);
+        assert.equal(value.type, 'float32[1]');
+    });
+
     it('structural IDs survive display-name edits', () => {
         const editor = ModelEditor.createSession(mockModel);
         const nodeId = 'graph:0/node:0';

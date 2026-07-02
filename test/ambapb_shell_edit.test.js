@@ -237,6 +237,8 @@ describe('ambapb shell editing', () => {
         });
 
         const session = ModelEditor.createSession(model);
+        const sessionCompiledGraph = session.modified.getGraph(0).nodes[0].attributes
+            .find((entry) => entry.name === 'compiled_prim_graph').value;
 
         // Edit name of the compiled node
         session.applyPatch({
@@ -246,7 +248,7 @@ describe('ambapb shell editing', () => {
             property: 'name',
             newValue: 'Conv_0_edited'
         });
-        assert.equal(compiledGraph.nodes[0].name, 'Conv_0_edited');
+        assert.equal(sessionCompiledGraph.nodes[0].name, 'Conv_0_edited');
 
         // Edit attribute of the compiled node
         session.applyPatch({
@@ -256,7 +258,7 @@ describe('ambapb shell editing', () => {
             property: 'attributes.strides',
             newValue: [2, 2]
         });
-        assert.deepEqual(compiledGraph.nodes[0].attributes[0].value, [2, 2]);
+        assert.deepEqual(sessionCompiledGraph.nodes[0].attributes[0].value, [2, 2]);
 
         // Edit nested compiled connection name
         session.applyPatch({
@@ -266,7 +268,7 @@ describe('ambapb shell editing', () => {
             property: 'name',
             newValue: 'tensor_in_edited'
         });
-        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].name, 'tensor_in_edited');
+        assert.equal(sessionCompiledGraph.nodes[0].inputs[0].value[0].name, 'tensor_in_edited');
 
         // Add an attribute to the nested connection
         session.applyPatch({
@@ -276,8 +278,8 @@ describe('ambapb shell editing', () => {
             property: 'attributes.test_attr',
             newValue: '42'
         });
-        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes[0].name, 'test_attr');
-        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes[0].value, '42');
+        assert.equal(sessionCompiledGraph.nodes[0].inputs[0].value[0].attributes[0].name, 'test_attr');
+        assert.equal(sessionCompiledGraph.nodes[0].inputs[0].value[0].attributes[0].value, '42');
 
         // Delete an attribute of the nested connection
         session.applyPatch({
@@ -286,7 +288,7 @@ describe('ambapb shell editing', () => {
             changeType: 'delete',
             property: 'attributes.test_attr'
         });
-        assert.equal(compiledGraph.nodes[0].inputs[0].value[0].attributes.length, 0);
+        assert.equal(sessionCompiledGraph.nodes[0].inputs[0].value[0].attributes.length, 0);
 
         // Edit prim_graph of nested NVP node
         const updatedNvpJson = JSON.stringify({
@@ -303,7 +305,91 @@ describe('ambapb shell editing', () => {
             property: 'attributes.prim_graph',
             newValue: updatedNvpJson
         });
-        assert.equal(compiledGraph.nodes[1].attributes[0].value, updatedNvpJson);
+        assert.equal(sessionCompiledGraph.nodes[1].attributes[0].value, updatedNvpJson);
+    });
+
+    it('deep-clones nested compiled connection values with getter-based fields and metadata', () => {
+        class Value {
+            constructor(name, type) {
+                this._name = name;
+                this._type = type;
+                this._metadata = [];
+            }
+
+            get name() {
+                return this._name;
+            }
+
+            get type() {
+                return this._type;
+            }
+
+            get metadata() {
+                return this._metadata;
+            }
+
+            set metadata(value) {
+                this._metadata = Array.isArray(value) ? value : [];
+            }
+        }
+
+        const inputValue = new Value('tensor_in', 'float32');
+        inputValue.metadata = [{ name: 'dimension.w', value: '224' }];
+        const model = {
+            format: 'ONNX',
+            _ambapb: { canEdit: true },
+            modules: [{
+                name: 'shell',
+                nodes: [{
+                    name: 'data',
+                    type: { name: CVFLOW_NVP_OP_TYPE, identifier: CVFLOW_NVP_OP_TYPE },
+                    attributes: [{
+                        name: 'compiled_prim_graph',
+                        type: 'graph',
+                        value: {
+                            name: 'compiled',
+                            _ambapbCompiledGraph: true,
+                            nodes: [{
+                                name: 'Conv_0',
+                                type: { name: 'Conv' },
+                                attributes: [],
+                                inputs: [{ name: 'input', value: [inputValue] }],
+                                outputs: [{ name: 'output', value: [{ name: 'tensor_out', type: 'float32' }] }]
+                            }],
+                            inputs: [],
+                            outputs: []
+                        }
+                    }],
+                    inputs: [],
+                    outputs: []
+                }]
+            }]
+        };
+
+        const session = ModelEditor.createSession(model);
+        const compiledGraph = session.modified.getGraph(0).nodes[0].attributes[0].value;
+        const value = compiledGraph.nodes[0].inputs[0].value[0];
+        assert.notEqual(value, inputValue);
+        assert.equal(Object.getOwnPropertyDescriptor(Object.getPrototypeOf(value), 'name'), undefined);
+        assert.deepEqual(value.attributes, [{ name: 'dimension.w', type: 'string', value: '224' }]);
+
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/value:0',
+            entityType: 'value',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'tensor_in_edited'
+        });
+        assert.equal(value.name, 'tensor_in_edited');
+
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/value:0/attr:0',
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: 'attributes.dimension.w',
+            newValue: '512'
+        });
+        assert.equal(value.attributes[0].value, '512');
     });
 
     it('attachCheckpoint keeps shell graph and enables editing', () => {

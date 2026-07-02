@@ -30,6 +30,38 @@ export function isCVFlowNVPNode(node) {
     return Boolean(node && node.type && node.type.name === CVFLOW_NVP_OP_TYPE);
 }
 
+const nodeGraphArguments = (node) => {
+    if (!node) {
+        return [];
+    }
+    return (node.attributes || []).concat(node.blocks || []);
+};
+
+export function resolveCheckpointRuntimeGraph(modifiedGraph) {
+    if (!modifiedGraph) {
+        return modifiedGraph;
+    }
+    let graph = modifiedGraph;
+    for (;;) {
+        const nodes = graph.nodes || [];
+        if (nodes.length !== 1 || !isCVFlowNVPNode(nodes[0])) {
+            break;
+        } 
+        let inner = null;
+        for (const entry of nodeGraphArguments(nodes[0])) {
+            if (entry && entry.name === COMPILED_PRIM_GRAPH_ATTRIBUTE && entry.type === 'graph' && entry.value) {
+                inner = entry.value;
+                break;
+            }
+        }
+        if (!inner) {
+            break;
+        }
+        graph = inner;
+    }
+    return graph;
+}
+
 export function isAmbapbRuntimeShellNode(node) {
     return Boolean(node && node.type && EDITABLE_SHELL_OP_TYPES.has(node.type.name));
 }

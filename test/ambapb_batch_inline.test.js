@@ -14,7 +14,8 @@ import {
     parseMappingAttribute,
     resolveBatchCallTarget,
     sourceEntityIdForNode,
-    sourceNodeForEntity
+    sourceNodeForEntity,
+    sourceValueForEntity
 } from '../source/ambapb-batch-inline.js';
 
 const tensor = (name) => ({ name, type: 'float32' });
@@ -297,6 +298,19 @@ describe('ambapb batch inline expansion', () => {
         assert.ok(entity);
         assert.equal(entity.nodeId, 'graph:0/node:1/compiled_prim_graph/node:0');
     });
+
+    it('sets source entity ids from model locateNodeEntity when model is provided', () => {
+        const graph = buildRuntimeGraph();
+        const model = { modules: [graph] };
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']), 0, model);
+        const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
+        const sourceInner = graph.nodes
+            .find((node) => node.name === 'frag')
+            .attributes.find((entry) => entry.name === 'compiled_prim_graph')
+            .value.nodes.find((node) => node.name === 'inner_nvp');
+        const entity = locateNodeEntity(model, sourceInner);
+        assert.equal(inner._sourceEntityId, entity.nodeId);
+    });
     // Make sure we get description from source model in cloneNode
     it('preserves description on inlined nodes', () => {
         const graph = buildRuntimeGraph();
@@ -310,6 +324,18 @@ describe('ambapb batch inline expansion', () => {
         const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
 
         assert.equal(inner.description, sourceInner.description);
+    });
+
+    it('attaches source value refs on inlined connection values', () => {
+        const graph = buildRuntimeGraph();
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+        const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
+        assert.ok(inner);
+        assert.ok(inner._sourceNode);
+        const inputValue = inner.inputs[0].value[0];
+        assert.ok(inputValue._sourceValue);
+        assert.equal(inputValue._sourceValue.name, 'sub_input_0');
+        assert.equal(sourceValueForEntity(inputValue), inputValue._sourceValue);
     });
 
     it('supports inline-expanding UserDefCall nodes referencing UserDefSubgraph', () => {

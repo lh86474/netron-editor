@@ -2,7 +2,12 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mockChainModel } from './fixtures/mock-graph.js';
 import { extractSubgraph, findValueConsumers, genUniqueNodeName } from '../source/model-editor.js';
-import { buildExtractWorkingGraph, stripInlineExpansionPrefixes } from '../source/ambapb-subgraph.js';
+import {
+    buildExtractWorkingGraph,
+    stripInlineExpansionPrefixes,
+    appendReferencedSubgraphDefinitions,
+    isSubgraphDefinitionNode
+} from '../source/ambapb-subgraph.js';
 import { inlineExpansionBatchCallName } from '../source/ambapb-batch-inline.js';
 
 // The identical implementation of findBoundaryNodes from view.js
@@ -350,10 +355,17 @@ describe('UserDefCall and boundary selection', () => {
         const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
         let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
         extracted = stripInlineExpansionPrefixes(extracted);
+        extracted = appendReferencedSubgraphDefinitions(
+            extracted,
+            workingGraph,
+            graph,
+            { callsToInline }
+        );
 
-        assert.equal(extracted.nodes.length, 2);
+        assert.equal(extracted.nodes.length, 3);
         assert.ok(extracted.nodes.some(n => n.name === 'producer'));
         assert.ok(extracted.nodes.some(n => n.name === 'batch_call'));
+        assert.ok(extracted.nodes.some(n => n.name === 'frag'));
 
         assert.equal(extracted.outputs.length, 1);
         assert.equal(extracted.outputs[0].value[0].name, 'batch_out');
@@ -418,6 +430,10 @@ describe('UserDefCall and boundary selection', () => {
         const nextNodes = [];
         for (let i = 0; i < workingGraph.nodes.length; i++) {
             const node = workingGraph.nodes[i];
+            if (isSubgraphDefinitionNode(node)) {
+                nextNodes.push(node);
+                continue;
+            }
             if (keepSet.has(node)) {
                 if (i === rootNodeIndex) {
                     nextNodes.push(userDefCallNode);

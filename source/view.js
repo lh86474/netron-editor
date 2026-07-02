@@ -1,8 +1,8 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers } from './model-editor.js';
-import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified } from './onnx-export.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, getNodeByEntityId, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers } from './model-editor.js';
+import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified, rebuildGraphProtoFromModifiedWithAmbapb } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint, canExportCheckpoint } from './ambapb.js';
 import {
     buildPrimGraphJsonAfterAttributeEdit,
@@ -15,6 +15,7 @@ import {
     isViewingCompiledAmbapbGraph,
     PRIM_GRAPH_ATTRIBUTE,
     READ_ONLY_SHELL_ATTRIBUTES,
+    resolveCheckpointRuntimeGraph,
     resolveSelectedPrimitiveId,
     validateAmbapbPatch
 } from './ambapb-editor.js';
@@ -38,8 +39,15 @@ import {
 import {
     buildExtractWorkingGraph,
     resolveMarkedNodesByName,
-    stripInlineExpansionPrefixes
+    stripInlineExpansionPrefixes,
+    resolveExtractGraphContext,
+    promoteNestedGraphOutputs,
+    appendReferencedSubgraphDefinitions,
+    ensureFragSubgraphGraphAttributes,
+    isSubgraphDefinitionNode
 } from './ambapb-subgraph.js';
+import { canonicalizeTensorTypeString, formatConnectionType, tensorTypeShapeDimensions } from './tensor-type.js';
+
 
 const view = {};
 const markdown = {};
@@ -74,13 +82,14 @@ view.View = class {
         this.__activePane = 'modified';
         this._leftPath = [];
         this._rightPath = [];
+        this._mergePanePaths = new Map();
         this._selection = [];
         // arrays to support multiple begin and end marker
         this._rangeBegins = [];
         this._rangeEnds = [];
         // expanded batch call names are here
         this._batchInlineExpanded = new Set();
-        this._userDefSelectedNodes = new Set();
+        this._userDefSelectedMarkers = new Map();
         this._displayGraphCache = null;
         this._displayGraphRevision = 0;
         this._refreshPromise = null;
@@ -151,7 +160,7 @@ view.View = class {
             this._setupResizablePanes('merge-source-row', 'merge-upstream-pane', 'merge-source-divider', false);
             this._setupResizablePanes('merge-graph-area', 'merge-source-row', 'merge-row-divider', true);
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
-                await this.popTarget();
+                await this.popTarget('original');
             });
             this._element('sidebar').addEventListener('mousewheel', (e) => {
                 if (e.shiftKey || e.ctrlKey) {
@@ -563,12 +572,16 @@ view.View = class {
     debugEditorState() {
         const session = this._editSession;
         const graph = session ? session.modified.getGraph() : null;
+        const runtimeGraph = session && graph && isAmbapbCheckpoint(this._model) ?
+            resolveCheckpointRuntimeGraph(graph) :
+            graph;
         return {
             enabled: Boolean(session),
             error: this._editSessionError ? this._editSessionError.message : null,
             modelFormat: this._model ? this._model.format : null,
             graphCount: session ? session.modified.model.modules.length : 0,
             nodeCount: graph && Array.isArray(graph.nodes) ? graph.nodes.length : 0,
+            runtimeNodeCount: runtimeGraph && Array.isArray(runtimeGraph.nodes) ? runtimeGraph.nodes.length : 0,
             activePane: this._activePane,
             panes: {
                 original: this._leftPane ? this._leftPane.getDebugState() : { nodeCount: 0, edgeCount: 0, zoom: 1, rendered: false },
@@ -826,13 +839,347 @@ view.View = class {
     // this is used to get the graph for the pane because we want to support
     // svg and png export for both panes
     _paneGraph(paneId) {
+        const pane = this._paneById(paneId); 
+        return pane && pane.graph ? pane.graph : null;
+    }
+
+    // Pane resolver since we never covered the merge-workspace panes
+    _paneById(paneId) {
         if (paneId === 'original') {
-            return this._leftPane && this._leftPane.graph ? this._leftPane.graph : null;
+            return this._leftPane;
         }
         if (paneId === 'modified') {
-            return this._rightPane && this._rightPane.graph ? this._rightPane.graph : null;
+            return this._rightPane;
         }
-        return this._activePaneGraph();
+        const ws = this._mergeWorkspace;
+        if (paneId === 'merge-preview') {
+            return ws._previewPane;
+        }
+        if (paneId === 'merge-upstream') {
+            return ws._upstreamSourcePane;
+        }
+        if (paneId === 'merge-downstream') {
+            return ws._downstreamSourcePane;
+        }
+        return null;
+    }
+
+    _clearMergePanePaths() {
+        this._mergePanePaths.clear();
+    }
+
+    _resetMergePanePath(paneId, target, signature = null) {
+        if (!paneId || !target) {
+            this._mergePanePaths.delete(paneId);
+        } else {
+            this._mergePanePaths.set(paneId, [{ target, signature, state: null }]);
+        }
+        this._updatePanePathUI(paneId);
+    }
+
+    _panePathArray(paneId) {
+        if (paneId && paneId.startsWith('merge-')) {
+            if (!this._mergePanePaths.has(paneId)) {
+                this._mergePanePaths.set(paneId, []);
+            }
+            return this._mergePanePaths.get(paneId);
+        }
+        if (paneId === 'original') {
+            return this._leftPath;
+        }
+        if (paneId === 'modified') {
+            return this._rightPath;
+        }
+        return null;
+    }
+
+    _pathEntryName(target) {
+        if (target && target.identifier) {
+            return target.identifier;
+        }
+        if (target && target.name) {
+            return target.name;
+        }
+        return '';
+    }
+
+    _isPaneChromeElement(element) {
+        return element.classList.contains('graph-pane-label') ||
+            element.classList.contains('graph-pane-path') ||
+            element.classList.contains('graph-busy-overlay') ||
+            element.id === 'graph-busy-overlay';
+    }
+
+    _ensurePaneScroll(container) {
+        let scroll = container.querySelector(':scope > .graph-pane-scroll');
+        if (!scroll) {
+            const document = this._host.document;
+            scroll = document.createElement('div');
+            scroll.className = 'graph-pane-scroll';
+            if (container.classList.contains('target')) {
+                scroll.classList.add('target');
+                container.classList.remove('target');
+            }
+            if (container.hasAttribute('tabindex')) {
+                scroll.tabIndex = container.tabIndex;
+                container.removeAttribute('tabindex');
+            }
+            const toMove = [];
+            for (const child of Array.from(container.children)) {
+                if (!this._isPaneChromeElement(child)) {
+                    toMove.push(child);
+                }
+            }
+            container.insertBefore(scroll, container.firstChild);
+            for (const child of toMove) {
+                scroll.appendChild(child);
+            }
+        }
+        return scroll;
+    }
+
+    _paneScrollContainer(pane) {
+        if (!pane || !pane.container) {
+            return null;
+        }
+        if (pane.id === 'original') {
+            return pane.container;
+        }
+        return this._ensurePaneScroll(pane.container);
+    }
+
+    _clearPaneGraphContent(pane) {
+        const container = pane.container;
+        const scroll = pane.id === 'original' ? null : container.querySelector(':scope > .graph-pane-scroll');
+        if (scroll) {
+            while (scroll.lastChild) {
+                scroll.removeChild(scroll.lastChild);
+            }
+            return;
+        }
+        const preserve = [];
+        for (const child of Array.from(container.children)) {
+            if (this._isPaneChromeElement(child)) {
+                preserve.push(child);
+            }
+        }
+        while (container.lastChild) {
+            container.removeChild(container.lastChild);
+        }
+        for (const child of preserve) {
+            container.appendChild(child);
+        }
+    }
+
+    _pathHostFor(paneId) {
+        if (paneId === 'original') {
+            const pane = this._leftPane;
+            const stale = pane?.container?.querySelector('.graph-pane-path');
+            if (stale) {
+                stale.remove();
+            }
+            return this._element('toolbar-path');
+        }
+        const pane = this._paneById(paneId);
+        if (!pane || !pane.container) {
+            return null;
+        }
+        return this._ensurePanePath(pane.container, paneId);
+    }
+
+    _ensurePanePath(container, paneId) {
+        if (paneId === 'original') {
+            return this._element('toolbar-path');
+        }
+        this._ensurePaneScroll(container);
+        let pathEl = container.querySelector(':scope > .graph-pane-path');
+        if (!pathEl) {
+            const document = this._host.document;
+            pathEl = document.createElement('div');
+            pathEl.className = 'graph-pane-path';
+            pathEl.dataset.paneId = paneId;
+            const back = document.createElement('button');
+            back.className = 'toolbar-path-back-button graph-pane-path-back';
+            back.type = 'button';
+            back.title = 'Back';
+            back.innerHTML = '&#x276E;';
+            back.addEventListener('click', async () => {
+                await this.popTarget(paneId);
+            });
+            pathEl.appendChild(back);
+            container.appendChild(pathEl);
+        }
+        return pathEl;
+    }
+
+    _appendPathNameButtons(pathEl, pathArray, paneId) {
+        const document = this.host.document;
+        const last = pathArray.length - 2;
+        const count = Math.min(2, last);
+        if (count < last) {
+            const element = document.createElement('button');
+            element.setAttribute('class', 'toolbar-path-name-button');
+            element.innerHTML = '&hellip;';
+            pathEl.appendChild(element);
+        }
+        for (let i = count; i >= 0; i--) {
+            const target = pathArray[i].target;
+            const element = document.createElement('button');
+            element.setAttribute('class', 'toolbar-path-name-button');
+            element.addEventListener('click', async () => {
+                if (i > 0) {
+                    await this._popPanePathTo(paneId, i);
+                } else {
+                    if (paneId === 'original' || paneId === 'modified') {
+                        this._activePane = paneId;
+                    }
+                    await this.showTargetProperties(target);
+                }
+            });
+            const name = this._pathEntryName(target);
+            if (name.length > 24) {
+                element.setAttribute('title', name);
+                const truncated = name.substring(name.length - 24, name.length);
+                element.innerHTML = '&hellip;';
+                element.appendChild(document.createTextNode(truncated));
+            } else if (name) {
+                element.textContent = name;
+            } else {
+                element.innerHTML = '&nbsp;';
+            }
+            pathEl.appendChild(element);
+        }
+    }
+
+    _updatePanePathUI(paneId) {
+        const pathEl = this._pathHostFor(paneId);
+        if (!pathEl) {
+            return;
+        }
+        const pathArray = this._panePathArray(paneId);
+        const isToolbar = paneId === 'original';
+        const back = isToolbar
+            ? this._element('toolbar-path-back-button')
+            : pathEl.querySelector('.graph-pane-path-back');
+
+        while (pathEl.children.length > (isToolbar ? 1 : 1)) {
+            pathEl.removeChild(pathEl.lastElementChild);
+        }
+
+        if (!pathArray || pathArray.length <= 1) {
+            if (isToolbar) {
+                pathEl.classList.remove('visible');
+                if (back) {
+                    back.style.opacity = '0';
+                    back.style.pointerEvents = 'none';
+                }
+            } else {
+                pathEl.classList.remove('visible');
+            }
+            return;
+        }
+
+        if (isToolbar) {
+            pathEl.classList.add('visible');
+            if (back) {
+                back.style.opacity = '1';
+                back.style.pointerEvents = 'auto';
+            }
+        } else {
+            pathEl.classList.add('visible');
+        }
+
+        this._appendPathNameButtons(pathEl, pathArray, paneId);
+    }
+
+    async _renderEditorPane(paneId) {
+        const pane = this._paneById(paneId);
+        const path = this._panePathArray(paneId);
+        if (!pane || !path || path.length === 0) {
+            return '';
+        }
+        const entry = path[0];
+        let target = entry.target;
+        if (paneId === 'modified') {
+            target = this._resolveModifiedTarget(target);
+        }
+        const status = await pane.render(target, entry.signature || null, entry.state || null);
+        if (status === '' && pane.graph) {
+            if (paneId === this._activePane) {
+                this.target = pane.graph;
+            }
+            pane.graph.register();
+        }
+        this._updatePanePathUI(paneId);
+        return status;
+    }
+
+    async _popPanePathTo(paneId, index) {
+        const path = this._panePathArray(paneId);
+        if (!path || index <= 0 || index >= path.length) {
+            return;
+        }
+        const newPath = path.slice(index);
+        if (paneId.startsWith('merge-')) {
+            this._mergePanePaths.set(paneId, newPath);
+            const pane = this._paneById(paneId);
+            const entry = newPath[0];
+            const model = pane && pane.graph ? pane.graph._renderModel : null;
+            await pane.render(entry.target, entry.signature || null, entry.state || null, model);
+        } else if (paneId === 'original') {
+            this._leftPath = newPath;
+            await this._renderEditorPane('original');
+        } else if (paneId === 'modified') {
+            this._rightPath = newPath;
+            await this._renderEditorPane('modified');
+        }
+        this._updatePanePathUI(paneId);
+        if (paneId === this._activePane) {
+            this._updateToolbarPath();
+        }
+    }
+
+    async _pushMergeTarget(graph, context, paneId, currentPaneGraph) {
+        const pane = this._paneById(paneId);
+        if (!pane || !currentPaneGraph || !currentPaneGraph.target) {
+            return;
+        }
+        let path = this._mergePanePaths.get(paneId);
+        if (!path || path.length === 0) {
+            path = [{ target: currentPaneGraph.target, signature: null, state: null }];
+        }
+        if (context) {
+            path[0].state = {
+                context,
+                zoom: currentPaneGraph.zoom,
+                blocks: currentPaneGraph.blocks,
+                batchInlineExpanded: Array.from(this._batchInlineExpanded)
+            };
+        }
+        const signature = Array.isArray(graph.signatures) && graph.signatures.length > 0
+            ? graph.signatures[0]
+            : null;
+        const entry = { target: graph, signature, state: null };
+        this._mergePanePaths.set(paneId, [entry].concat(path));
+        const model = currentPaneGraph._renderModel || null;
+        await pane.render(graph, signature, null, model);
+        this._updatePanePathUI(paneId);
+    }
+
+    async _popMergeTarget(paneId) {
+        const path = this._mergePanePaths.get(paneId);
+        if (!path || path.length <= 1) {
+            return null;
+        }
+        this._sidebar.close();
+        const newPath = path.slice(1);
+        this._mergePanePaths.set(paneId, newPath);
+        const pane = this._paneById(paneId);
+        const entry = newPath[0];
+        const model = pane && pane.graph ? pane.graph._renderModel : null;
+        await pane.render(entry.target, entry.signature || null, entry.state || null, model);
+        this._updatePanePathUI(paneId);
+        return null;
     }
 
     // the basename is used to name the export image for the pane
@@ -995,11 +1342,11 @@ view.View = class {
         if (this._editSession && isAmbapbCheckpoint(this._model)) {
             if (this._canEditModelContent()) {
                 const entity = this._resolveNodeEntity(node);
-                const isCompiled = entity && (
-                    this._isViewingCompiledAmbapbGraph() ||
+                const isCompiled = this._isViewingCompiledAmbapbGraph() ||
                     sourceEntityIdForNode(node) !== null ||
-                    (entity.nested && (entity.graphAttrName === 'compiled_prim_graph' || entity.graphAttrName === 'graph'))
-                );
+                    Boolean(node._inlineExpanded) ||
+                    (entity && entity.nested &&
+                        (entity.graphAttrName === 'compiled_prim_graph' || entity.graphAttrName === 'graph'));
                 if (isAmbapbShellNode(node)) {
                     return new view.AmbaShellNodeSidebar(this, node, this._editSession);
                 }
@@ -1019,19 +1366,69 @@ view.View = class {
         if (!this._editSession || !node) {
             return null;
         }
-        const nestedEntityId = sourceEntityIdForNode(node);
         const modelNode = sourceNodeForEntity(node);
-        if (!modelNode) {
+        if (modelNode) {
+            return locateNodeEntity(this._editSession.modified.model, modelNode);
+        }
+        if (node._inlineExpanded === true) {
             return null;
         }
-        const entity = locateNodeEntity(this._editSession.modified.model, modelNode);
-        if (entity && nestedEntityId) {
-            return {
-                ...entity,
-                nodeId: nestedEntityId
-            };
+        return locateNodeEntity(this._editSession.modified.model, node);
+    }
+
+    _findDisplayNodeForSidebar(staleNode) {
+        if (!staleNode || !this._editSession) {
+            return staleNode;
         }
-        return entity;
+        const graphIndex = this._resolveGraphIndex(this.activeTarget);
+        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+        const displayGraph = this._resolveDisplayGraph(sourceGraph);
+        const nodes = displayGraph.nodes || [];
+        if (staleNode._sourceEntityId) {
+            const byEntity = nodes.find((node) => node._sourceEntityId === staleNode._sourceEntityId);
+            if (byEntity) {
+                return byEntity;
+            }
+        }
+        if (staleNode.name) {
+            const matches = nodes.filter((node) => node.name === staleNode.name);
+            if (matches.length === 1) {
+                return matches[0];
+            }
+            if (staleNode._inlineExpanded) {
+                const inlineMatch = matches.find((node) => node._inlineExpanded);
+                if (inlineMatch) {
+                    return inlineMatch;
+                }
+            }
+        }
+        return staleNode;
+    }
+
+    _findDisplayValueForSidebar(staleValue) {
+        if (!staleValue || !this._editSession) {
+            return staleValue;
+        }
+        const modelValue = sourceValueForEntity(staleValue) || staleValue;
+        const graphIndex = this._resolveGraphIndex(this.activeTarget);
+        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+        const displayGraph = this._resolveDisplayGraph(sourceGraph);
+        for (const node of displayGraph.nodes || []) {
+            for (const argList of [node.inputs, node.outputs, node.attributes, node.blocks]) {
+                if (!Array.isArray(argList)) {
+                    continue;
+                }
+                for (const arg of argList) {
+                    const values = Array.isArray(arg.value) ? arg.value : (arg.value ? [arg.value] : []);
+                    for (const value of values) {
+                        if (value && sourceValueForEntity(value) === modelValue) {
+                            return value;
+                        }
+                    }
+                }
+            }
+        }
+        return staleValue;
     }
 
     _resolveValueEntity(value) {
@@ -1069,8 +1466,9 @@ view.View = class {
         if (!current || !current._node) {
             return;
         }
-        const sidebar = this._createNodeSidebar(current._node);
-        this._bindNodeSidebarEvents(sidebar, current._node);
+        const node = this._findDisplayNodeForSidebar(current._node);
+        const sidebar = this._createNodeSidebar(node);
+        this._bindNodeSidebarEvents(sidebar, node);
         this._sidebar.open(sidebar, entry.title || 'Node Properties');
     }
 
@@ -1083,12 +1481,10 @@ view.View = class {
         if (!current || !current._value) {
             return;
         }
-        // if the model is an ambapb checkpoint, we need to use the editable connection sidebar
-        // adds model.kind getter
-        // checkpoint files get exportable = false
+        const value = this._findDisplayValueForSidebar(current._value);
         const sidebar = this._canEditModelContent() ?
-            new view.EditableConnectionSidebar(this, current._value, current._from, current._to, this._editSession) :
-            new view.ConnectionSidebar(this, current._value, current._from, current._to);
+            new view.EditableConnectionSidebar(this, value, current._from, current._to, this._editSession) :
+            new view.ConnectionSidebar(this, value, current._from, current._to);
         this._bindConnectionSidebarEvents(sidebar);
         this._sidebar.open(sidebar, entry.title || 'Connection Properties');
     }
@@ -1102,20 +1498,11 @@ view.View = class {
         if (!change || !this._editSession) {
             return null;
         }
-        const nested = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)/.exec(change.entityId);
-        if (nested) {
-            const graph = this._editSession.modified.getGraph(Number(nested[1]));
-            const host = graph.nodes[Number(nested[2])];
-            const entry = [...(host.attributes || []), ...(host.blocks || [])]
-                .find((item) => item.name === nested[3] && item.type === 'graph' && item.value);
-            return entry && entry.value.nodes ? entry.value.nodes[Number(nested[4])] || null : null;
-        }
-        const match = /^graph:(\d+)\/node:(\d+)/.exec(change.entityId);
-        if (!match) {
+        const entityId = change.parentId || change.entityId;
+        if (!entityId) {
             return null;
         }
-        const graph = this._editSession.modified.getGraph(Number(match[1]));
-        return graph.nodes[Number(match[2])] || null;
+        return getNodeByEntityId(this._editSession.modified.model, entityId);
     }
 
     _editorChangeNeedsGraphRefresh(change) {
@@ -1136,9 +1523,18 @@ view.View = class {
             return true;
         }
         if (change.entityType === 'attribute') {
-            return false;
+            return change.entityId && change.entityId.includes('/value:') &&
+                this._batchInlineExpanded.size > 0;
         }
-        if (change.entityType === 'value' && this.options.names) {
+        if (change.entityType === 'value' && change.property === 'type') {
+            return true;
+        }
+        if (change.entityType === 'value' &&
+            (change.property === 'description' || change.property === 'name') &&
+            this._batchInlineExpanded.size > 0) {
+            return true;
+        }
+        if (change.entityType === 'value' && change.property === 'name' && this.options.names) {
             return true;
         }
         return false;
@@ -1380,7 +1776,12 @@ view.View = class {
             cache.revision === this._displayGraphRevision) {
             return cache.displayGraph;
         }
-        const displayGraph = applyBatchInlineExpansions(graph, this._batchInlineExpanded, graphIndex);
+        const displayGraph = applyBatchInlineExpansions(
+            graph,
+            this._batchInlineExpanded,
+            graphIndex,
+            this._editSession ? this._editSession.modified.model : null
+        );
         this._displayGraphCache = {
             sourceGraph: graph,
             graphIndex,
@@ -1512,29 +1913,39 @@ view.View = class {
         const items = [];
         const node = nodeView.value;
 
-        const graphIndex = 0;
-        const sourceGraph = this._editSession ? this._editSession.modified.getGraph(graphIndex) : null;
-        const isUserDefSelected = this._userDefSelectedNodes && this._userDefSelectedNodes.has(node.name);
+        const graphIndex = nodeView.context && nodeView.context.graphIndex !== undefined ?
+            nodeView.context.graphIndex :
+            this._resolveGraphIndex(this.activeTarget);
+        const sourceGraph = this._editSession ?
+            this._resolveUserDefSourceGraph(graphIndex, nodeView) :
+            null;
+        const marker = this._createRangeMarker(nodeView);
+        const isUserDefSelected = marker && marker.nodeId ?
+            this._userDefSelectedMarkers.has(marker.nodeId) :
+            false;
         const isUserDefSelectable = isUserDefSelected || (sourceGraph && this._isNodeCompatibleForUserDef(sourceGraph, node));
 
         if (node && node.type?.name !== 'UserDefCall' && node.type?.name !== 'UserDefSubgraph' && node.type?.name !== 'FragSubgraph' && isUserDefSelectable) {
             items.push({
                 label: isUserDefSelected ? 'Deselect Node for UserDefCall' : 'Select Node for UserDefCall',
                 action: () => {
+                    if (!marker || !marker.nodeId) {
+                        return;
+                    }
                     if (isUserDefSelected) {
-                        this._userDefSelectedNodes.delete(node.name);
+                        this._userDefSelectedMarkers.delete(marker.nodeId);
                         if (nodeView.context && nodeView.context.select) {
                             nodeView.context.select(null);
                         }
                     } else {
-                        this._userDefSelectedNodes.add(node.name);
+                        this._userDefSelectedMarkers.set(marker.nodeId, marker);
                     }
                     this._refreshUserDefSelectionStyles();
                 }
             });
             items.push({ separator: true });
         }
-        if (this._userDefSelectedNodes && this._userDefSelectedNodes.size > 0 && node.type?.name !== 'UserDefCall') {
+        if (this._userDefSelectedMarkers.size > 0 && node.type?.name !== 'UserDefCall') {
             items.push({
                 label: 'Create UserDefCall',
                 action: () => this._createUserDefCall()
@@ -1789,83 +2200,40 @@ view.View = class {
             return;
         }
         try {
-            const sourceGraph = this._editSession.modified.getGraph(graphIndex);
-            const workingGraph = buildExtractWorkingGraph(sourceGraph, this._batchInlineExpanded);
+            const rootGraph = this._editSession.modified.getGraph(graphIndex);
+            const extractContext = resolveExtractGraphContext(rootGraph, this._rangeBegins[0]);
+            const extractSourceGraph = extractContext.extractGraph || rootGraph;
+            const workingGraph = buildExtractWorkingGraph(extractSourceGraph, this._batchInlineExpanded);
             const beginNodes = resolveMarkedNodesByName(workingGraph, this._rangeBegins);
             const endNodes = resolveMarkedNodesByName(workingGraph, this._rangeEnds);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
 
-            const cloneFragSubgraph = (fragNode) => {
-                return {
-                    name: fragNode.name,
-                    type: fragNode.type ? Object.assign({}, fragNode.type) : null,
-                    attributes: (fragNode.attributes || []).map((attribute) => {
-                        if (attribute.type === 'graph' && attribute.value) {
-                            return {
-                                name: attribute.name,
-                                type: attribute.type,
-                                value: cloneGraph(attribute.value)
-                            };
-                        }
-                        return {
-                            name: attribute.name,
-                            type: attribute.type,
-                            value: attribute.value
-                        };
-                    }),
-                    inputs: (fragNode.inputs || []).map((input) => ({
-                        name: input.name,
-                        value: (input.value || []).map((val) => Object.assign({}, val))
-                    })),
-                    outputs: (fragNode.outputs || []).map((output) => ({
-                        name: output.name,
-                        value: (output.value || []).map((val) => Object.assign({}, val))
-                    }))
-                };
-            };
-
-            const keepFragSubgraphs = [];
-
-            // 1. Identify FragSubgraphs for non-inlined BatchCalls
-            for (const node of extracted.nodes || []) {
-                if (node.type?.name === 'BatchCall' || node.type?.name === 'UserDefCall') {
-                    const target = resolveBatchCallTarget(workingGraph, node);
-                    if (target && target.fragSubgraphNode) {
-                        const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
-                        if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
-                            keepFragSubgraphs.push(target.fragSubgraphNode);
-                        }
-                    }
-                }
-            }
-
-            // 2. Identify FragSubgraphs for already-inlined BatchCalls
-            for (const node of extracted.nodes || []) {
-                const batchCallName = inlineExpansionBatchCallName(node);
-                if (batchCallName) {
-                    const originalBatchCall = (sourceGraph.nodes || []).find((n) => n.name === batchCallName);
-                    if (originalBatchCall) {
-                        const target = resolveBatchCallTarget(sourceGraph, originalBatchCall);
-                        if (target && target.fragSubgraphNode && target.fragSubgraphNode.type?.name !== 'UserDefSubgraph') {
-                            const alreadyExtracted = extracted.nodes.some((n) => n.name === target.fragSubgraphNode.name);
-                            if (!alreadyExtracted && !keepFragSubgraphs.some((n) => n.name === target.fragSubgraphNode.name)) {
-                                keepFragSubgraphs.push(target.fragSubgraphNode);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Automatically keep all identified FragSubgraphs
-            for (const fragNode of keepFragSubgraphs) {
-                extracted.nodes.push(cloneFragSubgraph(fragNode));
-            }
+            extracted = appendReferencedSubgraphDefinitions(
+                extracted,
+                workingGraph,
+                extractSourceGraph,
+                { callsToInline: this._batchInlineExpanded }
+            );
 
             extracted = stripInlineExpansionPrefixes(extracted);
+            ensureFragSubgraphGraphAttributes(extracted);
+            extracted = promoteNestedGraphOutputs(extracted);
             this._checkpointEditHistory();
-            this._editSession.replaceGraph(graphIndex, extracted);
+            const ambapbPrimGraph = this._model && this._model._ambapb ? this._model._ambapb.primGraph : null;
+            if (extractSourceGraph && extractSourceGraph._ambapbCompiledGraph) {
+                extracted._ambapbCompiledGraph = true;
+            }
+            this._editSession.replaceGraph(graphIndex, cloneGraph(extracted));
             if (this._model && this._model.proto) {
-                this._model.proto.graph = rebuildGraphProtoFromModified(extracted, this._model.proto);
+                const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
+                    this._editSession.modified.getGraph(graphIndex),
+                    this._model.proto,
+                    ambapbPrimGraph
+                );
+                this._model.proto.graph = rebuilt.graph;
+                if (rebuilt.slicedPrimGraph && this._model._ambapb) {
+                    this._model._ambapb.primGraph = rebuilt.slicedPrimGraph;
+                }
             }
             const exportBase = stripExportExtension(this._host.document.title || 'model');
             this._exportBasenameOverride = buildSubgraphExportBasename(
@@ -1880,11 +2248,21 @@ view.View = class {
             this._persistBatchInlineState();
             this._sidebar.close();
             this._bindEditorSession();
-            await this._refreshModifiedPane();
+            await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
         } catch (error) {
             const message = error instanceof SubgraphExtractError ? error.message : (error && error.message ? error.message : error.toString());
             await this._host.message(message, true, 'OK');
         }
+    }
+
+    _resolveUserDefSourceGraph(graphIndex, nodeView) {
+        const rootGraph = this._editSession.modified.getGraph(graphIndex);
+        const marker = nodeView ? this._createRangeMarker(nodeView) : null;
+        if (!marker) {
+            return rootGraph;
+        }
+        const context = resolveExtractGraphContext(rootGraph, marker);
+        return context.extractGraph || rootGraph;
     }
 
     _isNodeCompatibleForUserDef(sourceGraph, node) {
@@ -1895,8 +2273,8 @@ view.View = class {
             return false;
         }
         let selectedType = null;
-        for (const selectedNodeName of this._userDefSelectedNodes) {
-            const selNode = (sourceGraph.nodes || []).find(n => n.name === selectedNodeName);
+        for (const marker of this._userDefSelectedMarkers.values()) {
+            const selNode = (sourceGraph.nodes || []).find((entry) => entry.name === marker.nodeName);
             if (!selNode) {
                 continue;
             }
@@ -1962,28 +2340,36 @@ view.View = class {
 
     // before, only resolved selections from sourceGraph. Now, we resolve selections from workingGraph.
     async _createUserDefCall() {
-        if (!this._editSession || !this._userDefSelectedNodes || this._userDefSelectedNodes.size === 0) {
+        if (!this._editSession || this._userDefSelectedMarkers.size === 0) {
             return;
         }
-        const graphIndex = 0;
-        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+        const markers = Array.from(this._userDefSelectedMarkers.values());
+        const graphIndex = markers[0].graphIndex;
+        if (markers.some((entry) => entry.graphIndex !== graphIndex)) {
+            await this._host.message('All selected nodes must be in the same graph.', true, 'OK');
+            return;
+        }
+        const rootGraph = this._editSession.modified.getGraph(graphIndex);
+        const extractContext = resolveExtractGraphContext(rootGraph, markers[0]);
+        const extractSourceGraph = extractContext.extractGraph || rootGraph;
+        const selectedNodeNames = new Set(markers.map((entry) => entry.nodeName));
 
-        const callsToInline = new Set();
+        const callsToInline = new Set(this._batchInlineExpanded || []);
         const inlineRegex = /inline::([^:]+)::/g;
-        for (const nodeName of this._userDefSelectedNodes) {
+        for (const marker of markers) {
             let match;
             inlineRegex.lastIndex = 0;
-            while ((match = inlineRegex.exec(nodeName)) !== null) {
+            while ((match = inlineRegex.exec(marker.nodeName)) !== null) {
                 callsToInline.add(match[1]);
             }
         }
 
-        const workingGraph = buildExtractWorkingGraph(sourceGraph, callsToInline);
-        const selectedNodes = (workingGraph.nodes || []).filter(node => {
+        const workingGraph = buildExtractWorkingGraph(extractSourceGraph, callsToInline);
+        const selectedNodes = (workingGraph.nodes || []).filter((node) => {
             if (!node || !node.name) {
                 return false;
             }
-            if (this._userDefSelectedNodes.has(node.name)) {
+            if (selectedNodeNames.has(node.name)) {
                 return true;
             }
             const batchCallName = inlineExpansionBatchCallName(node);
@@ -1994,13 +2380,22 @@ view.View = class {
         });
 
         if (selectedNodes.length === 0) {
+            await this._host.message('Selected nodes are no longer available in the working graph.', true, 'OK');
             return;
         }
 
         try {
             const { beginNodes, endNodes } = findBoundaryNodes(workingGraph, selectedNodes);
             let extracted = extractSubgraph(workingGraph, beginNodes, endNodes);
+            extracted = appendReferencedSubgraphDefinitions(
+                extracted,
+                workingGraph,
+                extractSourceGraph,
+                { callsToInline }
+            );
             extracted = stripInlineExpansionPrefixes(extracted);
+            ensureFragSubgraphGraphAttributes(extracted);
+            extracted = promoteNestedGraphOutputs(extracted);
             const subGraphId = genUniqueNodeName('userdefsubgraph', workingGraph);
             extracted.name = subGraphId;
             const callNodeName = genUniqueNodeName('userDefCall', workingGraph);
@@ -2093,6 +2488,10 @@ view.View = class {
             const nextNodes = [];
             for (let i = 0; i < workingGraph.nodes.length; i++) {
                 const node = workingGraph.nodes[i];
+                if (isSubgraphDefinitionNode(node)) {
+                    nextNodes.push(node);
+                    continue;
+                }
                 if (keepSet.has(node)) {
                     if (i === rootNodeIndex) {
                         nextNodes.push(userDefCallNode);
@@ -2173,12 +2572,25 @@ view.View = class {
                 outputs: (workingGraph.outputs || []).map((output) => remapArgument(output)),
                 nodes: finalNodes
             };
+            promoteNestedGraphOutputs(modifiedGraph);
 
             this._checkpointEditHistory();
-            this._editSession.replaceGraph(graphIndex, modifiedGraph);
+            if (extractSourceGraph && extractSourceGraph._ambapbCompiledGraph) {
+                modifiedGraph._ambapbCompiledGraph = true;
+            }
+            this._editSession.replaceGraph(graphIndex, cloneGraph(modifiedGraph));
 
             if (this._model && this._model.proto) {
-                this._model.proto.graph = rebuildGraphProtoFromModified(modifiedGraph, this._model.proto);
+                const ambapbPrimGraph = this._model._ambapb ? this._model._ambapb.primGraph : null;
+                const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
+                    this._editSession.modified.getGraph(graphIndex),
+                    this._model.proto,
+                    ambapbPrimGraph
+                );
+                this._model.proto.graph = rebuilt.graph;
+                if (rebuilt.slicedPrimGraph && this._model._ambapb) {
+                    this._model._ambapb.primGraph = rebuilt.slicedPrimGraph;
+                }
             }
 
             for (const callName of callsToInline) {
@@ -2187,10 +2599,10 @@ view.View = class {
             this._persistBatchInlineState();
             this._syncBatchInlineToSession();
 
-            this._userDefSelectedNodes.clear();
+            this._userDefSelectedMarkers.clear();
             this._sidebar.close();
             this._bindEditorSession();
-            await this._refreshModifiedPane();
+            await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
         } catch (error) {
             await this._host.message(error.message || error.toString(), true, 'OK');
         }
@@ -2299,23 +2711,46 @@ view.View = class {
             const state = this._path && this._path.length > 0 && this._path[0] ? this._path[0].state : null;
             const previous = this._rightPane.graph;
             const zoom = previous ? previous.zoom : 1;
-            const container = this._rightPane.container;
-            const scrollLeft = container ? container.scrollLeft : 0;
-            const scrollTop = container ? container.scrollTop : 0;
+            const scrollContainer = this._paneScrollContainer(this._rightPane) || this._rightPane.container;
+            const restoreState = Object.assign({}, state || {}, {
+                zoom,
+                scrollLeft: scrollContainer ? scrollContainer.scrollLeft : 0,
+                scrollTop: scrollContainer ? scrollContainer.scrollTop : 0,
+            });
             if (previous && this._target === previous) {
                 previous.unregister();
             }
-            await this._rightPane.render(this._resolveModifiedTarget(this.activeTarget), this.activeSignature, state);
+            await this._rightPane.render(this.activeTarget, this.activeSignature, restoreState);
             if (this._rightPane.graph) {
                 this._rightPane.graph.zoom = zoom;
                 this._rightPane.graph.register();
                 this.target = this._rightPane.graph;
-                if (container) {
-                    container.scrollLeft = scrollLeft;
-                    container.scrollTop = scrollTop;
-                }
             }
         });
+    }
+
+    _resetPanePathsToModuleGraph(moduleGraph, signature) {
+        if (!moduleGraph) {
+            return;
+        }
+        const entry = {
+            target: moduleGraph,
+            signature: signature || this.activeSignature,
+            state: null
+        };
+        this._leftPath = [{ ...entry, state: null }];
+        this._rightPath = [{ ...entry, state: null }];
+        this._activePane = 'modified';
+    }
+
+    async _refreshGraphPanesAfterStructuralEdit(graphIndex = 0) {
+        if (!this._editSession) {
+            return;
+        }
+        this._invalidateDisplayGraphCache();
+        const moduleGraph = this._editSession.modified.getGraph(graphIndex);
+        this._resetPanePathsToModuleGraph(moduleGraph, this.activeSignature);
+        await this.render(moduleGraph, this.activeSignature);
     }
 
     _resolveGraphIndex(target) {
@@ -2329,8 +2764,14 @@ view.View = class {
             }
         }
         const originalModules = this._editSession.original.modules || [];
+        const baselineModules = this._editSession.originalModules || originalModules;
         for (let i = 0; i < originalModules.length; i++) {
             if (originalModules[i] === target) {
+                return i;
+            }
+        }
+        for (let i = 0; i < baselineModules.length; i++) {
+            if (baselineModules[i] === target) {
                 return i;
             }
         }
@@ -2349,7 +2790,7 @@ view.View = class {
     _graphOptions(pane, target, model) {
         return {
             paneId: pane.id,
-            container: pane.container,
+            container: this._paneScrollContainer(pane) || pane.container,
             readOnly: pane.readOnly,
             deltaTracker: pane.deltaTracker,
             graphIndex: this._resolveGraphIndex(target),
@@ -2363,32 +2804,73 @@ view.View = class {
             return target;
         }
         if (locateGraphPath(session.modified.model, target)) {
-            return target;
+            return this._resolveCheckpointModifiedGraph(target);
         }
         const pathInfo = locateGraphPath(session.original, target);
         if (pathInfo) {
             const resolved = getGraphByPath(session.modified.model, pathInfo);
             if (resolved) {
-                return resolved;
+                return this._resolveCheckpointModifiedGraph(resolved);
             }
         }
-        const modules = session.original.modules || [];
-        for (let i = 0; i < modules.length; i++) {
-            if (modules[i] === target) {
-                return session.modified.getGraph(i);
+        const modifiedModules = session.modified.model.modules || [];
+        for (let i = 0; i < modifiedModules.length; i++) {
+            if (modifiedModules[i] === target) {
+                return this._resolveCheckpointModifiedGraph(modifiedModules[i]);
+            }
+        }
+        const originalModules = session.original.modules || [];
+        for (let i = 0; i < originalModules.length; i++) {
+            if (originalModules[i] === target) {
+                return this._resolveCheckpointModifiedGraph(session.modified.getGraph(i));
             }
         }
         const name = target.name || target.identifier;
         if (name) {
-            const modifiedModules = session.modified.model.modules || [];
             for (const graph of modifiedModules) {
+                const result = this._findGraphByName(graph, name);
+                if (result) {
+                    return this._resolveCheckpointModifiedGraph(result);
+                }
+            }
+        }
+        return this._resolveCheckpointModifiedGraph(session.modified.getGraph(0));
+    }
+
+    _resolveCheckpointModifiedGraph(graph) {
+        if (!isAmbapbCheckpoint(this._model)) {
+            return graph;
+        }
+        return resolveCheckpointRuntimeGraph(graph);
+    }
+
+    _resolveOriginalTarget(target) {
+        const session = this._editSession;
+        if (!session || !target) {
+            return this._resolveCheckpointModifiedGraph(target);
+        }
+        const baselineModules = session.originalModules || session.original.modules || [];
+        const shellModules = session.original.modules || [];
+        for (let i = 0; i < shellModules.length; i++) {
+            if (shellModules[i] === target) {
+                return baselineModules[i] || this._resolveCheckpointModifiedGraph(shellModules[i]);
+            }
+        }
+        for (let i = 0; i < baselineModules.length; i++) {
+            if (baselineModules[i] === target) {
+                return baselineModules[i];
+            }
+        }
+        const name = target.name || target.identifier;
+        if (name) {
+            for (const graph of baselineModules) {
                 const result = this._findGraphByName(graph, name);
                 if (result) {
                     return result;
                 }
             }
         }
-        return session.modified.getGraph(0);
+        return baselineModules[0] || null;
     }
 
     _findGraphByName(graph, name) {
@@ -2426,18 +2908,18 @@ view.View = class {
     // render the graph in the pane
     async _renderGraphInPane(pane, target, signature, state, model) {
         const container = pane.container;
-        const label = container.querySelector('.graph-pane-label');
-        while (container.lastChild) {
-            container.removeChild(container.lastChild);
+        if (pane.id !== 'original') {
+            this._ensurePaneScroll(container);
+            this._ensurePanePath(container, pane.id);
         }
-        if (label) {
-            container.appendChild(label);
-        }
+        this._clearPaneGraphContent(pane);
         let status = '';
         if (target) {
             const document = this._host.document;
             this._restoreBatchInlineState(state);
-            const sourceGraph = target;
+            const sourceGraph = pane.readOnly ?
+                this._resolveOriginalTarget(target) :
+                this._resolveModifiedTarget(target);
             const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph, model));
@@ -2464,6 +2946,7 @@ view.View = class {
         } else {
             pane._setGraph(null);
         }
+        this._updatePanePathUI(pane.id);
         return status;
     }
 
@@ -2504,7 +2987,9 @@ view.View = class {
         if (options.skipShow) {
             this._ensureDefaultScreen();
         }
-        const pane = options.paneId === 'original' ? this._leftPane : this._rightPane;
+        const pane = this._paneById(options.paneId) || (options.paneId === 'original' ? this._leftPane : this._rightPane);
+        // since path names are named with merge-
+        const isMergePane = Boolean(options.paneId && options.paneId.startsWith('merge-'));
         const targetGraph = pane ? pane.graph : this._target;
         const origin = targetGraph ? targetGraph._origin : null;
         const snapshot = new Map();
@@ -2519,13 +3004,17 @@ view.View = class {
                 }
             }
         }
-        const container = pane ? pane.container : null;
+        const scrollContainer = pane ? (this._paneScrollContainer(pane) || pane.container) : null;
+        const savedScroll = !anchor && scrollContainer ? {
+            left: scrollContainer.scrollLeft,
+            top: scrollContainer.scrollTop
+        } : null;
         const zoom = targetGraph ? targetGraph._zoom : 1;
         const blocks = targetGraph ? targetGraph.blocks : null;
 
-        const panePath = options.paneId === 'original' ? this._leftPath : this._rightPath;
-        const paneTarget = panePath && panePath.length > 0 ? panePath[0].target : this.activeTarget;
-        const paneSignature = panePath && panePath.length > 0 ? panePath[0].signature : this.activeSignature;
+        const panePath = isMergePane ? [] : (options.paneId === 'original' ? this._leftPath : this._rightPath);
+        const paneTarget = panePath.length > 0 ? panePath[0].target : ((targetGraph && targetGraph.target) || this.activeTarget);
+        const paneSignature = panePath.length > 0 ? panePath[0].signature : null;
 
         if (blocks && blocks.size > 0 && panePath.length > 0) {
             panePath[0].state = Object.assign(panePath[0].state || {}, { blocks });
@@ -2535,10 +3024,13 @@ view.View = class {
         if (origin && paneTarget && pane) {
             previous = origin.getScreenCTM();
             const oldChildren = Array.from(origin.children);
-            const sourceGraph = pane.readOnly ? paneTarget : this._resolveModifiedTarget(paneTarget);
+            const sourceGraph = pane.readOnly ?
+                this._resolveOriginalTarget(paneTarget) :
+                this._resolveModifiedTarget(paneTarget);
             const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
-            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph));
+            const renderModel = isMergePane && targetGraph ? targetGraph._renderModel : null;
+            const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph, renderModel));
             viewGraph.blocks = targetGraph ? targetGraph.blocks : new Set();
             viewGraph.add(graph, paneSignature);
             viewGraph.addTunnels();
@@ -2559,12 +3051,19 @@ view.View = class {
                     viewGraph._background.setAttribute('height', 0);
                 }
                 const state = panePath && panePath.length > 0 ? panePath[0].state : null;
-                viewGraph.restore(state);
+                const restoreState = savedScroll ?
+                    Object.assign({}, state, {
+                        scrollLeft: savedScroll.left,
+                        scrollTop: savedScroll.top,
+                        zoom
+                    }) :
+                    state;
+                viewGraph.restore(restoreState);
                 viewGraph.refreshDeltaStyles();
                 viewGraph.refreshRangeMarkerStyles();
                 viewGraph.refreshInlineExpandedStyles();
                 pane._setGraph(viewGraph);
-                if (!this._leftPane || pane.id === this._activePane) {
+                if (!isMergePane && (!this._leftPane || pane.id === this._activePane)) {
                     this.target = viewGraph;
                 } else {
                     if (targetGraph) {
@@ -2582,27 +3081,30 @@ view.View = class {
                     }
                 }
             }
-        } else {
+        } else if (!isMergePane) {
             await this.render(this.activeTarget, this.activeSignature);
         }
         if (!options.skipShow) {
-            this.show(null);
+            this.show(this._page === 'merge-workspace' ? 'merge-workspace' : null);
+        }
+        if (options.paneId) {
+            this._updatePanePathUI(options.paneId);
         }
         const currentPaneGraph = pane ? pane.graph : this._target;
         if (currentPaneGraph) {
             currentPaneGraph.zoom = zoom;
-            if (container && anchor) {
+            if (scrollContainer && anchor) {
                 const anchorNode = currentPaneGraph.find(anchor.value);
                 if (anchorNode instanceof grapher.Node && anchorNode.element) {
                     let newRect = anchorNode.element.getBoundingClientRect();
                     if (anchorNode.definition && anchorNode.definition.element) {
                         newRect = anchorNode.definition.element.getBoundingClientRect();
                     }
-                    if (container.scrollWidth > container.clientWidth) {
-                        container.scrollLeft += (newRect.left - anchor.rect.left);
+                    if (scrollContainer.scrollWidth > scrollContainer.clientWidth) {
+                        scrollContainer.scrollLeft += (newRect.left - anchor.rect.left);
                     }
-                    if (container.scrollHeight > container.clientHeight) {
-                        container.scrollTop += (newRect.top - anchor.rect.top);
+                    if (scrollContainer.scrollHeight > scrollContainer.clientHeight) {
+                        scrollContainer.scrollTop += (newRect.top - anchor.rect.top);
                     }
                 }
                 delete currentPaneGraph._scrollLeft;
@@ -2956,62 +3458,14 @@ view.View = class {
     }
 
     _updateToolbarPath() {
-        const path = this._element('toolbar-path');
-        const back = this._element('toolbar-path-back-button');
-        if (path && back) {
-            while (path.children.length > 1) {
-                path.removeChild(path.lastElementChild);
-            }
-            if (this._path.length <= 1) {
-                back.style.opacity = 0;
-            } else {
-                back.style.opacity = 1;
-                const last = this._path.length - 2;
-                const count = Math.min(2, last);
-                const document = this.host.document;
-                if (count < last) {
-                    const element = document.createElement('button');
-                    element.setAttribute('class', 'toolbar-path-name-button');
-                    element.innerHTML = '&hellip;';
-                    path.appendChild(element);
-                }
-                for (let i = count; i >= 0; i--) {
-                    const target = this._path[i].target;
-                    const element = document.createElement('button');
-                    element.setAttribute('class', 'toolbar-path-name-button');
-                    element.addEventListener('click', async () => {
-                        if (i > 0) {
-                            this._path = this._path.slice(i);
-                            await this._updateTarget(this._model, this._path);
-                        } else {
-                            await this.showTargetProperties(target);
-                        }
-                    });
-                    let name = '';
-                    if (target && target.identifier) {
-                        name = target.identifier;
-                    } else if (target && target.name) {
-                        name = target.name;
-                    }
-                    if (name.length > 24) {
-                        element.setAttribute('title', name);
-                        const truncated = name.substring(name.length - 24, name.length);
-                        element.innerHTML = '&hellip;';
-                        const text = document.createTextNode(truncated);
-                        element.appendChild(text);
-                    } else {
-                        element.removeAttribute('title');
-                        if (name) {
-                            element.textContent = name;
-                        } else {
-                            element.innerHTML = '&nbsp;';
-                        }
-                    }
-                    path.appendChild(element);
-                }
-            }
-            this._select.update(this._model, this._path);
-            const button = this._element('sidebar-target-button');
+        this._updatePanePathUI('original');
+        this._updatePanePathUI('modified');
+        this._updatePanePathUI('merge-upstream');
+        this._updatePanePathUI('merge-downstream');
+        this._updatePanePathUI('merge-preview');
+        this._select.update(this._model, this._path);
+        const button = this._element('sidebar-target-button');
+        if (button) {
             if (this._path.length > 0) {
                 const type = this._path[this._path.length - 1].type || 'graph';
                 const name = type.charAt(0).toUpperCase() + type.slice(1);
@@ -3054,36 +3508,95 @@ view.View = class {
     }
 
     async pushTarget(graph, context, paneId) {
-        if (paneId) {
+        const isMergePane = Boolean(paneId && paneId.startsWith('merge-'));
+
+        if (paneId === 'original' || paneId === 'modified') {
             this._activePane = paneId;
         }
-        if (graph && graph !== this.activeTarget && Array.isArray(graph.nodes)) {
-            const currentPaneGraph = (paneId === 'original' ? this._leftPane?.graph : this._rightPane?.graph) || this._target;
-            if (currentPaneGraph) {
-                currentPaneGraph.select(null);
+
+        const currentPaneGraph = this._paneGraph(paneId) || this._target;
+        const currentTarget = currentPaneGraph && currentPaneGraph.target
+            ? currentPaneGraph.target
+            : this.activeTarget;
+
+        if (!graph || graph === currentTarget || !Array.isArray(graph.nodes)) {
+            return;
+        }
+
+        if (currentPaneGraph) {
+            currentPaneGraph.select(null);
+        }
+        this._sidebar.close();
+
+        if (isMergePane) {
+            await this._pushMergeTarget(graph, context, paneId, currentPaneGraph);
+            return;
+        }
+
+        let path = this._panePathArray(paneId);
+        if ((!path || path.length === 0) && currentPaneGraph && currentPaneGraph.target) {
+            const root = { target: currentPaneGraph.target, signature: null, state: null };
+            if (paneId === 'original') {
+                this._leftPath = [root];
+            } else {
+                this._rightPath = [root];
             }
-            this._sidebar.close();
-            if (context && this._path.length > 0) {
-                this._path[0].state = {
-                    context,
-                    zoom: currentPaneGraph ? currentPaneGraph.zoom : 1,
-                    blocks: currentPaneGraph ? currentPaneGraph.blocks : new Set(),
-                    batchInlineExpanded: Array.from(this._batchInlineExpanded)
-                };
-            }
-            const signature = Array.isArray(graph.signatures) && graph.signatures.length > 0 ? graph.signatures[0] : null;
-            const entry = { target: graph, signature };
-            const stack = [entry].concat(this._path);
-            await this._updateTarget(this._model, stack);
+            path = this._panePathArray(paneId);
+        }
+
+        if (context && path.length > 0) {
+            path[0].state = {
+                context,
+                zoom: currentPaneGraph ? currentPaneGraph.zoom : 1,
+                blocks: currentPaneGraph ? currentPaneGraph.blocks : new Set(),
+                batchInlineExpanded: Array.from(this._batchInlineExpanded)
+            };
+        }
+        const signature = Array.isArray(graph.signatures) && graph.signatures.length > 0 ? graph.signatures[0] : null;
+        const entry = { target: graph, signature, state: null };
+        const stack = [entry].concat(path);
+
+        if (paneId === 'original') {
+            this._leftPath = stack;
+        } else {
+            this._rightPath = stack;
+        }
+
+        await this._renderEditorPane(paneId);
+        if (paneId === this._activePane) {
+            this._updateToolbarPath();
         }
     }
 
-    async popTarget() {
-        if (this._path.length > 1) {
-            this._sidebar.close();
-            return await this._updateTarget(this._model, this._path.slice(1));
+    async popTarget(paneId) {
+        const id = paneId || this._activePane;
+        if (id && id.startsWith('merge-')) {
+            return await this._popMergeTarget(id);
         }
-        return null;
+        if (id !== 'original' && id !== 'modified') {
+            return null;
+        }
+
+        const path = this._panePathArray(id);
+        if (!path || path.length <= 1) {
+            return null;
+        }
+
+        this._sidebar.close();
+        const newPath = path.slice(1);
+        if (id === 'original') {
+            this._leftPath = newPath;
+        } else {
+            this._rightPath = newPath;
+        }
+
+        await this._renderEditorPane(id);
+        if (id === this._activePane) {
+            this._updateToolbarPath();
+        } else {
+            this._updatePanePathUI(id);
+        }
+        return this._model;
     }
 
     async render(target, signature) {
@@ -3107,9 +3620,7 @@ view.View = class {
             const leftSignature = leftEntry.signature || signature;
             const rightSignature = rightEntry.signature || signature;
 
-            const modifiedRightTarget = this._resolveModifiedTarget(rightTarget);
-
-            status = await this._rightPane.render(modifiedRightTarget, rightSignature, rightState);
+            status = await this._rightPane.render(rightTarget, rightSignature, rightState);
             const leftStatus = await this._leftPane.render(leftTarget, leftSignature, leftState);
             if (status === '') {
                 status = leftStatus;
@@ -3121,6 +3632,8 @@ view.View = class {
                 this._leftPane.graph.register();
             }
         }
+        this._updatePanePathUI('original');
+        this._updatePanePathUI('modified');
         return status;
     }
 
@@ -4748,6 +5261,40 @@ view.Graph = class extends grapher.Graph {
                 }
             }
         }
+        this._promoteOrphanOutputTerminals(graph);
+    }
+
+    _promoteOrphanOutputTerminals(graph) {
+        const covered = new Set();
+        for (const output of graph.outputs || []) {
+            for (const value of output.value || []) {
+                if (value && value.name) {
+                    covered.add(value.name);
+                }
+            }
+        }
+
+        for (const node of graph.nodes || []) {
+            for (const output of node.outputs || []) {
+                for (const value of output.value || []) {
+                    if (!value || !value.name || covered.has(value.name)) {
+                        continue;
+                    }
+                    const viewValue = this._values.get(value.name);
+                    if (!viewValue || !viewValue.from || viewValue.to.length > 0) {
+                        continue;
+                    }
+                    const argument = {
+                        name: value.name,
+                        value: [{ name: value.name, type: value.type }]
+                    };
+                    const viewOutput = this.createOutput(argument);
+                    this.setNode(viewOutput);
+                    viewValue.to.push(viewOutput);
+                    covered.add(value.name);
+                }
+            }
+        }
     }
 
     addTunnels() {
@@ -5156,6 +5703,16 @@ view.Graph = class extends grapher.Graph {
         canvas.setAttribute('height', height);
         this._zoom = state ? state.zoom : 1;
         this._updateZoom(this._zoom);
+        
+        const preserveScroll = state &&
+            typeof state.scrollLeft === 'number' &&
+            typeof state.scrollTop === 'number';
+        if (preserveScroll) {
+            container.scrollLeft = state.scrollLeft;
+            container.scrollTop = state.scrollTop;
+            return;
+        }
+
         const contextNode = state && state.context ? this._table.get(state.context) : null;
         if (contextNode && contextNode.element) {
             this.scrollTo([contextNode.element], 'instant');
@@ -5597,7 +6154,9 @@ view.Node = class extends grapher.Node {
             return;
         }
         const view = this.context.view;
-        const isSelected = view._userDefSelectedNodes && view._userDefSelectedNodes.has(this.value.name);
+        const entity = view._resolveNodeEntity(this.value);
+        const nodeId = entity && entity.nodeId;
+        const isSelected = Boolean(nodeId && view._userDefSelectedMarkers.has(nodeId));
         this.element.classList.toggle('userdef-selected', Boolean(isSelected));
     }
 
@@ -6080,13 +6639,11 @@ view.Value = class {
             for (let i = 0; i < this.to.length; i++) {
                 const to = this.to[i];
                 let content = '';
-                const type = this.value.type;
-                if (type &&
-                    type.shape &&
-                    type.shape.dimensions &&
-                    type.shape.dimensions.length > 0 &&
-                    type.shape.dimensions.every((dim) => !dim || Number.isInteger(dim) || typeof dim === 'bigint' || (typeof dim === 'string'))) {
-                    content = type.shape.dimensions.map((dim) => (dim !== null && dim !== undefined && dim !== -1 && dim !== -1n) ? dim : '?').join('\u00D7');
+                const dimensions = tensorTypeShapeDimensions(this.value.type);
+                if (Array.isArray(dimensions) &&
+                    dimensions.length > 0 &&
+                    dimensions.every((dim) => !dim || Number.isInteger(dim) || typeof dim === 'bigint' || typeof dim === 'string')) {
+                    content = dimensions.map((dim) => (dim !== null && dim !== undefined && dim !== -1 && dim !== -1n) ? dim : '?').join('\u00D7');
                     content = content.length > 16 ? '' : content;
                 }
                 if (this.context.options.names) {
@@ -6763,11 +7320,12 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
     }
 
     render() {
-        const node = this._node;
+        const displayNode = this._node;
+        const node = sourceNodeForEntity(displayNode) || displayNode;
         const nodeId = this._entity ? this._entity.nodeId : null;
-        if (node.type) {
-            const type = node.type;
-            const item = this.addProperty('type', node.type.identifier || node.type.name);
+        if (displayNode.type) {
+            const type = displayNode.type;
+            const item = this.addProperty('type', displayNode.type.identifier || displayNode.type.name);
             if (type && (type.description || type.inputs || type.outputs || type.attributes)) {
                 let icon = '?';
                 let tooltip = 'Show Definition';
@@ -6781,9 +7339,9 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
                     this.emit('show-definition', null);
                 });
             }
-            const module = node.type.module;
-            const version = node.type.version;
-            const status = node.type.status;
+            const module = displayNode.type.module;
+            const version = displayNode.type.version;
+            const status = displayNode.type.status;
             if (module || version || status) {
                 const list = [module, version ? `v${version}` : '', status];
                 const value = list.filter((value) => value).join(' ');
@@ -6850,26 +7408,26 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
         if (nodeId) {
             this.addAttributeControls(nodeId, {
                 buttonLabel: '+ Add Attribute',
-                validateName: (name) => AttributeSchemaResolver.validateName(this._node, name),
-                resolveType: (name) => AttributeSchemaResolver.resolveType(this._node.type, name),
+                validateName: (name) => AttributeSchemaResolver.validateName(displayNode, name),
+                resolveType: (name) => AttributeSchemaResolver.resolveType(displayNode.type, name),
                 parseValue: (text, type) => AttributeSchemaResolver.parseValue(text, type)
             });
         }
-        const inputs = node.inputs;
+        const inputs = displayNode.inputs;
         if (Array.isArray(inputs) && inputs.length > 0) {
             this.addSection('Inputs');
             for (const input of inputs) {
                 this.addArgument(input.name, input);
             }
         }
-        const outputs = node.outputs;
+        const outputs = displayNode.outputs;
         if (Array.isArray(outputs) && outputs.length > 0) {
             this.addSection('Outputs');
             for (const output of outputs) {
                 this.addArgument(output.name, output);
             }
         }
-        const blocks = node.blocks;
+        const blocks = displayNode.blocks;
         if (Array.isArray(blocks) && blocks.length > 0) {
             this.addSection('Blocks');
             for (const block of blocks) {
@@ -7453,20 +8011,39 @@ view.EditableTextView = class extends view.Control {
         input.setAttribute('type', 'text');
         input.setAttribute('class', 'sidebar-editable-input');
         input.value = view.EditableAttributeView.formatValue(value);
-        const commit = () => {
-            const parsed = this._parse ? this._parse(input.value) : input.value;
+        const tryCommit = (showError) => {
+            let parsed = input.value;
+            try {
+                parsed = this._parse ? this._parse(input.value) : input.value;
+            } catch (error) {
+                if (showError) {
+                    input.value = view.EditableAttributeView.formatValue(this._committedValue);
+                    this.error(error, true);
+                }
+                return;
+            }
             if (!view.EditableAttributeView.valuesEqual(parsed, this._committedValue) && this._onCommit) {
                 this._committedValue = parsed;
+                input.value = view.EditableAttributeView.formatValue(parsed);
                 this._onCommit(parsed);
             }
         };
-        input.addEventListener('blur', commit);
+        input.addEventListener('blur', () => tryCommit(true));
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 input.blur();
             }
         });
+        if (options.liveCommit) {
+            let timer = null;
+            input.addEventListener('input', () => {
+                if (timer) {
+                    clearTimeout(timer);
+                }
+                timer = setTimeout(() => tryCommit(false), 400);
+            });
+        }
         line.appendChild(input);
         this.element.appendChild(line);
     }
@@ -8131,7 +8708,8 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
     }
 
     render() {
-        const value = this._value;
+        const displayValue = this._value;
+        const value = sourceValueForEntity(displayValue) || displayValue;
         const from = this._from;
         const to = this._to;
         const valueId = this._entity ? this._entity.valueId : null;
@@ -8146,7 +8724,7 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
                     newValue: newName
                 });
             }, { style: 'nowrap' });
-            this.addEditableProperty('type', value.type !== undefined ? String(value.type) : '', (newType) => {
+            this.addEditableProperty('type', formatConnectionType(value.type), (newType) => {
                 this._view.applyEditorPatch({
                     entityId: valueId,
                     entityType: 'value',
@@ -8154,7 +8732,11 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
                     property: 'type',
                     newValue: newType
                 });
-            }, { style: 'nowrap' });
+            }, {
+                style: 'nowrap',
+                liveCommit: true,
+                parse: (text) => canonicalizeTensorTypeString(text)
+            });
             this.addEditableProperty('description', value.description !== undefined ? value.description : '', (newDescription) => {
                 this._view.applyEditorPatch({
                     entityId: valueId,
