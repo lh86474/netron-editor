@@ -68,6 +68,11 @@ const referenceName = (value) => {
     }
     return '';
 };
+
+const isNestedExportEntity = (location) => {
+    return Boolean(location && location.nested);
+}
+
 // entityIds point to some editable in a loaded graph. 
 // Those are keys in DeltaTracker, the handles in editor patches, what export/UI code uses to find the right node
 // this function uses some fancy regex and parsing to extract the graph index, target, index, and attribute index
@@ -119,6 +124,16 @@ const parseEntityId = (entityId) => {
             valueIndex: Number(valueMatch[2])
         };
     }
+    const nestedNodeMatch =
+        /^graph:(\d+)((?:\/node:\d+\/[^/]+\/node:\d+)+)(?:\/attr:(\d+))?$/.exec(entityId);
+    if (nestedNodeMatch) {
+        return {
+            graphIndex: Number(nestedNodeMatch[1]),
+            target: 'nested-node',
+            nested: true,
+            attributeIndex: nestedNodeMatch[3] !== undefined ? Number(nestedNodeMatch[3]) : null
+        };
+    }
     return null;
 };
 // This is just a formatter for metadata. It joins arrays with commas and handles
@@ -166,11 +181,18 @@ const getValueNameById = (editSession, graphIndex, valueIndex) => {
     return null;
 };
 
+const isValueEntityId = (entityId) => {
+    return Boolean(entityId && /\/value:\d+(?:\/attr:\d+)?$/.test(entityId));
+}
+
 const findModifiedValueForEntityId = (editSession, entityId) => {
     if (!editSession || !entityId) {
         return null;
     }
     const baseEntityId = entityId.replace(/\/attr:\d+$/, '');
+    if (!isValueEntityId(baseEntityId)) {
+        return null;
+    }
     const value = getValueByEntityId(editSession.modified.model, baseEntityId);
     if (value) {
         return value;
@@ -791,6 +813,9 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
         if (!location) {
             continue;
         }
+        if (isNestedExportEntity(location)) {
+            continue;
+        }
         if (location.target === 'value') {
             const valueName = resolveValueExportName(editSession, change.entityId, location);
             if (!valueName) {
@@ -816,6 +841,9 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
     for (const change of modifications) {
         const location = parseEntityId(change.entityId);
         if (!location) {
+            continue;
+        }
+        if (isNestedExportEntity(location)) {
             continue;
         }
         if (location.target === 'value') {
@@ -859,6 +887,9 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
             if (value) {
                 location = { target: 'value' };
             }
+        }
+        if (isNestedExportEntity(location)) {
+            continue;
         }
         if (!location) {
             continue;

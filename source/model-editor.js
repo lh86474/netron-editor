@@ -478,7 +478,7 @@ const parseValueEntityId = (entityId) => {
     }
     const match = /^graph:(\d+)\/value:(\d+)$/.exec(entityId);
     if (!match) {
-        throw new Error(`Invalid value entityId: ${entityId}`);
+        return null;
     }
     return {
         graphIndex: Number(match[1]),
@@ -669,7 +669,13 @@ const attributeNameFromProperty = (property) => {
 };
 
 export const getValueByEntityId = (model, entityId) => {
+    if (!model || !entityId) {
+        return null;
+    }
     const location = parseValueEntityId(entityId);
+    if (!location) {
+        return null;
+    }
     if (location.target === 'nested-value') {
         return getNestedCompiledGraphValue(model, location);
     }
