@@ -21,6 +21,7 @@ import {
     getPrimGraphSnapshotValue,
     isAmbapbShellNode,
     PRIM_GRAPH_ATTRIBUTE,
+    resolveCheckpointRuntimeGraph,
     syncShellAttribute,
     validateAmbapbPatch
 } from './ambapb-editor.js';
@@ -1671,10 +1672,26 @@ class EditableModel {
     }
 }
 
+const buildOriginalBaselineModules = (original) => {
+    const frozen = readModel(original);
+    if (!original || !original._ambapb) {
+        return frozen.modules;
+    }
+    return frozen.modules.map((graph) => {
+        const runtime = resolveCheckpointRuntimeGraph(graph);
+        const baseline = cloneGraph(runtime);
+        if (runtime._ambapbCompiledGraph) {
+            baseline._ambapbCompiledGraph = true;
+        }
+        return baseline;
+    });
+};
+
 class EditorState {
 
     constructor(original) {
         this._original = original;
+        this._originalBaselineModules = buildOriginalBaselineModules(original);
         const normalized = readModel(original);
         if (original._ambapb) {
             attachAmbapbEditingState(normalized, original._ambapb);
@@ -1688,6 +1705,10 @@ class EditorState {
 
     get original() {
         return this._original;
+    }
+
+    get originalModules() {
+        return this._originalBaselineModules;
     }
 
     replaceGraph(graphIndex, newGraph) {
