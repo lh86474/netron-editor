@@ -240,10 +240,108 @@ const readModel = (model) => {
 };
 
 const NESTED_COMPILED_NODE_ENTITY_RE =
-    /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)(?:\/attr:(\d+))?$/;
+    /^graph:(\d+)(?:\/node:\d+\/[^/]+\/node:\d+)+(?:\/attr:\d+)?$/;
 
 const NESTED_COMPILED_VALUE_ENTITY_RE =
-    /^graph:(\d+)\/node:(\d+)\/([^/]+)\/value:(\d+)(?:\/attr:(\d+))?$/;
+    /^graph:(\d+)(?:\/node:\d+\/[^/]+)*\/value:\d+(?:\/attr:\d+)?$/;
+
+const parseNestedNodeEntityPath = (entityId) => {
+    if (!entityId) {
+        return null;
+    }
+    const attrMatch = /\/attr:(\d+)$/.exec(entityId);
+    const attributeIndex = attrMatch ? Number(attrMatch[1]) : null;
+    const base = attrMatch ? entityId.slice(0, -attrMatch[0].length) : entityId;
+    const topMatch = /^graph:(\d+)\/node:(\d+)$/.exec(base);
+    if (topMatch) {
+        return {
+            graphIndex: Number(topMatch[1]),
+            nodeIndex: Number(topMatch[2]),
+            attributeIndex
+        };
+    }
+    const rootMatch = /^graph:(\d+)/.exec(base);
+    if (!rootMatch) {
+        return null;
+    }
+    const segments = [];
+    const segmentRe = /\/node:(\d+)\/([^/]+)\/node:(\d+)/g;
+    let match = null;
+    while ((match = segmentRe.exec(base)) !== null) {
+        segments.push({
+            hostNodeIndex: Number(match[1]),
+            graphAttrName: match[2],
+            nodeIndex: Number(match[3])
+        });
+    }
+    if (segments.length === 0) {
+        return null;
+    }
+    return {
+        graphIndex: Number(rootMatch[1]),
+        segments,
+        nodeIndex: segments[segments.length - 1].nodeIndex,
+        attributeIndex
+    };
+};
+
+const parseNestedValueEntityPath = (entityId) => {
+    if (!entityId) {
+        return null;
+    }
+    const attrMatch = /\/attr:(\d+)$/.exec(entityId);
+    const attributeIndex = attrMatch ? Number(attrMatch[1]) : null;
+    const base = attrMatch ? entityId.slice(0, -attrMatch[0].length) : entityId;
+    const topMatch = /^graph:(\d+)\/value:(\d+)$/.exec(base);
+    if (topMatch) {
+        return {
+            graphIndex: Number(topMatch[1]),
+            valueIndex: Number(topMatch[2]),
+            attributeIndex
+        };
+    }
+    const valueMatch = /^graph:(\d+)((?:\/node:\d+\/[^/]+)*)\/value:(\d+)$/.exec(base);
+    if (!valueMatch) {
+        return null;
+    }
+    const segments = [];
+    const segmentRe = /\/node:(\d+)\/([^/]+)/g;
+    let match = null;
+    while ((match = segmentRe.exec(valueMatch[2])) !== null) {
+        segments.push({
+            hostNodeIndex: Number(match[1]),
+            graphAttrName: match[2]
+        });
+    }
+    return {
+        graphIndex: Number(valueMatch[1]),
+        segments,
+        valueIndex: Number(valueMatch[3]),
+        attributeIndex
+    };
+};
+
+const graphFromNodePath = (model, path) => {
+    const graph = model.modules[path.graphIndex];
+    if (!graph) {
+        return null;
+    }
+    let currentGraph = graph;
+    for (const segment of path.segments || []) {
+        const hostNode = currentGraph.nodes[segment.hostNodeIndex];
+        if (!hostNode) {
+            return null;
+        }
+        const entry = nodeGraphArguments(hostNode).find(
+            (item) => item.name === segment.graphAttrName && item.type === 'graph' && item.value
+        );
+        if (!entry) {
+            return null;
+        }
+        currentGraph = entry.value;
+    }
+    return currentGraph;
+};
 
 export const isNestedCompiledValueEntityId = (entityId) => {
     return Boolean(entityId && NESTED_COMPILED_VALUE_ENTITY_RE.test(entityId));
@@ -261,20 +359,32 @@ export const isNestedCompiledNodeEntityId = (entityId) => {
 };
 
 const parseNestedCompiledNodeEntityId = (entityId) => {
-    const match = NESTED_COMPILED_NODE_ENTITY_RE.exec(entityId);
-    if (!match) {
+    const path = parseNestedNodeEntityPath(entityId);
+    if (!path || !path.segments) {
         return null;
     }
+    const last = path.segments[path.segments.length - 1];
     return {
-        graphIndex: Number(match[1]),
-        hostNodeIndex: Number(match[2]),
-        graphAttrName: match[3],
-        subNodeIndex: Number(match[4]),
-        attributeIndex: match[5] !== undefined ? Number(match[5]) : null
+        graphIndex: path.graphIndex,
+        hostNodeIndex: last.hostNodeIndex,
+        graphAttrName: last.graphAttrName,
+        subNodeIndex: last.nodeIndex,
+        segments: path.segments,
+        attributeIndex: path.attributeIndex
     };
 };
 
 const getNestedCompiledGraphNode = (model, location) => {
+    if (location.segments) {
+        const graph = graphFromNodePath(model, location);
+        if (!graph || !Array.isArray(graph.nodes)) {
+            return null;
+        }
+        return {
+            subGraph: graph,
+            node: graph.nodes[location.subNodeIndex] || null
+        };
+    }
     const graph = model.modules[location.graphIndex];
     const hostNode = graph && graph.nodes ? graph.nodes[location.hostNodeIndex] : null;
     if (!hostNode) {
@@ -306,6 +416,20 @@ const parseNodeEntityId = (entityId) => {
 };
 
 const getNestedCompiledGraphValue = (model, location) => {
+    if (location.segments) {
+        const graph = graphFromNodePath(model, location);
+        if (!graph) {
+            return null;
+        }
+        for (const [value, id] of enumerateGraphValues(graph, location.graphIndex)) {
+            const match = /\/value:(\d+)$/.exec(id);
+            const valueIndex = match ? Number(match[1]) : -1;
+            if (valueIndex === location.valueIndex) {
+                return value;
+            }
+        }
+        return null;
+    }
     const graph = model.modules[location.graphIndex];
     const hostNode = graph && graph.nodes ? graph.nodes[location.hostNodeIndex] : null;
     if (!hostNode) {
@@ -328,7 +452,20 @@ const getNestedCompiledGraphValue = (model, location) => {
 };
 
 const parseValueEntityId = (entityId) => {
-    const nestedMatch = NESTED_COMPILED_VALUE_ENTITY_RE.exec(entityId);
+    const nestedPath = parseNestedValueEntityPath(entityId);
+    if (nestedPath && nestedPath.segments && nestedPath.segments.length > 0) {
+        const last = nestedPath.segments[nestedPath.segments.length - 1];
+        return {
+            graphIndex: nestedPath.graphIndex,
+            target: 'nested-value',
+            hostNodeIndex: last.hostNodeIndex,
+            graphAttrName: last.graphAttrName,
+            valueIndex: nestedPath.valueIndex,
+            segments: nestedPath.segments,
+            attributeIndex: nestedPath.attributeIndex
+        };
+    }
+    const nestedMatch = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/value:(\d+)(?:\/attr:(\d+))?$/.exec(entityId);
     if (nestedMatch) {
         return {
             graphIndex: Number(nestedMatch[1]),
@@ -350,7 +487,33 @@ const parseValueEntityId = (entityId) => {
 };
 
 const parseAttributeEntityId = (entityId) => {
-    const nestedMatch = NESTED_COMPILED_NODE_ENTITY_RE.exec(entityId);
+    const nestedNodePath = parseNestedNodeEntityPath(entityId);
+    if (nestedNodePath && nestedNodePath.segments) {
+        const last = nestedNodePath.segments[nestedNodePath.segments.length - 1];
+        return {
+            graphIndex: nestedNodePath.graphIndex,
+            target: 'nested-node',
+            hostNodeIndex: last.hostNodeIndex,
+            graphAttrName: last.graphAttrName,
+            targetIndex: last.nodeIndex,
+            segments: nestedNodePath.segments,
+            attributeIndex: nestedNodePath.attributeIndex
+        };
+    }
+    const nestedValuePath = parseNestedValueEntityPath(entityId);
+    if (nestedValuePath && nestedValuePath.segments && nestedValuePath.segments.length > 0) {
+        const last = nestedValuePath.segments[nestedValuePath.segments.length - 1];
+        return {
+            graphIndex: nestedValuePath.graphIndex,
+            target: 'nested-value',
+            hostNodeIndex: last.hostNodeIndex,
+            graphAttrName: last.graphAttrName,
+            targetIndex: nestedValuePath.valueIndex,
+            segments: nestedValuePath.segments,
+            attributeIndex: nestedValuePath.attributeIndex
+        };
+    }
+    const nestedMatch = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)(?:\/attr:(\d+))?$/.exec(entityId);
     if (nestedMatch) {
         return {
             graphIndex: Number(nestedMatch[1]),
@@ -361,7 +524,7 @@ const parseAttributeEntityId = (entityId) => {
             attributeIndex: nestedMatch[5] !== undefined ? Number(nestedMatch[5]) : null
         };
     }
-    const nestedValueMatch = NESTED_COMPILED_VALUE_ENTITY_RE.exec(entityId);
+    const nestedValueMatch = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/value:(\d+)(?:\/attr:(\d+))?$/.exec(entityId);
     if (nestedValueMatch) {
         return {
             graphIndex: Number(nestedValueMatch[1]),
@@ -394,8 +557,33 @@ const parseAttributeEntityId = (entityId) => {
 };
 
 const parseAttributeParentId = (parentId) => {
-    const nestedMatch = NESTED_COMPILED_NODE_ENTITY_RE.exec(parentId);
-    if (nestedMatch && nestedMatch[5] === undefined) {
+    const nestedNodePath = parseNestedNodeEntityPath(parentId);
+    if (nestedNodePath && nestedNodePath.segments && nestedNodePath.attributeIndex === null) {
+        const last = nestedNodePath.segments[nestedNodePath.segments.length - 1];
+        return {
+            graphIndex: nestedNodePath.graphIndex,
+            target: 'nested-node',
+            hostNodeIndex: last.hostNodeIndex,
+            graphAttrName: last.graphAttrName,
+            targetIndex: last.nodeIndex,
+            segments: nestedNodePath.segments
+        };
+    }
+    const nestedValuePath = parseNestedValueEntityPath(parentId);
+    if (nestedValuePath && nestedValuePath.segments && nestedValuePath.segments.length > 0 &&
+        nestedValuePath.attributeIndex === null) {
+        const last = nestedValuePath.segments[nestedValuePath.segments.length - 1];
+        return {
+            graphIndex: nestedValuePath.graphIndex,
+            target: 'nested-value',
+            hostNodeIndex: last.hostNodeIndex,
+            graphAttrName: last.graphAttrName,
+            targetIndex: nestedValuePath.valueIndex,
+            segments: nestedValuePath.segments
+        };
+    }
+    const nestedMatch = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)$/.exec(parentId);
+    if (nestedMatch) {
         return {
             graphIndex: Number(nestedMatch[1]),
             target: 'nested-node',
@@ -404,8 +592,8 @@ const parseAttributeParentId = (parentId) => {
             targetIndex: Number(nestedMatch[4])
         };
     }
-    const nestedValueMatch = NESTED_COMPILED_VALUE_ENTITY_RE.exec(parentId);
-    if (nestedValueMatch && nestedValueMatch[5] === undefined) {
+    const nestedValueMatch = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/value:(\d+)$/.exec(parentId);
+    if (nestedValueMatch) {
         return {
             graphIndex: Number(nestedValueMatch[1]),
             target: 'nested-value',
@@ -439,7 +627,8 @@ const getAttributeTarget = (model, location) => {
             graphIndex: location.graphIndex,
             hostNodeIndex: location.hostNodeIndex,
             graphAttrName: location.graphAttrName,
-            subNodeIndex: location.targetIndex
+            subNodeIndex: location.targetIndex,
+            segments: location.segments
         });
         if (!resolved || !resolved.node) {
             throw new Error(`Nested node not found for attribute target.`);
@@ -447,8 +636,13 @@ const getAttributeTarget = (model, location) => {
         return resolved.node;
     }
     if (location.target === 'nested-value') {
-        const valueId = `graph:${location.graphIndex}/node:${location.hostNodeIndex}/${location.graphAttrName}/value:${location.targetIndex}`;
-        const value = getValueByEntityId(model, valueId);
+        const value = getNestedCompiledGraphValue(model, {
+            graphIndex: location.graphIndex,
+            hostNodeIndex: location.hostNodeIndex,
+            graphAttrName: location.graphAttrName,
+            valueIndex: location.targetIndex,
+            segments: location.segments
+        });
         if (!value) {
             throw new Error(`Nested value not found for attribute target.`);
         }
@@ -474,7 +668,7 @@ const attributeNameFromProperty = (property) => {
     return property.slice(prefix.length);
 };
 
-const getValueByEntityId = (model, entityId) => {
+export const getValueByEntityId = (model, entityId) => {
     const location = parseValueEntityId(entityId);
     if (location.target === 'nested-value') {
         return getNestedCompiledGraphValue(model, location);
@@ -1869,17 +2063,59 @@ class EditorState {
     }
 }
 
+export const getNodeByEntityId = (model, entityId) => {
+    if (!model || !entityId) {
+        return null;
+    }
+    const baseEntityId = entityId.replace(/\/attr:\d+$/, '');
+    const nestedLocation = parseNestedCompiledNodeEntityId(baseEntityId);
+    if (nestedLocation && nestedLocation.attributeIndex === null) {
+        const resolved = getNestedCompiledGraphNode(model, nestedLocation);
+        return resolved ? resolved.node : null;
+    }
+    const location = parseNodeEntityId(baseEntityId);
+    if (!location) {
+        return null;
+    }
+    const graph = model.modules[location.graphIndex];
+    return graph && graph.nodes ? graph.nodes[location.nodeIndex] || null : null;
+};
+
 export const locateNodeEntity = function(model, node) {
-    const modules = model.modules || [];
-    for (let graphIndex = 0; graphIndex < modules.length; graphIndex++) {
-        const graph = modules[graphIndex];
+    if (!model || !node) {
+        return null;
+    }
+    const walk = (graph, graphIndex, pathPrefix) => {
         const nodes = graph.nodes || [];
         const nodeIndex = nodes.indexOf(node);
         if (nodeIndex >= 0) {
+            const nodeId = pathPrefix ? `${pathPrefix}/node:${nodeIndex}` : `graph:${graphIndex}/node:${nodeIndex}`;
+            if (!pathPrefix) {
+                return {
+                    graphIndex,
+                    nodeIndex,
+                    nodeId
+                };
+            }
+            const segments = [];
+            const segmentRe = /\/node:(\d+)\/([^/]+)\/node:(\d+)/g;
+            let match = null;
+            while ((match = segmentRe.exec(nodeId)) !== null) {
+                segments.push({
+                    hostNodeIndex: Number(match[1]),
+                    graphAttrName: match[2],
+                    nodeIndex: Number(match[3])
+                });
+            }
+            const last = segments[segments.length - 1];
             return {
                 graphIndex,
-                nodeIndex,
-                nodeId: `graph:${graphIndex}/node:${nodeIndex}`
+                nodeIndex: last.nodeIndex,
+                nodeId,
+                nested: true,
+                hostNodeIndex: last.hostNodeIndex,
+                graphAttrName: last.graphAttrName,
+                segments
             };
         }
         for (let hostNodeIndex = 0; hostNodeIndex < nodes.length; hostNodeIndex++) {
@@ -1887,57 +2123,85 @@ export const locateNodeEntity = function(model, node) {
                 if (entry.type !== 'graph' || !entry.value || !Array.isArray(entry.value.nodes)) {
                     continue;
                 }
-                const subNodeIndex = entry.value.nodes.indexOf(node);
-                if (subNodeIndex >= 0) {
-                    return {
-                        graphIndex,
-                        nodeIndex: subNodeIndex,
-                        nodeId: `graph:${graphIndex}/node:${hostNodeIndex}/${entry.name}/node:${subNodeIndex}`,
-                        nested: true,
-                        hostNodeIndex,
-                        graphAttrName: entry.name
-                    };
+                const nextPrefix = pathPrefix ?
+                    `${pathPrefix}/node:${hostNodeIndex}/${entry.name}` :
+                    `graph:${graphIndex}/node:${hostNodeIndex}/${entry.name}`;
+                const found = walk(entry.value, graphIndex, nextPrefix);
+                if (found) {
+                    return found;
                 }
             }
+        }
+        return null;
+    };
+    for (let graphIndex = 0; graphIndex < (model.modules || []).length; graphIndex++) {
+        const found = walk(model.modules[graphIndex], graphIndex, null);
+        if (found) {
+            return found;
         }
     }
     return null;
 };
 
 export const locateValueEntity = function(model, value) {
-    const modules = model.modules || [];
-    for (let graphIndex = 0; graphIndex < modules.length; graphIndex++) {
-        const graph = modules[graphIndex];
+    if (!model || !value) {
+        return null;
+    }
+    const walk = (graph, graphIndex, pathPrefix) => {
         for (const [entry, valueId] of enumerateGraphValues(graph, graphIndex)) {
-            if (entry === value) {
+            if (entry !== value) {
+                continue;
+            }
+            if (!pathPrefix) {
                 return {
                     graphIndex,
                     valueId
                 };
             }
+            const match = /\/value:(\d+)$/.exec(valueId);
+            const valueIndex = match ? Number(match[1]) : 0;
+            const nestedValueId = `${pathPrefix}/value:${valueIndex}`;
+            const segments = [];
+            const segmentRe = /\/node:(\d+)\/([^/]+)(?=\/|$)/g;
+            let segmentMatch = null;
+            while ((segmentMatch = segmentRe.exec(pathPrefix)) !== null) {
+                segments.push({
+                    hostNodeIndex: Number(segmentMatch[1]),
+                    graphAttrName: segmentMatch[2]
+                });
+            }
+            const last = segments[segments.length - 1];
+            return {
+                graphIndex,
+                valueId: nestedValueId,
+                nested: true,
+                hostNodeIndex: last ? last.hostNodeIndex : 0,
+                graphAttrName: last ? last.graphAttrName : '',
+                valueIndex,
+                segments
+            };
         }
         const nodes = graph.nodes || [];
         for (let hostNodeIndex = 0; hostNodeIndex < nodes.length; hostNodeIndex++) {
             for (const entry of nodeGraphArguments(nodes[hostNodeIndex])) {
-                if (entry.type !== 'graph' || !entry.value || !Array.isArray(entry.value.nodes)) {
+                if (entry.type !== 'graph' || !entry.value) {
                     continue;
                 }
-                const subGraph = entry.value;
-                for (const [subEntry, subValueId] of enumerateGraphValues(subGraph, graphIndex)) {
-                    if (subEntry === value) {
-                        const match = /\/value:(\d+)$/.exec(subValueId);
-                        const subValueIndex = match ? Number(match[1]) : 0;
-                        return {
-                            graphIndex,
-                            valueId: `graph:${graphIndex}/node:${hostNodeIndex}/${entry.name}/value:${subValueIndex}`,
-                            nested: true,
-                            hostNodeIndex,
-                            graphAttrName: entry.name,
-                            valueIndex: subValueIndex
-                        };
-                    }
+                const nextPrefix = pathPrefix ?
+                    `${pathPrefix}/node:${hostNodeIndex}/${entry.name}` :
+                    `graph:${graphIndex}/node:${hostNodeIndex}/${entry.name}`;
+                const found = walk(entry.value, graphIndex, nextPrefix);
+                if (found) {
+                    return found;
                 }
             }
+        }
+        return null;
+    };
+    for (let graphIndex = 0; graphIndex < (model.modules || []).length; graphIndex++) {
+        const found = walk(model.modules[graphIndex], graphIndex, null);
+        if (found) {
+            return found;
         }
     }
     return null;

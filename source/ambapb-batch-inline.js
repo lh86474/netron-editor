@@ -5,7 +5,7 @@
  * We build the display graph here as well
  * Author: Luray He
  */
-import { cloneGraph } from './model-editor.js';
+import { cloneGraph, locateNodeEntity } from './model-editor.js';
 
 const BATCH_CALL_OP = 'BatchCall';
 const FRAG_SUBGRAPH_OP = 'FragSubgraph';
@@ -540,42 +540,32 @@ export const resolveInlinedSourceContext = (sourceGraph, displayNode) => {
 };
 
 const attachDisplayValueSourceRefs = (displayGraph) => {
+    const linkArgumentValues = (displayArgs, sourceArgs) => {
+        if (!Array.isArray(displayArgs) || !Array.isArray(sourceArgs)) {
+            return;
+        }
+        for (let index = 0; index < displayArgs.length; index++) {
+            const displayValues = argumentValues(displayArgs[index]);
+            const sourceValues = argumentValues(sourceArgs[index]);
+            for (let valueIndex = 0; valueIndex < displayValues.length; valueIndex++) {
+                const displayValue = displayValues[valueIndex];
+                const sourceValue = sourceValues[valueIndex];
+                if (displayValue && sourceValue && !displayValue._sourceValue) {
+                    displayValue._sourceValue = sourceValue;
+                }
+            }
+        }
+    };
     for (const node of displayGraph.nodes || []) {
         if (!node._sourceNode) {
             continue;
         }
-        const batchCallName = inlineExpansionBatchCallName(node);
-        const prefix = batchCallName ? `inline::${batchCallName}::` : '';
-        const resolveSourceValue = (displayValue) => {
-            if (!displayValue || !displayValue.name) {
-                return null;
-            }
-            const innerName = prefix && displayValue.name.startsWith(prefix) ?
-                displayValue.name.slice(prefix.length) :
-                displayValue.name;
-            for (const argument of [...(node._sourceNode.inputs || []), ...(node._sourceNode.outputs || [])]) {
-                for (const sourceValue of argumentValues(argument)) {
-                    if (sourceValue && sourceValue.name === innerName) {
-                        return sourceValue;
-                    }
-                }
-            }
-            return null;
-        };
-        for (const argument of [...(node.inputs || []), ...(node.outputs || [])]) {
-            for (const displayValue of argumentValues(argument)) {
-                if (displayValue && !displayValue._sourceValue) {
-                    const sourceValue = resolveSourceValue(displayValue);
-                    if (sourceValue) {
-                        displayValue._sourceValue = sourceValue;
-                    }
-                }
-            }
-        }
+        linkArgumentValues(node.inputs, node._sourceNode.inputs);
+        linkArgumentValues(node.outputs, node._sourceNode.outputs);
     }
 };
 
-const attachDisplayNodeSourceRefs = (displayGraph, sourceGraph, graphIndex = 0) => {
+const attachDisplayNodeSourceRefs = (displayGraph, sourceGraph, graphIndex = 0, model = null) => {
     const sourceByName = new Map();
     for (const node of sourceGraph.nodes || []) {
         sourceByName.set(node.name, node);
@@ -592,14 +582,20 @@ const attachDisplayNodeSourceRefs = (displayGraph, sourceGraph, graphIndex = 0) 
                     graphAttrName: context.graphAttrName,
                     subNodeIndex: context.subNodeIndex
                 };
-                node._sourceEntityId = buildNestedCompiledNodeEntityId(
-                    graphIndex,
-                    fragNodeIndex,
-                    context.graphAttrName,
-                    context.subNodeIndex
-                );
+                if (model) {
+                    const entity = locateNodeEntity(model, context.subNode);
+                    node._sourceEntityId = entity ? entity.nodeId : null;
+                } else {
+                    node._sourceEntityId = buildNestedCompiledNodeEntityId(
+                        graphIndex,
+                        fragNodeIndex,
+                        context.graphAttrName,
+                        context.subNodeIndex
+                    );
+                }
             } else {
                 node._sourceNode = null;
+                node._sourceEntityId = null;
             }
             continue;
         }
@@ -636,7 +632,7 @@ export const sourceValueForEntity = (displayValue) => {
 };
 
 // This is the main logic for the inline expansion. 
-export const applyBatchInlineExpansions = (graph, expandedBatchCallNames, graphIndex = 0) => {
+export const applyBatchInlineExpansions = (graph, expandedBatchCallNames, graphIndex = 0, model = null) => {
     if (!graph || !expandedBatchCallNames || expandedBatchCallNames.size === 0) {
         return graph;
     }
@@ -666,7 +662,7 @@ export const applyBatchInlineExpansions = (graph, expandedBatchCallNames, graphI
             (node) => !(node.type?.name === 'UserDefSubgraph' && subgraphsToRemove.has(node.name))
         );
     }
-    attachDisplayNodeSourceRefs(displayGraph, graph, graphIndex);
+    attachDisplayNodeSourceRefs(displayGraph, graph, graphIndex, model);
     displayGraph._inlineExpandedNodeNames = inlinedNodeNames;
     return displayGraph;
 };

@@ -889,6 +889,27 @@ describe('ambapb checkpoint export', () => {
             property: 'type',
             newValue: 'float32[1,3,224,224]'
         });
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/value:0',
+            entityType: 'value',
+            changeType: 'modify',
+            property: 'description',
+            newValue: 'tensor description'
+        });
+        session.applyPatch({
+            parentId: 'graph:0/node:0/compiled_prim_graph/value:0',
+            entityType: 'attribute',
+            changeType: 'add',
+            property: 'attributes.test',
+            newValue: '42'
+        });
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0/attr:0',
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: 'attributes.strides',
+            newValue: [2, 2]
+        });
 
         const bytes = exportModifiedOnnx(model, session);
         const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
@@ -898,9 +919,16 @@ describe('ambapb checkpoint export', () => {
         const convNode = compiledAttr.g.node.find((node) => node.name === 'Conv_0');
         assert.ok(convNode);
         assert.equal(convNode.doc_string, '{"coproc":{"payload-id":"dram"}}');
+        const strides = convNode.attribute.find((attr) => attr.name === 'strides');
+        assert.ok(strides);
+        assert.deepEqual(strides.ints.map((value) => Number(value)), [2, 2]);
         const valueInfo = (compiledAttr.g.value_info || []).find((entry) => entry.name === 'tensor_in');
         assert.ok(valueInfo && valueInfo.type && valueInfo.type.tensor_type);
         assert.equal(Number(valueInfo.type.tensor_type.elem_type), 1);
+        assert.equal(valueInfo.doc_string, 'tensor description');
+        const testMeta = (valueInfo.metadata_props || []).find((entry) => entry.key === 'test');
+        assert.ok(testMeta);
+        assert.equal(testMeta.value, '42');
         const dims = valueInfo.type.tensor_type.shape.dim.map((dimension) => Number(dimension.dim_value));
         assert.deepEqual(dims, [1, 3, 224, 224]);
     });

@@ -5,7 +5,7 @@ Author: Luray He
 import './onnx-encode.js';
 import { onnx } from './onnx-proto.js';
 import { BinaryReader } from './protobuf.js';
-import { enumerateGraphValues } from './model-editor.js';
+import { enumerateGraphValues, getValueByEntityId } from './model-editor.js';
 import { findCVFlowNVPNode, isAmbapbCheckpoint } from './ambapb.js';
 import {
     buildPrimGraphAttributeProto,
@@ -92,6 +92,25 @@ const parseEntityId = (entityId) => {
             attributeIndex: Number(valueAttrMatch[3])
         };
     }
+    const nestedValueAttrMatch = /^graph:(\d+)(?:\/node:\d+\/[^/]+)*\/value:(\d+)\/attr:(\d+)$/.exec(entityId);
+    if (nestedValueAttrMatch) {
+        return {
+            graphIndex: Number(nestedValueAttrMatch[1]),
+            target: 'value',
+            valueIndex: Number(nestedValueAttrMatch[2]),
+            attributeIndex: Number(nestedValueAttrMatch[3]),
+            nested: true
+        };
+    }
+    const nestedValueMatch = /^graph:(\d+)(?:\/node:\d+\/[^/]+)*\/value:(\d+)$/.exec(entityId);
+    if (nestedValueMatch) {
+        return {
+            graphIndex: Number(nestedValueMatch[1]),
+            target: 'value',
+            valueIndex: Number(nestedValueMatch[2]),
+            nested: true
+        };
+    }
     const valueMatch = /^graph:(\d+)\/value:(\d+)$/.exec(entityId);
     if (valueMatch) {
         return {
@@ -146,8 +165,45 @@ const getValueNameById = (editSession, graphIndex, valueIndex) => {
     }
     return null;
 };
+
+const findModifiedValueForEntityId = (editSession, entityId) => {
+    if (!editSession || !entityId) {
+        return null;
+    }
+    const baseEntityId = entityId.replace(/\/attr:\d+$/, '');
+    const value = getValueByEntityId(editSession.modified.model, baseEntityId);
+    if (value) {
+        return value;
+    }
+    for (let graphIndex = 0; graphIndex < (editSession.modified.model.modules || []).length; graphIndex++) {
+        const modifiedGraph = editSession.modified.getGraph(graphIndex);
+        for (const [entry, id] of enumerateGraphValues(modifiedGraph, graphIndex)) {
+            if (id === baseEntityId) {
+                return entry;
+            }
+        }
+    }
+    return null;
+};
+
+const resolveValueExportName = (editSession, entityId, location) => {
+    const value = findModifiedValueForEntityId(editSession, entityId);
+    if (value && value.name) {
+        return value.name;
+    }
+    if (location && location.target === 'value') {
+        return getValueNameById(editSession, location.graphIndex, location.valueIndex);
+    }
+    return null;
+};
 // This gets the attribute of a value, important for exporting the type of a value to graph
-const getModifiedValueAttribute = (editSession, location) => {
+const getModifiedValueAttribute = (editSession, location, entityId = null) => {
+    if (entityId) {
+        const value = findModifiedValueForEntityId(editSession, entityId);
+        if (value && location && location.attributeIndex !== null && location.attributeIndex !== undefined) {
+            return (value.attributes || [])[location.attributeIndex] || null;
+        }
+    }
     const valueId = `graph:${location.graphIndex}/value:${location.valueIndex}`;
     const modifiedGraph = editSession.modified.getGraph(location.graphIndex);
     for (const [value, id] of enumerateGraphValues(modifiedGraph, location.graphIndex)) {
@@ -736,7 +792,7 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
             continue;
         }
         if (location.target === 'value') {
-            const valueName = getValueNameById(editSession, location.graphIndex, location.valueIndex);
+            const valueName = resolveValueExportName(editSession, change.entityId, location);
             if (!valueName) {
                 continue;
             }
@@ -763,11 +819,11 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
             continue;
         }
         if (location.target === 'value') {
-            const valueName = getValueNameById(editSession, location.graphIndex, location.valueIndex);
+            const valueName = resolveValueExportName(editSession, change.entityId, location);
             if (!valueName) {
                 throw new OnnxExportError(`Value '${change.entityId}' not found for property export.`);
             }
-            const modifiedAttribute = getModifiedValueAttribute(editSession, location);
+            const modifiedAttribute = getModifiedValueAttribute(editSession, location, change.entityId);
             const name = modifiedAttribute ? modifiedAttribute.name : null;
             if (!name) {
                 continue;
@@ -797,14 +853,20 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
     }
     for (const change of additions) {
         const parentId = change.parentId || change.entityId.replace(/\/attr:\d+$/, '');
-        const location = parseEntityId(parentId);
+        let location = parseEntityId(parentId);
+        if (!location) {
+            const value = findModifiedValueForEntityId(editSession, parentId);
+            if (value) {
+                location = { target: 'value' };
+            }
+        }
         if (!location) {
             continue;
         }
         const property = change.property || '';
         const name = property.startsWith('attributes.') ? property.slice('attributes.'.length) : property;
         if (location.target === 'value') {
-            const valueName = getValueNameById(editSession, location.graphIndex, location.valueIndex);
+            const valueName = resolveValueExportName(editSession, parentId, location);
             if (!valueName) {
                 throw new OnnxExportError(`Value '${parentId}' not found for property export.`);
             }
@@ -838,6 +900,9 @@ const collectArgumentValueNames = (argument) => {
 const buildNodeProtoFromModified = (modifiedNode, originalNodesByName = null, nestedSourceGraph = null) => {
     const node = new onnx.NodeProto();
     node.name = modifiedNode.name || '';
+    if (modifiedNode.description !== undefined && modifiedNode.description !== null) {
+        node.doc_string = String(modifiedNode.description);
+    }
     node.op_type = modifiedNode.type ? (modifiedNode.type.identifier || modifiedNode.type.name) : '';
     if (modifiedNode.type && modifiedNode.type.module && modifiedNode.type.module !== 'ai.onnx') {
         node.domain = modifiedNode.type.module;
@@ -1046,19 +1111,55 @@ const copyValueInfo = (valueInfo) => {
     return copy;
 };
 
-const buildGraphValueInfo = (argument, sourceGraph, usedNames) => {
+const findModifiedValueByName = (modifiedGraph, name, graphIndex = 0) => {
+    if (!modifiedGraph || !name) {
+        return null;
+    }
+    for (const [value] of enumerateGraphValues(modifiedGraph, graphIndex)) {
+        if (value && value.name === name) {
+            return value;
+        }
+    }
+    return null;
+};
+
+const syncValueInfoFromModified = (valueInfo, modifiedValue) => {
+    if (!valueInfo || !modifiedValue) {
+        return;
+    }
+    const typeText = formatConnectionType(modifiedValue.type);
+    if (typeText) {
+        try {
+            valueInfo.type = parseTensorTypeString(typeText);
+        } catch {
+            // Keep the source type when the modified type cannot be parsed for export.
+        }
+    }
+    if (modifiedValue.description !== undefined && modifiedValue.description !== null) {
+        valueInfo.doc_string = String(modifiedValue.description);
+    }
+    if (Array.isArray(modifiedValue.attributes)) {
+        valueInfo.metadata_props = modifiedValue.attributes
+            .filter((attribute) => attribute && attribute.name)
+            .map((attribute) => buildMetadataProp(attribute.name, attribute.value));
+    }
+};
+
+const buildGraphValueInfo = (argument, sourceGraph, usedNames, modifiedGraph = null, graphIndex = 0) => {
     const infos = [];
     for (const name of collectArgumentValueNames(argument)) {
         if (!usedNames.has(name)) {
             continue;
         }
         const existing = findValueInfo(sourceGraph, name);
-        if (existing) {
-            infos.push(copyValueInfo(existing));
-            continue;
+        const valueInfo = existing ? copyValueInfo(existing) : (() => {
+            const created = new onnx.ValueInfoProto();
+            created.name = name;
+            return created;
+        })();
+        if (modifiedGraph) {
+            syncValueInfoFromModified(valueInfo, findModifiedValueByName(modifiedGraph, name, graphIndex));
         }
-        const valueInfo = new onnx.ValueInfoProto();
-        valueInfo.name = name;
         infos.push(valueInfo);
     }
     return infos;
@@ -1082,17 +1183,7 @@ const buildValueInfoFromModifiedGraph = (modifiedGraph, sourceGraph, usedNames, 
             valueInfo.name = name;
             valueInfoByName.set(name, valueInfo);
         }
-        const typeText = formatConnectionType(value.type);
-        if (typeText) {
-            try {
-                valueInfo.type = parseTensorTypeString(typeText);
-            } catch {
-                // Keep the source type when the modified type cannot be parsed for export.
-            }
-        }
-        if (value.description !== undefined && value.description !== null) {
-            valueInfo.doc_string = String(value.description);
-        }
+        syncValueInfoFromModified(valueInfo, value);
     }
     return Array.from(valueInfoByName.values());
 };
@@ -1101,11 +1192,11 @@ const syncGraphBoundaryFromModified = (graph, modifiedGraph, sourceGraph) => {
     const usedNames = collectArgumentValueNamesFromGraph(modifiedGraph);
     const input = [];
     for (const modifiedInput of modifiedGraph.inputs || []) {
-        input.push(...buildGraphValueInfo(modifiedInput, sourceGraph, usedNames));
+        input.push(...buildGraphValueInfo(modifiedInput, sourceGraph, usedNames, modifiedGraph));
     }
     const output = [];
     for (const modifiedOutput of modifiedGraph.outputs || []) {
-        output.push(...buildGraphValueInfo(modifiedOutput, sourceGraph, usedNames));
+        output.push(...buildGraphValueInfo(modifiedOutput, sourceGraph, usedNames, modifiedGraph));
     }
     graph.input = input;
     graph.output = output;
@@ -1178,11 +1269,11 @@ const buildGraphProtoFromModifiedGraph = (modifiedGraph, sourceGraphProto, origi
     const sourceGraph = sourceGraphProto || {};
     const input = [];
     for (const modifiedInput of modifiedGraph.inputs || []) {
-        input.push(...buildGraphValueInfo(modifiedInput, sourceGraph, usedNames));
+        input.push(...buildGraphValueInfo(modifiedInput, sourceGraph, usedNames, modifiedGraph));
     }
     const output = [];
     for (const modifiedOutput of modifiedGraph.outputs || []) {
-        output.push(...buildGraphValueInfo(modifiedOutput, sourceGraph, usedNames));
+        output.push(...buildGraphValueInfo(modifiedOutput, sourceGraph, usedNames, modifiedGraph));
     }
     const value_info = buildValueInfoFromModifiedGraph(modifiedGraph, sourceGraph, usedNames);
     const sparse_initializer = (sourceGraph.sparse_initializer || []).filter((tensor) => {
@@ -1492,21 +1583,21 @@ const applyChanges = (cloned, originalProto, editSession, options = {}) => {
             }
             continue;
         }
-        if (!location) {
-            continue;
-        }
-        if (change.property === 'type') {
+        const modifiedValue = findModifiedValueForEntityId(editSession, change.entityId);
+        let currentName = modifiedValue ? modifiedValue.name : null;
+        if (!currentName && location) {
             const modifiedGraph = editSession.modified.getGraph(location.graphIndex);
-            let currentName = null;
             for (const [value, valueId] of enumerateGraphValues(modifiedGraph, location.graphIndex)) {
                 if (valueId === change.entityId) {
                     currentName = value.name;
                     break;
                 }
             }
-            if (!currentName) {
-                throw new OnnxExportError(`Value '${change.entityId}' not found for type export.`);
-            }
+        }
+        if (!currentName) {
+            continue;
+        }
+        if (change.property === 'type') {
             let valueInfo = findValueInfo(graph, currentName);
             if (!valueInfo) {
                 valueInfo = new onnx.ValueInfoProto();
@@ -1516,17 +1607,6 @@ const applyChanges = (cloned, originalProto, editSession, options = {}) => {
             }
             valueInfo.type = parseTensorTypeString(change.newValue);
         } else if (change.property === 'description') {
-            const modifiedGraph = editSession.modified.getGraph(location.graphIndex);
-            let currentName = null;
-            for (const [value, valueId] of enumerateGraphValues(modifiedGraph, location.graphIndex)) {
-                if (valueId === change.entityId) {
-                    currentName = value.name;
-                    break;
-                }
-            }
-            if (!currentName) {
-                throw new OnnxExportError(`Value '${change.entityId}' not found for description export.`);
-            }
             let valueInfo = findValueInfo(graph, currentName);
             if (!valueInfo) {
                 valueInfo = new onnx.ValueInfoProto();
@@ -1545,7 +1625,12 @@ const applyChanges = (cloned, originalProto, editSession, options = {}) => {
         renameInGraph(graph, oldName, newName);
     }
 
-    if (checkpointWrapper) {
+    const modifiedGraph = editSession.modified.getGraph(0);
+    const runtimeHasShellNodes = (modifiedGraph.nodes || []).some(isShellNodeType);
+    const useCheckpointPath = checkpointWrapper && (
+        isShellLayoutGraph(modifiedGraph) || runtimeHasShellNodes
+    );
+    if (useCheckpointPath) {
         applyCheckpointGraphFromModified(graph, originalProto, editSession, options.ambapbPrimGraph || null);
     } else {
         applyStructuralNodeChanges(graph, originalProto, editSession);

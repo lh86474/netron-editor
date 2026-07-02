@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, getNodeByEntityId, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified, rebuildGraphProtoFromModifiedWithAmbapb } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint, canExportCheckpoint } from './ambapb.js';
 import {
@@ -1366,35 +1366,69 @@ view.View = class {
         if (!this._editSession || !node) {
             return null;
         }
-        const nestedEntityId = sourceEntityIdForNode(node);
         const modelNode = sourceNodeForEntity(node);
         if (modelNode) {
-            const entity = locateNodeEntity(this._editSession.modified.model, modelNode);
-            if (entity && nestedEntityId) {
-                return {
-                    ...entity,
-                    nodeId: nestedEntityId
-                };
+            return locateNodeEntity(this._editSession.modified.model, modelNode);
+        }
+        if (node._inlineExpanded === true) {
+            return null;
+        }
+        return locateNodeEntity(this._editSession.modified.model, node);
+    }
+
+    _findDisplayNodeForSidebar(staleNode) {
+        if (!staleNode || !this._editSession) {
+            return staleNode;
+        }
+        const graphIndex = this._resolveGraphIndex(this.activeTarget);
+        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+        const displayGraph = this._resolveDisplayGraph(sourceGraph);
+        const nodes = displayGraph.nodes || [];
+        if (staleNode._sourceEntityId) {
+            const byEntity = nodes.find((node) => node._sourceEntityId === staleNode._sourceEntityId);
+            if (byEntity) {
+                return byEntity;
             }
-            return entity;
         }
-        if (nestedEntityId) {
-            const match = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)/.exec(nestedEntityId);
-            if (match) {
-                return {
-                    graphIndex: Number(match[1]),
-                    nodeIndex: Number(match[4]),
-                    nodeId: nestedEntityId,
-                    nested: true,
-                    hostNodeIndex: Number(match[2]),
-                    graphAttrName: match[3]
-                };
+        if (staleNode.name) {
+            const matches = nodes.filter((node) => node.name === staleNode.name);
+            if (matches.length === 1) {
+                return matches[0];
+            }
+            if (staleNode._inlineExpanded) {
+                const inlineMatch = matches.find((node) => node._inlineExpanded);
+                if (inlineMatch) {
+                    return inlineMatch;
+                }
             }
         }
-        if (node._inlineExpanded !== true) {
-            return locateNodeEntity(this._editSession.modified.model, node);
+        return staleNode;
+    }
+
+    _findDisplayValueForSidebar(staleValue) {
+        if (!staleValue || !this._editSession) {
+            return staleValue;
         }
-        return null;
+        const modelValue = sourceValueForEntity(staleValue) || staleValue;
+        const graphIndex = this._resolveGraphIndex(this.activeTarget);
+        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
+        const displayGraph = this._resolveDisplayGraph(sourceGraph);
+        for (const node of displayGraph.nodes || []) {
+            for (const argList of [node.inputs, node.outputs, node.attributes, node.blocks]) {
+                if (!Array.isArray(argList)) {
+                    continue;
+                }
+                for (const arg of argList) {
+                    const values = Array.isArray(arg.value) ? arg.value : (arg.value ? [arg.value] : []);
+                    for (const value of values) {
+                        if (value && sourceValueForEntity(value) === modelValue) {
+                            return value;
+                        }
+                    }
+                }
+            }
+        }
+        return staleValue;
     }
 
     _resolveValueEntity(value) {
@@ -1432,8 +1466,9 @@ view.View = class {
         if (!current || !current._node) {
             return;
         }
-        const sidebar = this._createNodeSidebar(current._node);
-        this._bindNodeSidebarEvents(sidebar, current._node);
+        const node = this._findDisplayNodeForSidebar(current._node);
+        const sidebar = this._createNodeSidebar(node);
+        this._bindNodeSidebarEvents(sidebar, node);
         this._sidebar.open(sidebar, entry.title || 'Node Properties');
     }
 
@@ -1446,12 +1481,10 @@ view.View = class {
         if (!current || !current._value) {
             return;
         }
-        // if the model is an ambapb checkpoint, we need to use the editable connection sidebar
-        // adds model.kind getter
-        // checkpoint files get exportable = false
+        const value = this._findDisplayValueForSidebar(current._value);
         const sidebar = this._canEditModelContent() ?
-            new view.EditableConnectionSidebar(this, current._value, current._from, current._to, this._editSession) :
-            new view.ConnectionSidebar(this, current._value, current._from, current._to);
+            new view.EditableConnectionSidebar(this, value, current._from, current._to, this._editSession) :
+            new view.ConnectionSidebar(this, value, current._from, current._to);
         this._bindConnectionSidebarEvents(sidebar);
         this._sidebar.open(sidebar, entry.title || 'Connection Properties');
     }
@@ -1465,20 +1498,11 @@ view.View = class {
         if (!change || !this._editSession) {
             return null;
         }
-        const nested = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)/.exec(change.entityId);
-        if (nested) {
-            const graph = this._editSession.modified.getGraph(Number(nested[1]));
-            const host = graph.nodes[Number(nested[2])];
-            const entry = [...(host.attributes || []), ...(host.blocks || [])]
-                .find((item) => item.name === nested[3] && item.type === 'graph' && item.value);
-            return entry && entry.value.nodes ? entry.value.nodes[Number(nested[4])] || null : null;
-        }
-        const match = /^graph:(\d+)\/node:(\d+)/.exec(change.entityId);
-        if (!match) {
+        const entityId = change.parentId || change.entityId;
+        if (!entityId) {
             return null;
         }
-        const graph = this._editSession.modified.getGraph(Number(match[1]));
-        return graph.nodes[Number(match[2])] || null;
+        return getNodeByEntityId(this._editSession.modified.model, entityId);
     }
 
     _editorChangeNeedsGraphRefresh(change) {
@@ -1752,7 +1776,12 @@ view.View = class {
             cache.revision === this._displayGraphRevision) {
             return cache.displayGraph;
         }
-        const displayGraph = applyBatchInlineExpansions(graph, this._batchInlineExpanded, graphIndex);
+        const displayGraph = applyBatchInlineExpansions(
+            graph,
+            this._batchInlineExpanded,
+            graphIndex,
+            this._editSession ? this._editSession.modified.model : null
+        );
         this._displayGraphCache = {
             sourceGraph: graph,
             graphIndex,
@@ -7291,11 +7320,12 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
     }
 
     render() {
-        const node = this._node;
+        const displayNode = this._node;
+        const node = sourceNodeForEntity(displayNode) || displayNode;
         const nodeId = this._entity ? this._entity.nodeId : null;
-        if (node.type) {
-            const type = node.type;
-            const item = this.addProperty('type', node.type.identifier || node.type.name);
+        if (displayNode.type) {
+            const type = displayNode.type;
+            const item = this.addProperty('type', displayNode.type.identifier || displayNode.type.name);
             if (type && (type.description || type.inputs || type.outputs || type.attributes)) {
                 let icon = '?';
                 let tooltip = 'Show Definition';
@@ -7309,9 +7339,9 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
                     this.emit('show-definition', null);
                 });
             }
-            const module = node.type.module;
-            const version = node.type.version;
-            const status = node.type.status;
+            const module = displayNode.type.module;
+            const version = displayNode.type.version;
+            const status = displayNode.type.status;
             if (module || version || status) {
                 const list = [module, version ? `v${version}` : '', status];
                 const value = list.filter((value) => value).join(' ');
@@ -7378,26 +7408,26 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
         if (nodeId) {
             this.addAttributeControls(nodeId, {
                 buttonLabel: '+ Add Attribute',
-                validateName: (name) => AttributeSchemaResolver.validateName(this._node, name),
-                resolveType: (name) => AttributeSchemaResolver.resolveType(this._node.type, name),
+                validateName: (name) => AttributeSchemaResolver.validateName(displayNode, name),
+                resolveType: (name) => AttributeSchemaResolver.resolveType(displayNode.type, name),
                 parseValue: (text, type) => AttributeSchemaResolver.parseValue(text, type)
             });
         }
-        const inputs = node.inputs;
+        const inputs = displayNode.inputs;
         if (Array.isArray(inputs) && inputs.length > 0) {
             this.addSection('Inputs');
             for (const input of inputs) {
                 this.addArgument(input.name, input);
             }
         }
-        const outputs = node.outputs;
+        const outputs = displayNode.outputs;
         if (Array.isArray(outputs) && outputs.length > 0) {
             this.addSection('Outputs');
             for (const output of outputs) {
                 this.addArgument(output.name, output);
             }
         }
-        const blocks = node.blocks;
+        const blocks = displayNode.blocks;
         if (Array.isArray(blocks) && blocks.length > 0) {
             this.addSection('Blocks');
             for (const block of blocks) {
@@ -8678,7 +8708,8 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
     }
 
     render() {
-        const value = this._value;
+        const displayValue = this._value;
+        const value = sourceValueForEntity(displayValue) || displayValue;
         const from = this._from;
         const to = this._to;
         const valueId = this._entity ? this._entity.valueId : null;

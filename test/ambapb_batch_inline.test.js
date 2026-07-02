@@ -298,6 +298,19 @@ describe('ambapb batch inline expansion', () => {
         assert.ok(entity);
         assert.equal(entity.nodeId, 'graph:0/node:1/compiled_prim_graph/node:0');
     });
+
+    it('sets source entity ids from model locateNodeEntity when model is provided', () => {
+        const graph = buildRuntimeGraph();
+        const model = { modules: [graph] };
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']), 0, model);
+        const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
+        const sourceInner = graph.nodes
+            .find((node) => node.name === 'frag')
+            .attributes.find((entry) => entry.name === 'compiled_prim_graph')
+            .value.nodes.find((node) => node.name === 'inner_nvp');
+        const entity = locateNodeEntity(model, sourceInner);
+        assert.equal(inner._sourceEntityId, entity.nodeId);
+    });
     // Make sure we get description from source model in cloneNode
     it('preserves description on inlined nodes', () => {
         const graph = buildRuntimeGraph();
