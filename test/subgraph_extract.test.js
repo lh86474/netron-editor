@@ -5,6 +5,7 @@ import {
     ModelEditor,
     collectNodesBetween,
     extractSubgraph,
+    findValueConsumers,
     promoteVisibleGraphOutputs,
     SubgraphExtractError
 } from '../source/model-editor.js';
@@ -52,6 +53,85 @@ const buildAmbaShellGraph = () => ({
         }
     ]
 });
+
+// Same logic as view.js findBoundaryNodes (UserDefCall selection path).
+const findBoundaryNodes = (graph, selectedNodes) => {
+    const selectedNodesSet = new Set(selectedNodes);
+    const beginNodes = [];
+    const endNodes = [];
+
+    const argumentValues = (argument) => {
+        if (!argument || argument.value === null || argument.value === undefined) {
+            return [];
+        }
+        return Array.isArray(argument.value) ? argument.value : [argument.value];
+    };
+
+    const internalValues = new Set();
+    for (const node of selectedNodes) {
+        for (const output of node.outputs || []) {
+            for (const val of argumentValues(output)) {
+                if (val && val.name) {
+                    internalValues.add(val.name);
+                }
+            }
+        }
+    }
+
+    for (const node of selectedNodes) {
+        let isBegin = false;
+        for (const input of node.inputs || []) {
+            for (const val of argumentValues(input)) {
+                if (val && val.name && !val.initializer && !internalValues.has(val.name)) {
+                    isBegin = true;
+                    break;
+                }
+            }
+            if (isBegin) {
+                break;
+            }
+        }
+        if (isBegin) {
+            beginNodes.push(node);
+        }
+
+        let isEnd = false;
+        for (const output of node.outputs || []) {
+            for (const val of argumentValues(output)) {
+                if (!val || !val.name) {
+                    continue;
+                }
+                const isGraphOutput = (graph.outputs || []).some((o) =>
+                    argumentValues(o).some((v) => v && v.name === val.name)
+                );
+                if (isGraphOutput) {
+                    isEnd = true;
+                    break;
+                }
+                const consumers = findValueConsumers(graph, val);
+                const hasExternalConsumer = consumers.some((c) => c.node && !selectedNodesSet.has(c.node));
+                if (hasExternalConsumer) {
+                    isEnd = true;
+                    break;
+                }
+            }
+            if (isEnd) {
+                break;
+            }
+        }
+        if (isEnd) {
+            endNodes.push(node);
+        }
+    }
+
+    if (beginNodes.length === 0 && selectedNodes.length > 0) {
+        beginNodes.push(...selectedNodes);
+    }
+    if (endNodes.length === 0 && selectedNodes.length > 0) {
+        endNodes.push(...selectedNodes);
+    }
+    return { beginNodes, endNodes };
+};
 
 describe('subgraph extract', () => {
     it('collects all nodes on a linear chain from begin to end', () => {
@@ -119,6 +199,32 @@ describe('subgraph extract', () => {
         const nvp0 = graph.nodes[0];
         const batch = graph.nodes[1];
         const extracted = extractSubgraph(graph, [nvp0], [batch]);
+        const names = extracted.outputs.map((entry) => entry.value[0].name).sort();
+        assert.deepEqual(names, [
+            'conti_1320_prim_nvp0:1',
+            'conti_1320_prim_nvp0:3',
+            'conti_1320_prim_runtime2:0'
+        ]);
+    });
+
+    it('extractSubgraph via findBoundaryNodes omits BatchCall input tensors from outputs', () => {
+        const graph = buildAmbaShellGraph();
+        const nvp0 = graph.nodes[0];
+        const batch = graph.nodes[1];
+        const selected = [nvp0, batch];
+        const { beginNodes, endNodes } = findBoundaryNodes(graph, selected);
+
+        // Mock nvp0 has no graph inputs; findBoundaryNodes falls back to all selected nodes as begins.
+        assert.deepEqual(beginNodes.map((node) => node.name).sort(), [
+            'conti_1320_prim_nvp0',
+            'conti_1320_prim_runtime2'
+        ]);
+        assert.deepEqual(endNodes.map((node) => node.name).sort(), [
+            'conti_1320_prim_nvp0',
+            'conti_1320_prim_runtime2'
+        ]);
+
+        const extracted = extractSubgraph(graph, beginNodes, endNodes);
         const names = extracted.outputs.map((entry) => entry.value[0].name).sort();
         assert.deepEqual(names, [
             'conti_1320_prim_nvp0:1',
