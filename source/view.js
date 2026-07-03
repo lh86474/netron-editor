@@ -864,6 +864,19 @@ view.View = class {
         return null;
     }
 
+    _isMergePane(pane) {
+        return Boolean(pane && pane.id && pane.id.startsWith('merge-'));
+    }
+
+    _resolvePaneSourceGraph(pane, target) {
+        if (this._isMergePane(pane)) {
+            return target;
+        }
+        return pane.readOnly ?
+            this._resolveOriginalTarget(target) :
+            this._resolveModifiedTarget(target);
+    }
+
     _clearMergePanePaths() {
         this._mergePanePaths.clear();
     }
@@ -2793,7 +2806,7 @@ view.View = class {
             container: this._paneScrollContainer(pane) || pane.container,
             readOnly: pane.readOnly,
             deltaTracker: pane.deltaTracker,
-            graphIndex: this._resolveGraphIndex(target),
+            graphIndex: this._isMergePane(pane) ? 0 : this._resolveGraphIndex(target),
             model: model || null
         };
     }
@@ -2870,7 +2883,7 @@ view.View = class {
                 }
             }
         }
-        return baselineModules[0] || null;
+        return target;
     }
 
     _findGraphByName(graph, name) {
@@ -2916,10 +2929,10 @@ view.View = class {
         let status = '';
         if (target) {
             const document = this._host.document;
-            this._restoreBatchInlineState(state);
-            const sourceGraph = pane.readOnly ?
-                this._resolveOriginalTarget(target) :
-                this._resolveModifiedTarget(target);
+            if (!this._isMergePane(pane)) {
+                this._restoreBatchInlineState(state);
+            }
+            const sourceGraph = this._resolvePaneSourceGraph(pane, target);
             const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const viewGraph = new view.Graph(this, groups, this._graphOptions(pane, graph, model));
@@ -3024,9 +3037,7 @@ view.View = class {
         if (origin && paneTarget && pane) {
             previous = origin.getScreenCTM();
             const oldChildren = Array.from(origin.children);
-            const sourceGraph = pane.readOnly ?
-                this._resolveOriginalTarget(paneTarget) :
-                this._resolveModifiedTarget(paneTarget);
+            const sourceGraph = this._resolvePaneSourceGraph(pane, paneTarget);
             const graph = pane.readOnly ? sourceGraph : this._resolveDisplayGraph(sourceGraph);
             const groups = graph.groups || false;
             const renderModel = isMergePane && targetGraph ? targetGraph._renderModel : null;
