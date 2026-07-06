@@ -21,7 +21,6 @@ import {
     getPrimGraphSnapshotValue,
     isAmbapbShellNode,
     PRIM_GRAPH_ATTRIBUTE,
-    resolveCheckpointRuntimeGraph,
     syncShellAttribute,
     validateAmbapbPatch
 } from './ambapb-editor.js';
@@ -2065,14 +2064,7 @@ const buildOriginalBaselineModules = (original) => {
     if (!original || !original._ambapb) {
         return frozen.modules;
     }
-    return frozen.modules.map((graph) => {
-        const runtime = resolveCheckpointRuntimeGraph(graph);
-        const baseline = cloneGraph(runtime);
-        if (runtime._ambapbCompiledGraph) {
-            baseline._ambapbCompiledGraph = true;
-        }
-        return baseline;
-    });
+    return frozen.modules.map((graph) => cloneGraph(graph));
 };
 
 class EditorState {

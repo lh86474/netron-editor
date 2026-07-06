@@ -51,7 +51,7 @@ const buildCheckpointViewModel = (runtimeNodes) => {
 };
 
 describe('checkpoint editor session', () => {
-    it('freezes unwrapped runtime in originalModules while keeping shell in modified storage', () => {
+    it('freezes shell graph in originalModules while keeping shell in modified storage', () => {
         const model = buildCheckpointViewModel([
             { name: 'conv0', type: { name: 'Conv' }, attributes: [], inputs: [], outputs: [] },
             { name: 'relu0', type: { name: 'Relu' }, attributes: [], inputs: [], outputs: [] }
@@ -60,12 +60,13 @@ describe('checkpoint editor session', () => {
 
         assert.equal(session.modified.getGraph(0).nodes.length, 1);
         assert.equal(session.modified.getGraph(0).nodes[0].type.name, CVFLOW_NVP_OP_TYPE);
-        assert.equal(session.originalModules[0].nodes.length, 2);
-        assert.equal(session.originalModules[0].nodes[0].name, 'conv0');
+        assert.equal(session.originalModules[0].nodes.length, 1);
+        assert.equal(session.originalModules[0].nodes[0].type.name, CVFLOW_NVP_OP_TYPE);
+        assert.equal(session.originalModules[0].nodes[0].name, 'wrapper');
 
         session.modified.getGraph(0).nodes[0].name = 'mutated_wrapper';
         assert.equal(model.modules[0].nodes[0].name, 'mutated_wrapper');
-        assert.equal(session.originalModules[0].nodes[0].name, 'conv0');
+        assert.equal(session.originalModules[0].nodes[0].name, 'wrapper');
     });
 
     it('replaceGraph hoists flat runtime at module root for continued editing', () => {
@@ -103,6 +104,6 @@ describe('checkpoint editor session', () => {
         assert.equal(stored.nodes[0].type.name, 'UserDefCall');
         assert.equal(resolveCheckpointRuntimeGraph(stored).nodes.length, 2);
         assert.equal(session.originalModules[0].nodes.length, 1);
-        assert.equal(session.originalModules[0].nodes[0].name, 'conv0');
+        assert.equal(session.originalModules[0].nodes[0].type.name, CVFLOW_NVP_OP_TYPE);
     });
 });

@@ -3010,16 +3010,15 @@ view.View = class {
         if (!isAmbapbCheckpoint(this._model)) {
             return graph;
         }
-        const runtime = resolveCheckpointRuntimeGraph(graph);
-        if (runtime && this._editSession) {
-            const graphIndex = this._resolveGraphIndex(runtime);
+        if (graph && this._editSession) {
+            const graphIndex = this._resolveGraphIndex(graph);
             attachCompiledGraphSourceRefs(
-                runtime,
+                graph,
                 graphIndex,
                 this._editSession.modified.model
             );
         }
-        return runtime;
+        return graph;
     }
 
     _resolveOriginalTarget(target) {
