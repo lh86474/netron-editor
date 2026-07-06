@@ -230,7 +230,54 @@ export class DeltaTracker {
         return changed;
     }
 
-    _emit() {
+    _remapKey(key, orderedEntries) {
+        for (const [oldPrefix, newPrefix] of orderedEntries) {
+            if (key === oldPrefix || key.startsWith(`${oldPrefix}/`) || key.startsWith(`${oldPrefix}:`)) {
+                return newPrefix + key.slice(oldPrefix.length);
+            }
+        }
+        return key;
+    }
+
+    remapEntities(idMap) {
+        if (!idMap || idMap.size === 0) {
+            return false;
+        }
+        const orderedEntries = [...idMap.entries()].sort(
+            (a, b) => b[0].length - a[0].length
+        );
+        const remappedPrefixes = new Set(idMap.keys());
+
+        const remappedChanges = new Map();
+        for (const [entityId, change] of this._changes) {
+            const wasMoved = remappedPrefixes.has(entityId) ||
+                [...remappedPrefixes].some((old) => entityId.startsWith(`${old}/`));
+            const newId = this._remapKey(entityId, orderedEntries);
+
+            if (wasMoved && newId === entityId) {
+                continue;
+            }
+            remappedChanges.set(newId, {
+                ...change,
+                entityId: newId,
+                parentId: change.parentId ?
+                    this._remapKey(change.parentId, orderedEntires):
+                    change.parentId
+            });
+        }
+        this._changes = remappedChanges;
+
+        const remappedOriginal = new Map();
+        for (const [key, value] of this._original) {
+            remappedOriginal.set(this._remapKey(key, orderedEntries), value);
+        }
+        this._original = remappedOriginal;
+
+        this._emit();
+        return true;
+    }
+
+_emit() {
         for (const callback of this._listeners) {
             callback(this.getChanges());
         }

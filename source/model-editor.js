@@ -809,28 +809,86 @@ const cloneExtractAttributeValue = (attribute) => {
     return cloneAttributeValue(attribute.value);
 };
 
-const cloneExtractNode = (node, valueMap) => ({
-    name: node.name,
-    type: readType(node.type),
-    attributes: (node.attributes || []).map((attribute) => ({
-        name: attribute.name,
-        type: attribute.type,
-        value: cloneExtractAttributeValue(attribute)
-    })),
-    blocks: (node.blocks || []).map((attribute) => ({
-        name: attribute.name,
-        type: attribute.type,
-        value: cloneExtractAttributeValue(attribute)
-    })),
-    inputs: (node.inputs || []).map((input) => ({
-        name: input.name,
-        value: argumentValues(input).map((entry) => cloneExtractValue(entry, valueMap)).filter((entry) => entry !== null)
-    })),
-    outputs: (node.outputs || []).map((output) => ({
-        name: output.name,
-        value: argumentValues(output).map((entry) => cloneExtractValue(entry, valueMap)).filter((entry) => entry !== null)
-    }))
-});
+const cloneExtractNode = (node, valueMap) => {
+    const cloned = {
+        name: node.name,
+        type: readType(node.type),
+        attributes: (node.attributes || []).map((attribute) => ({
+            name: attribute.name,
+            type: attribute.type,
+            value: cloneExtractAttributeValue(attribute)
+        })),
+        blocks: (node.blocks || []).map((attribute) => ({
+            name: attribute.name,
+            type: attribute.type,
+            value: cloneExtractAttributeValue(attribute)
+        })),
+        inputs: (node.inputs || []).map((input) => ({
+            name: input.name,
+            value: argumentValues(input).map((entry) => cloneExtractValue(entry, valueMap)).filter((entry) => entry !== null)
+        })),
+        outputs: (node.outputs || []).map((output) => ({
+            name: output.name,
+            value: argumentValues(output).map((entry) => cloneExtractValue(entry, valueMap)).filter((entry) => entry !== null)
+        }))
+    };
+    if (node.description !== undefined) {
+        cloned.description = node.description;
+    }
+    if (node._primitiveId !== undefined) {
+        cloned._primitiveId = node._primitiveId;
+    }
+    if (node._primitiveIndex !== undefined) {
+        cloned._primitiveIndex = node._primitiveIndex;
+    }
+    return cloned;
+};
+
+const indexGraphEntityIds = (subGraph, graphIndex, index, nestedPath = []) => {
+    for (let nodeIndex = 0; nodeIndex < (subGraph.nodes || []).length; nodeIndex++) {
+        const node = subGraph.nodes[nodeIndex];
+        let entityId = `graph:${graphIndex}`;
+        for (const segment of nestedPath) {
+            entityId += `/node:${segment.hostIndex}/${segment.attrName}`;
+        }
+        entityId += `/node:${nodeIndex}`;
+
+        index.set(`node:${node.name}`, entityId);
+
+        const graphArgs = nodeGraphArguments(node);
+        for (let attrIndex = 0; attrIndex < graphArgs.length; attrIndex++) {
+            const attribute = graphArgs[attrIndex];
+            index.set(
+                `node:${node.name}/attr:${attribute.name}`,
+                `${entityId}/attr:${attrIndex}`
+            );
+            if (attribute.type === 'graph' && attribute.value) {
+                indexGraphEntityIds(
+                    attribute.value,
+                    graphIndex,
+                    index,
+                    [...nestedPath, { hostIndex: nodeIndex, attrName: attribute.name }]
+                );
+            }
+        }
+    }
+};
+
+export const buildEntityIdRemapForGraph = (graphIndex, oldGraph, newGraph) => {
+    const oldIndex = new Map();
+    const newIndex = new Map();
+    indexGraphEntityIds(oldGraph, graphIndex, oldIndex);
+    indexGraphEntityIds(newGraph, graphIndex, newIndex);
+
+    const remap = new Map();
+    for (const [key, oldId] of oldIndex) {
+        const newId = newIndex.get(key);
+        if (newId && newId !== oldId) {
+            remap.set(oldId, newId);
+        }
+    }
+    return remap;
+};
 
 export const extractSubgraph = (graph, beginNodes, endNodes) => {
     const begins = normalizeNodeList(beginNodes);
@@ -1602,7 +1660,14 @@ class EditorState {
         return this._originalBaselineModules;
     }
 
-    replaceGraph(graphIndex, newGraph) {
+    replaceGraph(graphIndex, newGraph, options = {}) {
+        const oldGraph = this.modified.getGraph(graphIndex);
+        if (options.preserveDelta) {
+            const idMap = buildEntityIdRemapForGraph(graphIndex, oldGraph, newGraph);
+            this.modified.model.modules[graphIndex] = newGraph;
+            this.delta.remapEntities(idMap);
+            return;
+        }
         this.modified.model.modules[graphIndex] = newGraph;
         this._snapshot = buildOriginalSnapshot(this.modified.model);
         this.delta = new DeltaTracker(this._snapshot);

@@ -2100,7 +2100,7 @@ view.View = class {
             if (extractSourceGraph && extractSourceGraph._ambapbCompiledGraph) {
                 modifiedGraph._ambapbCompiledGraph = true;
             }
-            this._editSession.replaceGraph(graphIndex, cloneGraph(modifiedGraph));
+            this._editSession.replaceGraph(graphIndex, cloneGraph(modifiedGraph), { preserveDelta: true});
 
             if (this._model && this._model.proto) {
                 const ambapbPrimGraph = this._model._ambapb ? this._model._ambapb.primGraph : null;
