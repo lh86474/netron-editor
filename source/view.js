@@ -1361,13 +1361,12 @@ view.View = class {
         if (this._editSession && isAmbapbCheckpoint(this._model)) {
             if (this._canEditModelContent()) {
                 const entity = this._resolveNodeEntity(node);
-                const isRootShell = entity && !entity.nested && isAmbapbShellNode(node);
                 const isCompiled = this._isViewingCompiledAmbapbGraph() ||
                     sourceEntityIdForNode(node) !== null ||
                     Boolean(node._inlineExpanded) ||
                     (entity && entity.nested &&
                         (entity.graphAttrName === 'compiled_prim_graph' || entity.graphAttrName === 'graph'));
-                if (isRootShell) {
+                if (isAmbapbShellNode(node)) {
                     return new view.AmbaShellNodeSidebar(this, node, this._editSession);
                 }
                 if (isAmbapbRuntimeShellNode(node) || isCompiled) {
@@ -7943,7 +7942,8 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
     }
 
     render() {
-        const node = this._node;
+        const displayNode = this._node;
+        const node = sourceNodeForEntity(displayNode) || displayNode;
         const nodeId = this._entity ? this._entity.nodeId : null;
         let ambapb = node._ambapb;
         if (!ambapb) {
