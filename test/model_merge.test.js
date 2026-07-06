@@ -1,8 +1,17 @@
+/*
+ * With the introduction of the ambapb.ckpt.onnx models, which is not a pure onnx model, 
+ * we must make sure that it cannot be merged with a pure onnx model
+ * This file contains tests for the logic of model merges, like automatic mapping,
+ * compatability checks, etc. 
+ * For UI tests, check merge_session.test.js
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { onnx } from '../source/onnx-proto.js';
 import '../source/onnx-encode.js';
 import { BinaryReader } from '../source/protobuf.js';
+// methods to test
 import {
     validateMerge,
     tryMergeOnnxModels,
@@ -16,6 +25,7 @@ import {
 } from '../source/model-merge.js';
 import { validateGraphForMerge as validateGraph } from '../source/onnx-export.js';
 
+// we create a mock tensor, which is used for compatibility checks
 const makeTensorType = (elemType, dims = []) => {
     const type = new onnx.TypeProto();
     const tensor = new onnx.TypeProto.Tensor();
@@ -40,6 +50,7 @@ const makeValueInfo = (name, elemType, dims) => {
     return value;
 };
 
+// we create a mock identity model, which is used for compatibility checks
 const makeIdentityModel = ({ name, inputs, outputs, nodes }) => {
     const model = new onnx.ModelProto();
     model.ir_version = 8n;

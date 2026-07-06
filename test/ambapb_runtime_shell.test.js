@@ -1,3 +1,7 @@
+/*
+ * This file tests the editing features for the upper level nodes such as batchCall, cvFlowNVP, fragsubgraph, which are the runtime shell nodes.
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -9,6 +13,7 @@ import {
 } from '../source/ambapb-editor.js';
 import { ModelEditor } from '../source/model-editor.js';
 
+// build mock ambapbonnx.ckpt.onnx model 
 const buildCheckpointModel = (nodes) => {
     const viewModel = {
         _kind: 'amba-checkpoint',
@@ -28,7 +33,9 @@ const buildCheckpointModel = (nodes) => {
     };
     return viewModel;
 };
-
+// a future step is to include userdefsubgraph and userdefcall since that will be new. 
+// Here, we make sure we won't see the conv nodes. This test is pretty skimpty and not too 
+// thorough, but it's a start
 describe('ambapb runtime shell editing', () => {
     it('recognizes runtime shell op types', () => {
         assert.equal(isAmbapbRuntimeShellNode({ type: { name: 'CVFlowNVP' } }), true);
@@ -37,7 +44,7 @@ describe('ambapb runtime shell editing', () => {
         assert.equal(isAmbapbRuntimeShellNode({ type: { name: 'Conv' } }), false);
         assert.equal(EDITABLE_SHELL_OP_TYPES.has('BatchCall'), true);
     });
-
+    // We want to find the compiled_prim_graph
     it('detects compiled graph navigation context', () => {
         const compiled = { _ambapbCompiledGraph: true, nodes: [] };
         const runtime = { nodes: [] };
@@ -47,6 +54,8 @@ describe('ambapb runtime shell editing', () => {
         assert.equal(isViewingCompiledAmbapbGraph([], runtime), false);
     });
 
+    // this tests builds a mock model with batchcall and fragsubgraph
+    // Makes some mock changes like renaming fragsubgraph, adding attribute to batch call
     it('allows FragSubgraph and BatchCall attribute edits', () => {
         const model = buildCheckpointModel([
             {
@@ -87,7 +96,7 @@ describe('ambapb runtime shell editing', () => {
             newValue: 16
         });
     });
-
+    // makes sure we can rename the runtime shell nodes
     it('applies runtime shell rename through ModelEditor', () => {
         const model = buildCheckpointModel([{
             name: 'batch',

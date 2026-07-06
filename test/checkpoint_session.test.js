@@ -1,8 +1,13 @@
+/*
+ * This file tests the checkpoint session, which is the session that is used to edit the checkpoint model.
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { CVFLOW_NVP_OP_TYPE, resolveCheckpointRuntimeGraph } from '../source/ambapb-editor.js';
 import { ModelEditor, cloneGraph } from '../source/model-editor.js';
 
+// used to build mock checkpoint model with a runtime graph
 const buildCheckpointViewModel = (runtimeNodes) => {
     const runtime = {
         name: 'compiled_runtime',

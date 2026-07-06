@@ -1,3 +1,12 @@
+/*
+ * Tests to make sure that data types are correctly formatted and validated. 
+ * canocalize means to standardize: transforming data that can have
+ * multiple representations into one agreed-upon format.
+ * by default, data type is formatted as
+ * exampleDAtatype[1, 2, 3]
+ * Author: Luray He
+ */
+
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -12,7 +21,7 @@ describe('tensor-type', () => {
         assert.equal(canonicalizeTensorTypeString('float32[1, 2]'), 'float32[1,2]');
         assert.equal(canonicalizeTensorTypeString('int64[batch]'), 'int64[batch]');
     });
-
+    // When we reject invalid data types, we just revert back to the original string.
     it('rejects invalid types', () => {
         assert.throws(() => canonicalizeTensorTypeString('not_a_type'), TensorTypeError);
         assert.throws(() => canonicalizeTensorTypeString('float32[1-2]'), TensorTypeError);

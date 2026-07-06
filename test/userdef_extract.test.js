@@ -1,3 +1,8 @@
+/*
+ * Tests to make sure that the userdef subgraph and userdef call are correctly extracted and combined.
+ * Author: Luray He
+ */
+
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mockChainModel } from './fixtures/mock-graph.js';
@@ -11,6 +16,9 @@ import {
 import { inlineExpansionBatchCallName } from '../source/ambapb-batch-inline.js';
 
 // The identical implementation of findBoundaryNodes from view.js
+// We do not export findBoundarynodes from view.js because it is not a public API.
+// boundary meaning the nodes that are the beginning and end of the subgraph that will be 
+// "extracted" to create a userdef subgraph and userdef call.
 const findBoundaryNodes = (graph, selectedNodes) => {
     const selectedNodesSet = new Set(selectedNodes);
     const beginNodes = [];
@@ -84,6 +92,8 @@ const findBoundaryNodes = (graph, selectedNodes) => {
 };
 
 describe('UserDefCall and boundary selection', () => {
+    // Relu is part of pure onnx, but we are just testing extraction logic
+    // If we just select one node to extract, we whould just end up with the same thing
     it('correctly identifies boundary nodes for a single middle node', () => {
         const graph = mockChainModel.modules[0];
         // Relu1 is index 1
@@ -107,6 +117,7 @@ describe('UserDefCall and boundary selection', () => {
         assert.equal(endNodes[0].name, 'Relu1');
     });
 
+    // creates a lot of mocks and we mock a creation of fragsubgraph and userdefcall
     it('correctly extracts subgraph and constructs UserDefSubgraph + UserDefCall', () => {
         const graph = mockChainModel.modules[0];
         const selectedNodes = [graph.nodes[0], graph.nodes[1]]; // Conv1 and Relu1

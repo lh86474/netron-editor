@@ -1,6 +1,12 @@
+/*
+ * The introduction of the two panes made the expansion of the compiled_prim_graph more complex, so we
+ * had to introduce more ids to track differentiate the states between the two panes 
+ * Author: Luray He
+ */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
+// We call the compiled_prim_graph a block, and we need to track the expansion state of the block.
 class GraphBlockExpansion {
     constructor() {
         this.blocks = new Set();
@@ -30,6 +36,7 @@ class GraphBlockExpansion {
     }
 }
 
+// before, we would have a weird behavior where if we expand on block, it would affect the other block with the same subgraph object.
 describe('graph block expansion keys', () => {
     it('expands one host/attribute pair without affecting another sharing the same subgraph object', () => {
         const sharedSubgraph = { name: 'subgraph_nvp0', nodes: [] };
