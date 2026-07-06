@@ -874,6 +874,73 @@ export const promoteVisibleGraphOutputs = (graph) => {
     return graph;
 };
 
+export const buildEntityMapsForDisplayGraph = (model, graph, graphIndex = 0, entityIdPrefix = null) => {
+    const nodeIds = new Map();
+    const valueIds = new Map();
+
+    let pathPrefix = entityIdPrefix || null;
+    if (!pathPrefix && model && graph) {
+        const pathInfo = locateGraphPath(model, graph);
+        if (pathInfo && pathInfo.kind === 'nested') {
+            pathPrefix = `graph:${pathInfo.graphIndex}`;
+            if (Array.isArray(pathInfo.segments)) {
+                for (const segment of pathInfo.segments) {
+                    pathPrefix += `/node:${segment.nodeIndex}/${segment.attrName}`;
+                }
+            } else if (pathInfo.nodeIndex !== undefined && pathInfo.attrName) {
+                pathPrefix += `/node:${pathInfo.nodeIndex}/${pathInfo.attrName}`;
+            }
+        }
+    }
+
+    for (let nodeIndex = 0; nodeIndex < (graph.nodes || []).length; nodeIndex++) {
+        const node = graph.nodes[nodeIndex];
+        const nodeId = pathPrefix ?
+            `${pathPrefix}/node:${nodeIndex}` :
+            `graph:${graphIndex}/node:${nodeIndex}`;
+        nodeIds.set(node, nodeId);
+    }
+
+    const tracked = new Set();
+    let valueIndex = 0;
+    const track = (value) => {
+        if (!value || tracked.has(value)) {
+            return;
+        }
+        tracked.add(value);
+        const valueId = pathPrefix ?
+            `${pathPrefix}/value:${valueIndex++}` :
+            `graph:${graphIndex}/value:${valueIndex++}`;
+        valueIds.set(value, valueId);
+    };
+
+    const trackArg = (argument) => {
+        if (!argument || !Array.isArray(argument.value)) {
+            return;
+        }
+        for (const value of argument.value) {
+            track(value);
+        }
+    };
+
+    for (const input of graph.inputs || []) {
+        trackArg(input);
+    }
+    for (const output of graph.outputs || []) {
+        trackArg(output);
+    }
+    for (const node of graph.nodes || []) {
+        for (const input of node.inputs || []) {
+            trackArg(input);
+        }
+        for (const output of node.outputs || []) {
+            trackArg(output);
+        }
+    }
+
+    return { nodeIds, valueIds, pathPrefix };
+};
+
 export const collectNodesBetween = (graph, beginNode, endNode) => {
     if (!beginNode || !endNode) {
         throw new SubgraphExtractError('Begin and end nodes are required.');

@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, getNodeByEntityId, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers } from './model-editor.js';
+import { ModelEditor, locateNodeEntity, locateValueEntity, getNodeByEntityId, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers, buildEntityMapsForDisplayGraph } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified, rebuildGraphProtoFromModifiedWithAmbapb } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint, canExportCheckpoint } from './ambapb.js';
 import {
@@ -27,6 +27,7 @@ import { GraphPane } from './graph-pane.js';
 import { MergeWorkspaceController } from './merge-workspace.js';
 import {
     applyBatchInlineExpansions,
+    attachCompiledGraphSourceRefs,
     canExpandBatchCall,
     inlineExpansionBatchCallName,
     isBatchCallNode,
@@ -1343,6 +1344,10 @@ view.View = class {
             this._rightPane.deltaTracker = this._editSession.delta;
             this._deltaUnsubscribe = this._editSession.delta.subscribe(() => {
                 this._updateUndoRedoButtons();
+                const graph = this._rightPane && this._rightPane.graph;
+                if (graph && graph.refreshDeltaStyles) {
+                    graph.refreshDeltaStyles();
+                }
             });
         }
         this._updateUndoRedoButtons();
@@ -3006,7 +3011,16 @@ view.View = class {
         if (!isAmbapbCheckpoint(this._model)) {
             return graph;
         }
-        return resolveCheckpointRuntimeGraph(graph);
+        const runtime = resolveCheckpointRuntimeGraph(graph);
+        if (runtime && this._editSession) {
+            const graphIndex = this._resolveGraphIndex(runtime);
+            attachCompiledGraphSourceRefs(
+                runtime,
+                graphIndex,
+                this._editSession.modified.model
+            );
+        }
+        return runtime;
     }
 
     _resolveOriginalTarget(target) {
@@ -5133,11 +5147,11 @@ view.Graph = class extends grapher.Graph {
 
     // Use model entity id, not the display graph index
     createNode(node) {
-        let entityId = null;
-        if (this.entityIdPrefix) {
+        let entityId = sourceEntityIdForNode(node);
+        if (!entityId && this.entityIdPrefix) {
             const nodeIndex = (this.target?.nodes || []).indexOf(node);
             entityId = nodeIndex >= 0 ? `${this.entityIdPrefix}/node:${nodeIndex}` : null;
-        } else if (this.view && this.view._editSession) {
+        } else if (!entityId && this.view && this.view._editSession) {
             const entity = this.view._resolveNodeEntity(node);
             if (entity) {
                 entityId = entity.nodeId;
@@ -5186,13 +5200,16 @@ view.Graph = class extends grapher.Graph {
             this._table.set(value, obj);
         } else {
             const obj = new view.Value(this, value);
-            obj._entityId = this._valueEntityIds.get(value) || null;
+            obj._entityId = this._valueEntityIds.get(value) || value._sourceEntityId || null;
             this._values.set(key, obj);
             this._table.set(value, obj);
         }
         const obj = this._values.get(key);
         if (obj && !obj._entityId) {
-            obj._entityId = this._valueEntityIds.get(value) || null;
+            obj._entityId = value._sourceEntityId ||
+                this._valueEntityIds.get(value) ||
+                this._valueEntityIds.get(sourceValueForEntity(value)) ||
+                null;
         }
         return obj;
     }
@@ -5318,10 +5335,22 @@ view.Graph = class extends grapher.Graph {
     add(graph, signature) {
         this.target = graph;
         this._valueEntityIds = new Map();
-        if (this.deltaTracker) {
-            for (const [value, id] of enumerateGraphValues(graph, this.graphIndex)) {
-                this._valueEntityIds.set(value, id);
+
+        if (this.deltaTracker && this.view && this.view._editSession) {
+            const model = this.view._editSession.modified.model;
+            const { nodeIds, valueIds } = buildEntityMapsForDisplayGraph(
+            model,
+            graph,
+            this.graphIndex,
+                this.entityIdPrefix
+            );
+            for (const [node, nodeId] of nodeIds) {
+                node._sourceEntityId = nodeId;
             }
+            for (const [value, valueId] of valueIds) {
+                value._sourceEntityId = valueId;
+            }
+            this._valueEntityIds = valueIds; 
         }
         this.identifier = this.model && this.model.identifier ? this.model.identifier : 'model';
         this.identifier += graph && graph.name ? `.${graph.name.replace(/\/|\\/g, '.')}` : '';
@@ -6292,7 +6321,7 @@ view.Node = class extends grapher.Node {
 
     // apply delta style to the node, the edit thing
     applyDeltaStyle() {
-        if (!this.element || !this._entityId || !this.context.deltaTracker) {
+        if (!this._entityId || !this.context.deltaTracker || !this.element) {
             return;
         }
         const state = this.context.deltaTracker.getAggregateState(this._entityId);
@@ -6528,7 +6557,7 @@ view.Node = class extends grapher.Node {
             const blockKey = this.context.blockKey(hostEntityId, argument.name);
             if (type === 'graph' && blockKey && this.context.isBlockExpanded(blockKey)) {
                 content = this.context.createGraph(argument.value, 'graph', blockKey, this.value);
-                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks, blockKey));
+                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks, blockKey, this.context.deltaTracker));
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
@@ -6631,8 +6660,11 @@ view.Node = class extends grapher.Node {
 
 view.Block = class {
 
-    constructor(viewRef, target, blocks, entityIdPrefix) {
-        this.target = new view.Graph(viewRef, false, { entityIdPrefix });
+    constructor(viewRef, target, blocks, entityIdPrefix, deltaTracker = null) {
+        this.target = new view.Graph(viewRef, false, {
+            entityIdPrefix,
+            deltaTracker
+        });
         if (blocks) {
             this.target.blocks = blocks;
         }
@@ -6835,7 +6867,8 @@ view.Value = class {
         if (!this._entityId || !this.context.deltaTracker || !Array.isArray(this._edges)) {
             return;
         }
-        const edited = this.context.deltaTracker.getState(this._entityId) !== 'unchanged';
+        const state = this.context.deltaTracker.getAggregateState(this._entityId);
+        const edited = state === 'modified' || state === 'added' || state === 'deleted';
         for (const edge of this._edges) {
             if (!edge.element) {
                 continue;

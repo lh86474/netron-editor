@@ -5,7 +5,7 @@
  * We build the display graph here as well
  * Author: Luray He
  */
-import { cloneGraph, locateNodeEntity } from './model-editor.js';
+import { cloneGraph, locateNodeEntity, locateValueEntity } from './model-editor.js';
 
 const BATCH_CALL_OP = 'BatchCall';
 const FRAG_SUBGRAPH_OP = 'FragSubgraph';
@@ -636,6 +636,38 @@ const attachDisplayNodeSourceRefs = (displayGraph, sourceGraph, graphIndex = 0, 
         node._sourceNode = sourceByName.get(node.name) || null;
     }
     attachDisplayValueSourceRefs(displayGraph);
+};
+
+export const attachCompiledGraphSourceRefs = (displayGraph, graphIndex = 0, model = null) => {
+    if (!displayGraph || !model) {
+        return displayGraph;
+    }
+    for (const node of displayGraph.nodes || []) {
+        const entity = locateNodeEntity(model, node);
+        if (entity && entity.nodeId) {
+            node._sourceEntityId = entity.nodeId;
+        }
+    }
+    for (const node of displayGraph.nodes || []) {
+        for (const argList of [node.inputs, node.outputs]) {
+            if (!Array.isArray(argList)) {
+                continue;
+            }
+            for (const arg of argList) {
+                const values = argumentValues(arg);
+                for (const value of values) {
+                    if (!value) {
+                        continue;
+                    }
+                    const entity = locateValueEntity(model, value);
+                    if (entity && entity.valueId) {
+                        value._sourceEntityId = entity.valueId;
+                    }
+                }
+            }
+        }
+    }
+    return displayGraph;
 };
 
 export const sourceNodeForEntity = (displayNode) => {
