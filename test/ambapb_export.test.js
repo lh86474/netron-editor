@@ -641,6 +641,85 @@ describe('ambapb checkpoint export', () => {
         assert.deepEqual(Array.from(nestedVasVdgAttr.t.raw_data), [1, 2, 3, 4]);
     });
 
+    it('exports checkpoint with UserDefCall on multi-node runtime graph and preserves prim_graph_imms', () => {
+        const primGraph = loadSyntheticPrimGraph();
+        const conv = primGraph.primitives.find((p) => p.id === 'conv0');
+        conv.raw = conv.raw || {};
+        conv.raw.immediates = [
+            {
+                'file-name': 'conv0.weight.bin',
+                'data-format': { sign: 1, bits: 8, expoff: 0, expbits: 0 },
+                'dimension': { w: 1, h: 1, d: 1, p: 1 }
+            }
+        ];
+        const proto = buildCheckpointModelProto(primGraph);
+        const model = buildCheckpointViewModel(proto, primGraph);
+        const session = ModelEditor.createSession(model);
+
+        const extractedSubgraph = {
+            name: 'userdefsubgraph_0',
+            inputs: [{ name: 'input', value: [{ name: 'data' }] }],
+            outputs: [{ name: 'output', value: [{ name: 'conv0' }] }],
+            nodes: [{
+                name: 'conv0',
+                type: { name: 'Conv' },
+                attributes: [],
+                inputs: [{ name: 'input', value: [{ name: 'data' }] }],
+                outputs: [{ name: 'output', value: [{ name: 'conv0' }] }]
+            }]
+        };
+
+        const runtimeGraph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'userdefsubgraph_0',
+                    type: { name: 'UserDefSubgraph', identifier: 'UserDefSubgraph', module: 'com.ambarella' },
+                    attributes: [{ name: 'graph', type: 'graph', value: extractedSubgraph }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'userDefCall_0',
+                    type: { name: 'UserDefCall', identifier: 'UserDefCall', module: 'com.ambarella' },
+                    attributes: [
+                        { name: 'graph_id', type: 'string', value: 'userdefsubgraph_0' },
+                        { name: 'src_mappings', type: 'string', value: JSON.stringify([{ id: 'data', index: 0 }]) },
+                        { name: 'out_mappings', type: 'string', value: JSON.stringify([{ id: 'conv0', index: 0 }]) }
+                    ],
+                    inputs: [{ name: 'input', value: [{ name: 'data' }] }],
+                    outputs: [{ name: 'output', value: [{ name: 'conv0' }] }]
+                },
+                {
+                    name: 'output0',
+                    type: { name: 'CVFlowNVP', identifier: 'CVFlowNVP' },
+                    attributes: [],
+                    inputs: [{ name: 'input', value: [{ name: 'conv0' }] }],
+                    outputs: [{ name: 'output', value: [{ name: 'output0' }] }]
+                }
+            ]
+        };
+
+        session.replaceGraph(0, runtimeGraph);
+        const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(runtimeGraph, proto, primGraph);
+        model.proto.graph = rebuilt.graph;
+        if (rebuilt.slicedPrimGraph) {
+            model._ambapb.primGraph = rebuilt.slicedPrimGraph;
+        }
+
+        const bytes = exportModifiedOnnx(model, session);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        const checkpoint = parseCheckpoint(decoded);
+        assert.equal(checkpoint.primGraphImmsAttribute.tensors.length, 1);
+        assert.equal(checkpoint.primGraphImmsAttribute.tensors[0].name, 'conv0.weight');
+        assert.deepEqual(Array.from(checkpoint.primGraphImmsAttribute.tensors[0].float_data), [1.0, 2.0, 3.0, 4.0]);
+        const compiledAttr = checkpoint.compiledPrimGraphAttribute;
+        assert.ok(compiledAttr && compiledAttr.g);
+        assert.equal(compiledAttr.g.node.length, 3);
+    });
+
     it('preserves FragSubgraph graph attributes during graph rebuild', () => {
         const model = new onnx.ModelProto();
         const graph = new onnx.GraphProto();

@@ -137,6 +137,12 @@ const readModel = (model) => {
         return cloneAttributeValue(source);
     };
     const readAttribute = (attribute) => {
+        let value;
+        if (attribute.type === 'graph' && attribute.value && typeof attribute.value === 'object') {
+            value = readGraph(attribute.value);
+        } else {
+            value = cloneAttributeValue(attribute.value);
+        }
         const result = {
             name: attribute.name,
             type: attribute.type,

@@ -9,6 +9,13 @@ import { cloneGraph, locateNodeEntity } from './model-editor.js';
 
 const BATCH_CALL_OP = 'BatchCall';
 const FRAG_SUBGRAPH_OP = 'FragSubgraph';
+const USER_DEF_SUBGRAPH_OP = 'UserDefSubgraph';
+
+const isSubgraphDefinitionNode = (node) => {
+    return Boolean(node && node.type && (
+        node.type.name === FRAG_SUBGRAPH_OP || node.type.name === USER_DEF_SUBGRAPH_OP
+    ));
+};
 const COMPILED_PRIM_GRAPH_ATTR = 'compiled_prim_graph';
 const FRAG_SUBGRAPH_GRAPH_ATTR = 'graph';
 // compiled_prim_graph_attr is equal to compiled_prim_graph in other modules
@@ -285,7 +292,8 @@ const cloneValue = (value, prefix, valueMap, nameMap) => {
     return cloned;
 };
 // After clonNode, inlined nodes are already set with _inlineExpanded
-const cloneNode = (node, prefix, valueMap, nameMap) => {
+const cloneNode = (node, prefix, valueMap, nameMap, options = {}) => {
+    const { markInlineExpanded = true } = options;
     const cloneArgument = (argument) => ({
         name: argument.name,
         value: argumentValues(argument)
@@ -302,8 +310,10 @@ const cloneNode = (node, prefix, valueMap, nameMap) => {
         })),
         inputs: (node.inputs || []).map((input) => cloneArgument(input)),
         outputs: (node.outputs || []).map((output) => cloneArgument(output)),
-        _inlineExpanded: true,
     };
+    if (markInlineExpanded) {
+        cloned._inlineExpanded = true;
+    }
     if (node.description !== undefined) {
         cloned.description = node.description;
     }
@@ -447,7 +457,8 @@ const replaceValueReferences = (graph, replacements) => {
 };
 
 // clones the subgraph and prefixes the nodes
-const expandSingleBatchCall = (graph, batchCallName) => {
+const expandSingleBatchCall = (graph, batchCallName, options = {}) => {
+    const { materialize = false } = options;
     const batchIndex = (graph.nodes || []).findIndex((node) => node.name === batchCallName);
     if (batchIndex < 0) {
         return null;
@@ -462,7 +473,7 @@ const expandSingleBatchCall = (graph, batchCallName) => {
     }
 
     const { subGraph } = target;
-    const prefix = `inline::${batchCallNode.name}::`;
+    const prefix = materialize ? '' : `inline::${batchCallNode.name}::`;
     const valueMap = new Map();
     const nameMap = new Map();
     const srcMappings = parseMappingAttribute(getNodeAttribute(batchCallNode, 'src_mappings'));
@@ -470,9 +481,12 @@ const expandSingleBatchCall = (graph, batchCallName) => {
     const externalInputs = buildExternalInputMap(batchCallNode, subGraph, srcMappings);
 
     const isUserDef = batchCallNode.type?.name === 'UserDefCall';
-    const clonedNodes = (subGraph.nodes || []).map((node) => {
-        const cloned = cloneNode(node, prefix, valueMap, nameMap);
-        if (isUserDef) {
+    const nodesToClone = isUserDef
+        ? (subGraph.nodes || []).filter((node) => !isSubgraphDefinitionNode(node))
+        : (subGraph.nodes || []);
+    const clonedNodes = nodesToClone.map((node) => {
+        const cloned = cloneNode(node, prefix, valueMap, nameMap, { markInlineExpanded: !materialize });
+        if (isUserDef && !materialize) {
             cloned._inlineExpandedFromUserDef = true;
         }
         return cloned;
@@ -488,6 +502,26 @@ const expandSingleBatchCall = (graph, batchCallName) => {
         inlinedNodeNames: clonedNodes.map((node) => node.name)
     };
 };
+
+export const materializeUserDefCallExpansion = (graph, userDefCallName) => {
+    const batchCallNode = (graph.nodes || []).find((node) => node.name === userDefCallName);
+    if (!batchCallNode || batchCallNode.type?.name !== 'UserDefCall') {
+        return null;
+    }
+    const graphIdAttr = getNodeAttribute(batchCallNode, 'graph_id');
+    const graphId = normalizeGraphId(graphIdAttr ? graphIdAttr.value : null);
+    const result = expandSingleBatchCall(graph, userDefCallName, { materialize: true });
+    if (!result) {
+        return null;
+    }
+    if (graphId) {
+        result.graph.nodes = (result.graph.nodes || []).filter(
+            (node) => !(node.type?.name === USER_DEF_SUBGRAPH_OP && node.name === graphId)
+        );
+    }
+    return result;
+};
+
 const getCompiledGraphEntry = (hostNode) => {
     for (const attrName of COMPILED_GRAPH_ATTRS) {
         for (const entry of graphArguments(hostNode)) {
@@ -639,28 +673,14 @@ export const applyBatchInlineExpansions = (graph, expandedBatchCallNames, graphI
     let displayGraph = cloneGraph(graph);
     const inlinedNodeNames = [];
     const batchNames = Array.from(expandedBatchCallNames).filter((name) =>
-        (displayGraph.nodes || []).some((node) => node.name === name && (node.type?.name === BATCH_CALL_OP || node.type?.name === 'UserDefCall'))
+        (displayGraph.nodes || []).some((node) => node.name === name && node.type?.name === BATCH_CALL_OP)
     );
-    const subgraphsToRemove = new Set();
     for (const batchName of batchNames) {
-        const node = (displayGraph.nodes || []).find((n) => n.name === batchName);
-        if (node && node.type?.name === 'UserDefCall') {
-            const graphIdAttr = getNodeAttribute(node, 'graph_id');
-            const graphId = normalizeGraphId(graphIdAttr ? graphIdAttr.value : null);
-            if (graphId) {
-                subgraphsToRemove.add(graphId);
-            }
-        }
         const result = expandSingleBatchCall(displayGraph, batchName);
         if (result) {
             displayGraph = result.graph;
             inlinedNodeNames.push(...result.inlinedNodeNames);
         }
-    }
-    if (subgraphsToRemove.size > 0) {
-        displayGraph.nodes = (displayGraph.nodes || []).filter(
-            (node) => !(node.type?.name === 'UserDefSubgraph' && subgraphsToRemove.has(node.name))
-        );
     }
     attachDisplayNodeSourceRefs(displayGraph, graph, graphIndex, model);
     displayGraph._inlineExpandedNodeNames = inlinedNodeNames;

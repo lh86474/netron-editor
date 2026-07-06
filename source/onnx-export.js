@@ -20,6 +20,7 @@ import {
     COMPILED_PRIM_GRAPH_ATTRIBUTE,
     CVFLOW_NVP_OP_TYPE,
     PRIM_GRAPH_IMMS_ATTRIBUTE,
+    resolveCheckpointRuntimeGraph,
     resolveCheckpointRuntimeGraph
 } from './ambapb-editor.js';
 import { canonicalizeTensorTypeString, formatConnectionType, tensorDataTypeByName } from './tensor-type.js';
@@ -1371,6 +1372,8 @@ const rebuildCheckpointWrapperAttributes = (wrapperNode, modifiedGraph, sourceGr
     }
     const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
     const keptIds = resolveKeptPrimitiveIds(runtimeGraph, primGraph);
+    const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
+    const keptIds = resolveKeptPrimitiveIds(runtimeGraph, primGraph);
     const slicedPrimGraph = keptIds.size > 0 ? slicePrimGraph(primGraph, keptIds) : primGraph;
     const slicedPrimitives = slicedPrimGraph.primitives || [];
     const immWeightNames = collectImmediateTensorNames(slicedPrimitives);
@@ -1391,6 +1394,7 @@ const rebuildCheckpointWrapperAttributes = (wrapperNode, modifiedGraph, sourceGr
     const originalCompiledAttr = (wrapperNode.attribute || []).find((attr) => attr && attr.name === COMPILED_PRIM_GRAPH_ATTRIBUTE) || null;
     const originalCompiledGraph = originalCompiledAttr && originalCompiledAttr.g ? originalCompiledAttr.g : null;
     const compiledBody = buildGraphProtoFromModifiedGraph(
+        runtimeGraph,
         runtimeGraph,
         originalCompiledGraph || sourceGraph,
         originalByName
@@ -1429,13 +1433,17 @@ const rebuildCheckpointWrapperAttributes = (wrapperNode, modifiedGraph, sourceGr
 
 const rebuildFlatGraphProtoFromModified = (modifiedGraph, sourceGraph, wrapperNode) => {
     const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
+    const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
     const originalByName = collectOriginalNodesByName(sourceGraph, wrapperNode);
+    const usedNames = collectArgumentValueNamesFromGraph(runtimeGraph);
+    const body = buildRuntimeGraphBody(runtimeGraph, sourceGraph, originalByName);
     const usedNames = collectArgumentValueNamesFromGraph(runtimeGraph);
     const body = buildRuntimeGraphBody(runtimeGraph, sourceGraph, originalByName);
 
     const immsTensors = wrapperNode ? loadCheckpointImmsTensors(wrapperNode) : [];
     let primGraph = wrapperNode ? loadCheckpointPrimGraph(wrapperNode, null) : null;
     if (primGraph && Array.isArray(primGraph.primitives)) {
+        const keptIds = resolveKeptPrimitiveIds(runtimeGraph, primGraph);
         const keptIds = resolveKeptPrimitiveIds(runtimeGraph, primGraph);
         for (const prim of primGraph.primitives) {
             if (!prim || !keptIds.has(prim.id)) {
@@ -1453,7 +1461,9 @@ const rebuildFlatGraphProtoFromModified = (modifiedGraph, sourceGraph, wrapperNo
 
 const rebuildCheckpointGraphProtoFromModified = (modifiedGraph, sourceProto, wrapperNode, ambapbPrimGraph, modifiedShellNode = null) => {
     const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
+    const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
     const sourceGraph = sourceProto.graph;
+    const wrapperUpdate = rebuildCheckpointWrapperAttributes(wrapperNode, runtimeGraph, sourceGraph, ambapbPrimGraph);
     const wrapperUpdate = rebuildCheckpointWrapperAttributes(wrapperNode, runtimeGraph, sourceGraph, ambapbPrimGraph);
     if (!wrapperUpdate) {
         return {
@@ -1538,6 +1548,13 @@ const applyCheckpointGraphFromModified = (graph, originalProto, editSession, amb
     return rebuilt.slicedPrimGraph;
 };
 
+const applyCheckpointGraphFromModified = (graph, originalProto, editSession, ambapbPrimGraph) => {
+    const modifiedGraph = resolveCheckpointRuntimeGraph(editSession.modified.getGraph(0));
+    const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(modifiedGraph, originalProto, ambapbPrimGraph);
+    Object.assign(graph, rebuilt.graph);
+    return rebuilt.slicedPrimGraph;
+};
+
 // This supports node insertions and deletions by rebuilding graph.node from the modified graph.
 const applyStructuralNodeChanges = (graph, originalProto, editSession) => {
     const changes = editSession.delta.getChanges();
@@ -1568,6 +1585,7 @@ const applyStructuralNodeChanges = (graph, originalProto, editSession) => {
             rebuiltNodes.push(existing);
         } else {
             rebuiltNodes.push(buildNodeProtoFromModified(modifiedNode, originalNodesByName, null));
+            rebuiltNodes.push(buildNodeProtoFromModified(modifiedNode, originalNodesByName, null));
         }
     }
     graph.node = rebuiltNodes;
@@ -1585,8 +1603,10 @@ const applyStructuralNodeChanges = (graph, originalProto, editSession) => {
 // This applies the changes to the graph
 // delta is our tracker that contains what we have changed. 
 const applyChanges = (cloned, originalProto, editSession, options = {}) => {
+const applyChanges = (cloned, originalProto, editSession, options = {}) => {
     const graph = cloned.graph;
     const changes = editSession.delta.getChanges();
+    const checkpointWrapper = findCVFlowNVPNode(originalProto.graph);
     const checkpointWrapper = findCVFlowNVPNode(originalProto.graph);
 
     for (const change of changes) {
@@ -1664,7 +1684,11 @@ const applyChanges = (cloned, originalProto, editSession, options = {}) => {
     if (useCheckpointPath) {
         applyCheckpointGraphFromModified(graph, originalProto, editSession, options.ambapbPrimGraph || null);
     } else {
+        if (checkpointWrapper) {
+        applyCheckpointGraphFromModified(graph, originalProto, editSession, options.ambapbPrimGraph || null);
+    } else {
         applyStructuralNodeChanges(graph, originalProto, editSession);
+    }
     }
 };
 
@@ -1715,6 +1739,9 @@ export const exportModifiedOnnx = (model, editSession) => {
         });
     }
     normalizeGraphReferences(cloned.graph);
+    applyChanges(cloned, proto, editSession, {
+        ambapbPrimGraph: model._ambapb && model._ambapb.primGraph ? model._ambapb.primGraph : null
+    });
     validateModel(cloned);
     return onnx.ModelProto.encodeBytes(cloned);
 };
