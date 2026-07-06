@@ -4374,18 +4374,7 @@ view.Graph = class extends grapher.Graph {
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
 .edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
 .node-border-outer { fill: none; stroke: none; pointer-events: none; }
-.userdef-selected > .node.node-border { stroke: rgba(255, 140, 0, 0.95); stroke-width: 2px; }
-.edited:not(.range-begin):not(.range-end) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
-.range-begin:not(.edited) > .node.node-border { stroke: rgba(0, 140, 0, 0.95); stroke-width: 2px; }
-.range-end:not(.edited) > .node.node-border { stroke: rgba(0, 80, 200, 0.95); stroke-width: 2px; }
-.range-begin.range-end:not(.edited) > .node.node-border { stroke: rgba(120, 0, 160, 0.95); stroke-width: 2px; }
-.edited.range-begin:not(.range-end) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
-.edited.range-begin:not(.range-end) > .node.node-border-outer { stroke: rgba(0, 140, 0, 0.95); stroke-width: 6px; }
-.edited.range-end:not(.range-begin) > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
-.edited.range-end:not(.range-begin) > .node.node-border-outer { stroke: rgba(0, 80, 200, 0.95); stroke-width: 6px; }
-.edited.range-begin.range-end > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
-.edited.range-begin.range-end > .node.node-border-outer { stroke: rgba(120, 0, 160, 0.95); stroke-width: 6px; }
-.inline-expanded > .node.node-border { stroke: rgba(220, 0, 0, 0.95); stroke-width: 2px; }
+.select > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .edge-path-tunnel { stroke-dasharray: 5, 3; marker-end: url(#${prefix}arrowhead-tunnel); opacity: 0.5; }
 #${prefix}arrowhead { fill: #000; }
 #${prefix}arrowhead-hover { fill: rgba(220, 0, 0, 0.9); }
@@ -4507,6 +4496,9 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyDeltaStyle === 'function') {
                 obj.applyDeltaStyle();
+                if (typeof obj.applyBorderStackStyle === 'function') {
+                    obj.applyBorderStackStyle();
+                }
             }
         }
     }
@@ -4516,6 +4508,9 @@ view.Graph = class extends grapher.Graph {
             if (obj && typeof obj.applyRangeMarkerStyle === 'function') {
                 obj.applyRangeMarkerStyle();
             }
+            if (typeof obj.applyBorderStackStyle === 'function') {
+                obj.applyBorderStackStyle();
+            }
         }
     }
 
@@ -4523,6 +4518,9 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyUserDefSelectionStyle === 'function') {
                 obj.applyUserDefSelectionStyle();
+            }
+            if (typeof obj.applyBorderStackStyle === 'function') {
+                obj.applyBorderStackStyle();
             }
         }
     }
@@ -4532,6 +4530,9 @@ view.Graph = class extends grapher.Graph {
             if (obj && typeof obj.applyInlineExpandedStyle === 'function') {
                 obj.applyInlineExpandedStyle();
             }
+            if (typeof obj.applyBorderStackStyle === 'function') {
+                obj.applyBorderStackStyle();
+            }
         }
     }
 
@@ -4539,6 +4540,9 @@ view.Graph = class extends grapher.Graph {
         for (const obj of this._table.values()) {
             if (obj && typeof obj.applyDanglingStyle === 'function') {
                 obj.applyDanglingStyle();
+            }
+            if (typeof obj.applyBorderStackStyle === 'function') {
+                obj.applyBorderStackStyle();
             }
         }
     }
@@ -5464,6 +5468,17 @@ view.Graph = class extends grapher.Graph {
     }
 };
 
+// color helper for border color
+const _nodeBorderColors = (dark) => ({
+    edited: dark ? 'rgba(192, 0, 0, 0.8)' : 'rgba(220, 0, 0, 0.9)',
+    rangeBoth: dark ? 'rgba(180, 120, 255, 0.9)' : 'rgba(120, 0, 160, 0.95)',
+    rangeBegin: dark ? 'rgba(80, 200, 80, 0.9)' : 'rgba(0, 140, 0, 0.95)',
+    rangeEnd: dark ? 'rgba(100, 160, 255, 0.9)' : 'rgba(0, 80, 200, 0.95)',
+    inlineExpanded: 'rgba(220, 0, 0, 0.95)',
+    dangling: dark ? 'rgba(255, 190, 60, 0.9)' : 'rgba(230, 160, 0, 0.95)',
+    userdef: 'rgba(255, 140, 0, 0.95)',
+});
+
 view.Node = class extends grapher.Node {
 
     constructor(context, value, type, blockKey, entityId) {
@@ -5585,14 +5600,89 @@ view.Node = class extends grapher.Node {
         this.element.classList.toggle('dangling', Boolean(dangling));
     }
 
-    update() {
-        super.update();
-        this.applyDeltaStyle();
-        this.applyRangeMarkerStyle();
-        this.applyInlineExpandedStyle();
-        this.applyDanglingStyle();
-        this.applyUserDefSelectionStyle();
-    }
+    applyBorderStackStyle() {
+        if (!this.element || !this.border || !this.borderOuter) {
+            return;
+        }
+        const dark = typeof window !== 'undefined' &&
+            window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const colors = _nodeBorderColors(dark);
+        const el = this.element;
+
+        const layers = [];
+        if (el.classList.contains('edited')) {
+            layers.push({ stroke: colors.edited, width: 2 });
+        }
+        if (el.classList.contains('range-begin') || el.classList.contains('range-end')) {
+            let stroke = colors.rangeBegin;
+            if (el.classList.contains('range-begin') && el.classList.contains('range-end')) {
+                stroke = colors.rangeBoth;
+            } else if (el.classList.contains('range-end')) {
+                stroke = colors.rangeEnd;
+            }
+            layers.push({ stroke, width: 2 });
+        }
+        if (el.classList.contains('inline-expanded')) {
+            layers.push({ stroke: colors.inlineExpanded, width: 2 });
+        }
+        if (el.classList.contains('dangling')) {
+            layers.push({ stroke: colors.dangling, width: 2, dasharray: '6 4' });
+        }
+        if (el.classList.contains('userdef-selected')) {
+            layers.push({ stroke: colors.userdef, width: 2 });
+        }
+
+        const clear = (path) => {
+            path.style.removeProperty('stroke');
+            path.style.removeProperty('stroke-width');
+            path.style.removeProperty('stroke-dasharray');
+        };
+        const apply = (path, layer, width) => {
+            path.style.stroke = layer.stroke;
+            path.style.strokeWidth = `${width}px`;
+            if (layer.dasharray) {
+                path.style.strokeDasharray = layer.dasharray;
+            } else {
+                path.style.removeProperty('stroke-dasharray');
+            }
+        };
+
+        if (layers.length === 0) {
+            clear(this.border);
+            clear(this.borderOuter);
+            return;
+        }
+        if (layers.length === 1) {
+            apply(this.border, layers[0], layers[0].width);
+            clear(this.borderOuter);
+            return;
+        }
+
+        // 2+ active: first in apply order → inner, last → outer
+        apply(this.border, layers[0], layers[0].width);
+        apply(this.borderOuter, layers[layers.length - 1], 6);
+        }
+
+        select() {
+            const result = super.select();
+            this.applyBorderStackStyle();
+            return result;
+        }
+
+        deselect() {
+            super.deselect();
+            this.applyBorderStackStyle();
+        }
+
+        update() {
+            super.update();
+            this.applyDeltaStyle();
+            this.applyRangeMarkerStyle();
+            this.applyInlineExpandedStyle();
+            this.applyDanglingStyle();
+            this.applyUserDefSelectionStyle();
+            this.applyBorderStackStyle();
+        } 
 
     _add(value, type) {
         const node = (type === 'graph' || type === 'function') ? { type: value } : value;
