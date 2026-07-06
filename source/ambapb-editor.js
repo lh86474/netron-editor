@@ -15,7 +15,8 @@ export const PRIM_GRAPH_IMMS_ATTRIBUTE = 'prim_graph_imms';
 
 export const READ_ONLY_SHELL_ATTRIBUTES = new Set([
     COMPILED_PRIM_GRAPH_ATTRIBUTE,
-    PRIM_GRAPH_IMMS_ATTRIBUTE
+    PRIM_GRAPH_IMMS_ATTRIBUTE,
+    'vas_vdg'
 ]);
 // Will be a living list. We only have information from the files that were given to us
 export const EDITABLE_SHELL_OP_TYPES = new Set([

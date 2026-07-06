@@ -7582,23 +7582,27 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
             for (let index = 0; index < attributes.length; index++) {
                 const attribute = attributes[index];
                 // WE check for attribute type
-                if (nodeId && attribute.type !== 'graph' && attribute.type !== 'function') {
-                    const attributeId = `${nodeId}/attr:${index}`;
-                    this.addEditableAttribute(attribute, attributeId, (patch) => {
-                        this._view.applyEditorPatch(patch);
-                    }, {
-                        onDelete: () => {
-                            this._view.applyEditorPatch({
-                                entityId: attributeId,
-                                entityType: 'attribute',
-                                changeType: 'delete',
-                                property: `attributes.${attribute.name}`
-                            });
-                        }
-                    });
-                } else {
+                 if (!nodeId ||
+                    attribute.type === 'graph' ||
+                    attribute.type === 'function' ||
+                    READ_ONLY_SHELL_ATTRIBUTES.has(attribute.name) ||
+                    !(attribute.type === 'string' || attribute.type === 'float32' || attribute.type === 'int64')) {
                     this.addArgument(attribute.name, attribute, 'attribute');
+                    continue;
                 }
+                const attributeId = `${nodeId}/attr:${index}`;
+                this.addEditableAttribute(attribute, attributeId, (patch) => {
+                    this._view.applyEditorPatch(patch);
+                }, {
+                    onDelete: () => {
+                        this._view.applyEditorPatch({
+                            entityId: attributeId,
+                            entityType: 'attribute',
+                            changeType: 'delete',
+                            property: `attributes.${attribute.name}`
+                        });
+                    }
+                }); 
             }
         }
         if (nodeId) {
