@@ -11,6 +11,7 @@ import {
     buildNestedCompiledNodeEntityId,
     canExpandBatchCall,
     inlineExpansionBatchCallName,
+    materializeUserDefCallExpansion,
     parseMappingAttribute,
     resolveBatchCallTarget,
     sourceEntityIdForNode,
@@ -312,7 +313,7 @@ describe('ambapb batch inline expansion', () => {
         assert.equal(inner.description, sourceInner.description);
     });
 
-    it('supports inline-expanding UserDefCall nodes referencing UserDefSubgraph', () => {
+    it('materializes UserDefCall expansion into the source graph', () => {
         const subgraphName = 'userdefsubgraph_0';
         const graph = {
             name: 'runtime',
@@ -371,17 +372,136 @@ describe('ambapb batch inline expansion', () => {
         assert.equal(target.subGraph.name, subgraphName);
         assert.equal(canExpandBatchCall(graph, userDefCall), true);
 
-        const expanded = applyBatchInlineExpansions(graph, new Set(['user_def_call']));
-        const nodeNames = expanded.nodes.map((node) => node.name);
+        const result = materializeUserDefCallExpansion(graph, 'user_def_call');
+        assert.ok(result);
+        const nodeNames = result.graph.nodes.map((node) => node.name);
         assert.ok(!nodeNames.includes('user_def_call'));
-        assert.ok(nodeNames.includes('inline::user_def_call::inner_nvp'));
-        // Verify that the UserDefSubgraph node itself is filtered out
         assert.ok(!nodeNames.includes(subgraphName));
-        
-        const inner = expanded.nodes.find((node) => node.name === 'inline::user_def_call::inner_nvp');
+        assert.ok(nodeNames.includes('inner_nvp'));
+
+        const inner = result.graph.nodes.find((node) => node.name === 'inner_nvp');
         assert.ok(inner);
         assert.equal(inner.inputs[0].value[0].name, 'producer_out');
-        assert.equal(inner._inlineExpandedFromUserDef, true);
+        assert.equal(inner._inlineExpanded, undefined);
+    });
+
+    it('materializes UserDefCall with embedded BatchCall without duplicating FragSubgraph', () => {
+        const subgraphName = 'userdefsubgraph_0';
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{
+                        name: 'compiled_prim_graph',
+                        type: 'graph',
+                        value: {
+                            name: 'subgraph_body',
+                            inputs: [{ name: 'sub_input_0', value: [tensor('sub_input_0')] }],
+                            outputs: [{ name: 'sub_output_0', value: [tensor('sub_output_0')] }],
+                            nodes: [{
+                                name: 'inner_nvp',
+                                type: { name: 'CVFlowNVP' },
+                                attributes: [],
+                                inputs: [{ name: 'input0', value: [tensor('sub_input_0')] }],
+                                outputs: [{ name: 'output', value: [tensor('sub_output_0')] }]
+                            }]
+                        }
+                    }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: subgraphName,
+                    type: { name: 'UserDefSubgraph' },
+                    attributes: [{
+                        name: 'graph',
+                        type: 'graph',
+                        value: {
+                            name: subgraphName,
+                            inputs: [{ name: 'sub_input_0', value: [tensor('sub_input_0')] }],
+                            outputs: [{ name: 'sub_output_0', value: [tensor('sub_output_0')] }],
+                            nodes: [
+                                {
+                                    name: 'frag',
+                                    type: { name: 'FragSubgraph' },
+                                    attributes: [{
+                                        name: 'compiled_prim_graph',
+                                        type: 'graph',
+                                        value: {
+                                            name: 'subgraph_body',
+                                            inputs: [{ name: 'sub_input_0', value: [tensor('sub_input_0')] }],
+                                            outputs: [{ name: 'sub_output_0', value: [tensor('sub_output_0')] }],
+                                            nodes: [{
+                                                name: 'inner_nvp',
+                                                type: { name: 'CVFlowNVP' },
+                                                attributes: [],
+                                                inputs: [{ name: 'input0', value: [tensor('sub_input_0')] }],
+                                                outputs: [{ name: 'output', value: [tensor('sub_output_0')] }]
+                                            }]
+                                        }
+                                    }],
+                                    inputs: [],
+                                    outputs: []
+                                },
+                                {
+                                    name: 'batch_call',
+                                    type: { name: 'BatchCall' },
+                                    attributes: [
+                                        { name: 'graph_id', type: 'string', value: 'subgraph_body' },
+                                        {
+                                            name: 'src_mappings',
+                                            type: 'string',
+                                            value: JSON.stringify([{ id: 'sub_input_0' }])
+                                        },
+                                        {
+                                            name: 'out_mappings',
+                                            type: 'string',
+                                            value: JSON.stringify([{ id: 'sub_output_0' }])
+                                        }
+                                    ],
+                                    inputs: [{ name: 'input0', value: [tensor('producer_out')] }],
+                                    outputs: [{ name: 'output', value: [tensor('batch_out')] }]
+                                }
+                            ]
+                        }
+                    }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'user_def_call',
+                    type: { name: 'UserDefCall' },
+                    attributes: [
+                        { name: 'graph_id', type: 'string', value: subgraphName },
+                        {
+                            name: 'src_mappings',
+                            type: 'string',
+                            value: JSON.stringify([{ id: 'sub_input_0' }])
+                        },
+                        {
+                            name: 'out_mappings',
+                            type: 'string',
+                            value: JSON.stringify([{ id: 'sub_output_0' }])
+                        }
+                    ],
+                    inputs: [{ name: 'input0', value: [tensor('producer_out')] }],
+                    outputs: [{ name: 'output', value: [tensor('batch_out')] }]
+                }
+            ]
+        };
+
+        const result = materializeUserDefCallExpansion(graph, 'user_def_call');
+        assert.ok(result);
+        const fragNodes = result.graph.nodes.filter((node) => node.type?.name === 'FragSubgraph');
+        assert.equal(fragNodes.length, 1);
+        assert.equal(fragNodes[0].name, 'frag');
+        assert.ok(result.graph.nodes.some((node) => node.name === 'batch_call'));
+        assert.ok(!result.graph.nodes.some((node) => node.type?.name === 'UserDefSubgraph'));
+        assert.ok(!result.graph.nodes.some((node) => node.type?.name === 'UserDefCall'));
     });
 });
 

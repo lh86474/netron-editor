@@ -29,6 +29,7 @@ import {
     canExpandBatchCall,
     inlineExpansionBatchCallName,
     isBatchCallNode,
+    materializeUserDefCallExpansion,
     sourceEntityIdForNode,
     sourceNodeForEntity,
     resolveBatchCallTarget,
@@ -1554,6 +1555,50 @@ view.View = class {
             return;
         }
         this._checkpointEditHistory();
+        const graphIndex = this._resolveGraphIndex(this.activeTarget);
+        const graph = this._editSession ? this._editSession.modified.getGraph(graphIndex) : null;
+        const sourceNode = graph ? (graph.nodes || []).find((node) => node.name === batchCallName) : null;
+
+        if (sourceNode && sourceNode.type?.name === 'UserDefCall') {
+            if (this._batchInlineExpanded.has(batchCallName)) {
+                this._batchInlineExpanded.delete(batchCallName);
+                this._persistBatchInlineState();
+                this._syncBatchInlineToSession();
+                this._updateUndoRedoButtons();
+                await this.refresh();
+                this._refreshInlineExpandedStyles();
+                return;
+            }
+            const modifiedGraph = cloneGraph(graph);
+            const result = materializeUserDefCallExpansion(modifiedGraph, batchCallName);
+            if (!result) {
+                return;
+            }
+            this._batchInlineExpanded.delete(batchCallName);
+            this._persistBatchInlineState();
+            this._syncBatchInlineToSession();
+            if (modifiedGraph._ambapbCompiledGraph) {
+                result.graph._ambapbCompiledGraph = true;
+            }
+            this._editSession.replaceGraph(graphIndex, result.graph);
+            if (this._model && this._model.proto) {
+                const ambapbPrimGraph = this._model._ambapb ? this._model._ambapb.primGraph : null;
+                const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
+                    this._editSession.modified.getGraph(graphIndex),
+                    this._model.proto,
+                    ambapbPrimGraph
+                );
+                this._model.proto.graph = rebuilt.graph;
+                if (rebuilt.slicedPrimGraph && this._model._ambapb) {
+                    this._model._ambapb.primGraph = rebuilt.slicedPrimGraph;
+                }
+            }
+            this._bindEditorSession();
+            this._updateUndoRedoButtons();
+            await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
+            return;
+        }
+
         if (this._batchInlineExpanded.has(batchCallName)) {
             this._batchInlineExpanded.delete(batchCallName);
         } else {
