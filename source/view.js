@@ -1340,8 +1340,8 @@ view.View = class {
         }
         if (this._editSession && this._rightPane) {
             this._rightPane.deltaTracker = this._editSession.delta;
-            this._deltaUnsubscribe = this._editSession.delta.subscribe((changes) => {
-                this._handleEditorDelta(changes);
+            this._deltaUnsubscribe = this._editSession.delta.subscribe(() => {
+                this._updateUndoRedoButtons();
             });
         }
         this._updateUndoRedoButtons();
@@ -1355,12 +1355,13 @@ view.View = class {
         if (this._editSession && isAmbapbCheckpoint(this._model)) {
             if (this._canEditModelContent()) {
                 const entity = this._resolveNodeEntity(node);
+                const isRootShell = entity && !entity.nested && isAmbapbShellNode(node);
                 const isCompiled = this._isViewingCompiledAmbapbGraph() ||
                     sourceEntityIdForNode(node) !== null ||
                     Boolean(node._inlineExpanded) ||
                     (entity && entity.nested &&
                         (entity.graphAttrName === 'compiled_prim_graph' || entity.graphAttrName === 'graph'));
-                if (isAmbapbShellNode(node)) {
+                if (isRootShell) {
                     return new view.AmbaShellNodeSidebar(this, node, this._editSession);
                 }
                 if (isAmbapbRuntimeShellNode(node) || isCompiled) {
@@ -1379,23 +1380,117 @@ view.View = class {
         if (!this._editSession || !node) {
             return null;
         }
+        const model = this._editSession.modified.model;
         const modelNode = sourceNodeForEntity(node);
         if (modelNode) {
-            return locateNodeEntity(this._editSession.modified.model, modelNode);
+            const entity = locateNodeEntity(model, modelNode);
+            if (entity) {
+                return entity;
+            }
+        }
+        const entityId = sourceEntityIdForNode(node);
+        if (entityId) {
+            const resolved = getNodeByEntityId(model, this._modelNodeIdFromEntityId(entityId));
+            if (resolved) {
+                const entity = locateNodeEntity(model, resolved);
+                if (entity) {
+                    return entity;
+                }
+            }
         }
         if (node._inlineExpanded === true) {
             return null;
         }
-        return locateNodeEntity(this._editSession.modified.model, node);
+        return locateNodeEntity(model, node);
+    }
+    _resolveModifiedSourceGraph() {
+        if (!this._editSession) {
+            return null;
+        }
+        const path = this._path;
+        const target = path.length > 0 ? path[0].target : this.activeTarget;
+        const resolved = target ?
+            this._resolveModifiedTarget(target) :
+            this._resolveCheckpointModifiedGraph(this._editSession.modified.getGraph(0));
+        return this._resolveDisplayGraph(resolved);
+    }
+
+    _normalizeEditorChange(change) {
+        if (Array.isArray(change)) {
+            return change.length > 0 ? change[change.length - 1] : null;
+        }
+        return change || null;
+    }
+
+    _entityIdFromChange(change) {
+        if (!change || !change.entityId) {
+            return null;
+        }
+        const entityId = change.entityType === 'attribute' ?
+            change.entityId.replace(/\/attr:\d+$/, '') :
+            change.entityId;
+        return this._modelNodeIdFromEntityId(entityId);
+    }
+
+    _modelNodeIdFromEntityId(entityId) {
+        if (!entityId) {
+            return null;
+        }
+        return entityId.replace(/\/attr:\d+$/, '');
+    }
+
+    _findModelNodeForSidebar(staleNode) {
+        if (!staleNode || !this._editSession) {
+            return staleNode;
+        }
+        const model = this._editSession.modified.model;
+
+        const fromSource = sourceNodeForEntity(staleNode);
+        if (fromSource) {
+            return fromSource;
+        }
+
+        const entityId = staleNode._sourceEntityId;
+        if (entityId) {
+            const fromEntity = getNodeByEntityId(model, this._modelNodeIdFromEntityId(entityId));
+            if (fromEntity) {
+                return fromEntity;
+            }
+        }
+
+        const located = locateNodeEntity(model, staleNode);
+        if (located?.nodeId) {
+            const fromLocated = getNodeByEntityId(model, located.nodeId);
+            if (fromLocated) {
+                return fromLocated;
+            }
+        }
+
+        return staleNode;
+    }
+
+    _findModelNodeFromChange(change) {
+        if (!change || !this._editSession) {
+            return null;
+        }
+        const entityId = this._entityIdFromChange(change);
+        if (!entityId) {
+            return null;
+        }
+        if (change.entityType === 'node' ||
+            change.entityType === 'attribute' ||
+            (change.entityType === 'value' && change.parentId)) {
+            return getNodeByEntityId(this._editSession.modified.model, entityId);
+        }
+        return null;
     }
 
     _findDisplayNodeForSidebar(staleNode) {
         if (!staleNode || !this._editSession) {
             return staleNode;
         }
-        const graphIndex = this._resolveGraphIndex(this.activeTarget);
-        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
-        const displayGraph = this._resolveDisplayGraph(sourceGraph);
+        const modelNode = this._findModelNodeForSidebar(staleNode);
+        const displayGraph = this._resolveModifiedSourceGraph();
         const nodes = displayGraph.nodes || [];
         if (staleNode._sourceEntityId) {
             const byEntity = nodes.find((node) => node._sourceEntityId === staleNode._sourceEntityId);
@@ -1403,7 +1498,7 @@ view.View = class {
                 return byEntity;
             }
         }
-        if (staleNode.name) {
+        if (modelNode?.name) {
             const matches = nodes.filter((node) => node.name === staleNode.name);
             if (matches.length === 1) {
                 return matches[0];
@@ -1415,7 +1510,7 @@ view.View = class {
                 }
             }
         }
-        return staleNode;
+        return modelNode;
     }
 
     _findDisplayValueForSidebar(staleValue) {
@@ -1423,9 +1518,7 @@ view.View = class {
             return staleValue;
         }
         const modelValue = sourceValueForEntity(staleValue) || staleValue;
-        const graphIndex = this._resolveGraphIndex(this.activeTarget);
-        const sourceGraph = this._editSession.modified.getGraph(graphIndex);
-        const displayGraph = this._resolveDisplayGraph(sourceGraph);
+        const displayGraph = this._resolveModifiedSourceGraph();
         for (const node of displayGraph.nodes || []) {
             for (const argList of [node.inputs, node.outputs, node.attributes, node.blocks]) {
                 if (!Array.isArray(argList)) {
@@ -1470,7 +1563,7 @@ view.View = class {
         });
     }
 
-    _refreshOpenNodeSidebar() {
+    _refreshOpenNodeSidebar(lastChange) {
         if (!this._editSession || this._sidebar.identifier !== 'node') {
             return;
         }
@@ -1479,10 +1572,11 @@ view.View = class {
         if (!current || !current._node) {
             return;
         }
-        const node = this._findDisplayNodeForSidebar(current._node);
+        const node = this._findModelNodeFromChange(lastChange) ||
+            this._findModelNodeForSidebar(current._node);
         const sidebar = this._createNodeSidebar(node);
         this._bindNodeSidebarEvents(sidebar, node);
-        this._sidebar.open(sidebar, entry.title || 'Node Properties');
+        this._sidebar.open(sidebar, entry.title || 'Node Properties', 'sidebar');
     }
 
     _refreshOpenConnectionSidebar() {
@@ -1502,8 +1596,8 @@ view.View = class {
         this._sidebar.open(sidebar, entry.title || 'Connection Properties');
     }
 
-    _refreshOpenSidebars() {
-        this._refreshOpenNodeSidebar();
+    _refreshOpenSidebars(lastChange) {
+        this._refreshOpenNodeSidebar(lastChange);
         this._refreshOpenConnectionSidebar();
     }
 
@@ -1522,9 +1616,15 @@ view.View = class {
         if (!change) {
             return false;
         }
+        const nestedCompiled = Boolean(
+            change.entityId && change.entityId.includes('/compiled_prim_graph/')
+        );
         if (change.entityType === 'node' && change.property === 'description' &&
             this._batchInlineExpanded.size > 0) {
             return true;
+        }
+        if (change.entityType === 'node' && change.property === 'description' && nestedCompiled) {
+            return false;
         }
         if (change.entityType === 'node' && change.property === 'name') {
             return true;
@@ -1536,8 +1636,13 @@ view.View = class {
             return true;
         }
         if (change.entityType === 'attribute') {
-            return change.entityId && change.entityId.includes('/value:') &&
-                this._batchInlineExpanded.size > 0;
+            if (change.entityId && change.entityId.includes('/value:') &&
+                this._batchInlineExpanded.size > 0) {
+                return true;
+            }
+            if (nestedCompiled) {
+                return false;
+            }
         }
         if (change.entityType === 'value' && change.property === 'type') {
             return true;
@@ -1554,17 +1659,19 @@ view.View = class {
     }
 
     async _handleEditorDelta(change) {
-        // add guard here
-        if (this._applyingHistory) return;
+        if (this._applyingHistory) {
+            return;
+        }
         if (!this._editSession) {
             return;
         }
+        change = this._normalizeEditorChange(change);
         try {
             if (change && change.entityType === 'attribute' && this.options.attributes) {
                 const modelNode = this._resolveNodeFromChange(change);
                 if (modelNode && this._target) {
                     const rebuildResult = await this._target.refreshNodeArgumentList(modelNode);
-                    if (rebuildResult === null || rebuildResult === true) {
+                    if (rebuildResult === true) {
                         await this.refresh(null, { skipShow: true, skipAnimation: true });
                     }
                 }
@@ -1578,7 +1685,7 @@ view.View = class {
                     this._danglingNodeNames.clear();
                 }
             }
-            this._refreshOpenSidebars();
+            this._refreshOpenSidebars(change);
             this._ensureDefaultScreen();
             if (this._target && this._target.refreshDeltaStyles) {
                 this._target.refreshDeltaStyles();
@@ -5136,7 +5243,8 @@ view.Graph = class extends grapher.Graph {
     }
 
     async refreshNodeArgumentList(modelNode) {
-        const viewNode = this._table.get(modelNode);
+        const found = this.find(modelNode);
+        const viewNode = found instanceof grapher.Node ? found : null;
         if (!viewNode || typeof viewNode.rebuildArgumentList !== 'function') {
             return null;
         }

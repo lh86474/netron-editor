@@ -240,7 +240,7 @@ const readModel = (model) => {
 };
 
 const NESTED_COMPILED_NODE_ENTITY_RE =
-    /^graph:(\d+)(?:\/node:\d+\/[^/]+\/node:\d+)+(?:\/attr:\d+)?$/;
+    /^graph:(\d+)(?:(?:\/node:\d+\/)?[^/]+\/node:\d+)+(?:\/attr:\d+)?$/;
 
 const NESTED_COMPILED_VALUE_ENTITY_RE =
     /^graph:(\d+)(?:\/node:\d+\/[^/]+)*\/value:\d+(?:\/attr:\d+)?$/;
@@ -264,18 +264,25 @@ const parseNestedNodeEntityPath = (entityId) => {
     if (!rootMatch) {
         return null;
     }
-    const segments = [];
-    const segmentRe = /\/node:(\d+)\/([^/]+)\/node:(\d+)/g;
-    let match = null;
-    while ((match = segmentRe.exec(base)) !== null) {
-        segments.push({
-            hostNodeIndex: Number(match[1]),
-            graphAttrName: match[2],
-            nodeIndex: Number(match[3])
-        });
-    }
-    if (segments.length === 0) {
+    const firstMatch = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)/.exec(base);
+    if (!firstMatch) {
         return null;
+    }
+    const segments = [{
+        hostNodeIndex: Number(firstMatch[2]),
+        graphAttrName: firstMatch[3],
+        nodeIndex: Number(firstMatch[4])
+    }];
+    let rest = base.slice(firstMatch[0].length);
+    const chainRe = /^\/([^/]+)\/node:(\d+)/;
+    let chainMatch = null;
+    while ((chainMatch = chainRe.exec(rest)) !== null) {
+        segments.push({
+            hostNodeIndex: segments[segments.length - 1].nodeIndex,
+            graphAttrName: chainMatch[1],
+            nodeIndex: Number(chainMatch[2])
+        });
+        rest = rest.slice(chainMatch[0].length);
     }
     return {
         graphIndex: Number(rootMatch[1]),
@@ -1760,36 +1767,86 @@ export const deleteNode = (graph, nodeIndex) => {
     return result;
 };
 
+const snapshotGraphValues = (graph, graphIndex, pathPrefix, snapshot) => {
+    const tracked = new Set();
+    let valueIndex = 0;
+    const track = (value) => {
+        if (!value || tracked.has(value)) {
+            return;
+        }
+        tracked.add(value);
+        const valueId = pathPrefix ?
+            `${pathPrefix}/value:${valueIndex++}` :
+            `graph:${graphIndex}/value:${valueIndex++}`;
+        snapshot.set(`${valueId}:name`, value.name);
+        if (value.type !== undefined) {
+            snapshot.set(`${valueId}:type`, value.type);
+        }
+        if (value.description !== undefined) {
+            snapshot.set(`${valueId}:description`, value.description);
+        }
+        (value.attributes || []).forEach((attribute, attributeIndex) => {
+            const attributeId = `${valueId}/attr:${attributeIndex}`;
+            snapshot.set(attributeId, cloneAttributeValue(attribute.value));
+        });
+    };
+    for (const input of graph.inputs || []) {
+        trackArgumentValues(input, track);
+    }
+    for (const output of graph.outputs || []) {
+        trackArgumentValues(output, track);
+    }
+    for (const node of graph.nodes || []) {
+        for (const input of node.inputs || []) {
+            trackArgumentValues(input, track);
+        }
+        for (const output of node.outputs || []) {
+            trackArgumentValues(output, track);
+        }
+    }
+};
+
+const snapshotGraphNodes = (graph, graphIndex, pathPrefix, snapshot, model) => {
+    for (let nodeIndex = 0; nodeIndex < (graph.nodes || []).length; nodeIndex++) {
+        const node = graph.nodes[nodeIndex];
+        const nodeId = pathPrefix ? `${pathPrefix}/node:${nodeIndex}` : `graph:${graphIndex}/node:${nodeIndex}`;
+        snapshot.set(nodeId, node.name);
+        if (node.name !== undefined) {
+            snapshot.set(`${nodeId}:name`, node.name);
+        }
+        if (node.description !== undefined) {
+            snapshot.set(`${nodeId}:description`, node.description);
+        }
+        for (let attributeIndex = 0; attributeIndex < (node.attributes || []).length; attributeIndex++) {
+            const attribute = node.attributes[attributeIndex];
+            const attributeId = `${nodeId}/attr:${attributeIndex}`;
+            let snapshotValue = cloneAttributeValue(attribute.value);
+            if (model._ambapb && isAmbapbShellNode(node) && attribute.name === PRIM_GRAPH_ATTRIBUTE &&
+                !pathPrefix) {
+                snapshotValue = getPrimGraphSnapshotValue(model._ambapb);
+            }
+            snapshot.set(attributeId, snapshotValue);
+        }
+        for (const entry of nodeGraphArguments(node)) {
+            if (entry.type !== 'graph' || !entry.value || !Array.isArray(entry.value.nodes)) {
+                continue;
+            }
+            const nextPrefix = pathPrefix ?
+                `${pathPrefix}/node:${nodeIndex}/${entry.name}` :
+                `graph:${graphIndex}/node:${nodeIndex}/${entry.name}`;
+            snapshotGraphNodes(entry.value, graphIndex, nextPrefix, snapshot, model);
+            snapshotGraphValues(entry.value, graphIndex, nextPrefix, snapshot);
+        }
+    }
+};
+
 // This builds a picture of the old graph
 // essentially, this works by iterating through the graph and adding the nodes and attributes to the snapshot
 const buildOriginalSnapshot = (model) => {
     const snapshot = new Map();
     model.modules.forEach((graph, graphIndex) => {
-        graph.nodes.forEach((node, nodeIndex) => {
-            const nodeId = `graph:${graphIndex}/node:${nodeIndex}`;
-            snapshot.set(nodeId, node.name);
-            node.attributes.forEach((attribute, attributeIndex) => {
-                const attributeId = `${nodeId}/attr:${attributeIndex}`;
-                let snapshotValue = cloneAttributeValue(attribute.value);
-                if (model._ambapb && isAmbapbShellNode(node) && attribute.name === PRIM_GRAPH_ATTRIBUTE) {
-                    snapshotValue = getPrimGraphSnapshotValue(model._ambapb);
-                }
-                snapshot.set(attributeId, snapshotValue);
-            });
-        });
-        for (const [value, valueId] of enumerateGraphValues(graph, graphIndex)) {
-            snapshot.set(`${valueId}:name`, value.name);
-            if (value.type !== undefined) {
-                snapshot.set(`${valueId}:type`, value.type);
-            }
-            if (value.description !== undefined) {
-                snapshot.set(`${valueId}:description`, value.description);
-            }
-            (value.attributes || []).forEach((attribute, attributeIndex) => {
-                const attributeId = `${valueId}/attr:${attributeIndex}`;
-                snapshot.set(attributeId, cloneAttributeValue(attribute.value));
-            });
-        }
+        snapshotGraphNodes(graph, graphIndex, null, snapshot, model);
+        snapshotGraphValues(graph, graphIndex, null, snapshot);
     });
     return snapshot;
 };
@@ -2214,24 +2271,56 @@ export const locateValueEntity = function(model, value) {
 };
 
 export const locateGraphPath = (model, graph) => {
-    const modules = model.modules || [];
-    for (let graphIndex = 0; graphIndex < modules.length; graphIndex++) {
-        const m = modules[graphIndex];
-        if (m === graph) {
-            return { kind: 'module', index: graphIndex };
+    const walk = (currentGraph, graphIndex, pathPrefix) => {
+        if (currentGraph === graph) {
+            if (!pathPrefix) {
+                return { kind: 'module', index: graphIndex };
+            }
+            const segments = [];
+            const segmentRe = /\/node:(\d+)\/([^/]+)/g;
+            let match = null;
+            while ((match = segmentRe.exec(pathPrefix)) !== null) {
+                segments.push({
+                    nodeIndex: Number(match[1]),
+                    attrName: match[2]
+                });
+            }
+            return {
+                kind: 'nested',
+                graphIndex,
+                segments
+            };
         }
-        const nodes = m.nodes || [];
-        for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex++) {
-            for (const entry of nodeGraphArguments(nodes[nodeIndex])) {
+        for (let nodeIndex = 0; nodeIndex < (currentGraph.nodes || []).length; nodeIndex++) {
+            for (const entry of nodeGraphArguments(currentGraph.nodes[nodeIndex])) {
                 if (entry.type === 'graph' && entry.value === graph) {
-                    return {
-                        kind: 'nested',
-                        graphIndex,
-                        nodeIndex,
-                        attrName: entry.name
-                    };
+                    if (!pathPrefix) {
+                        return {
+                            kind: 'nested',
+                            graphIndex,
+                            nodeIndex,
+                            attrName: entry.name
+                        };
+                    }
+                }
+                if (entry.type === 'graph' && entry.value && Array.isArray(entry.value.nodes)) {
+                    const nextPrefix = pathPrefix ?
+                        `${pathPrefix}/node:${nodeIndex}/${entry.name}` :
+                        `graph:${graphIndex}/node:${nodeIndex}/${entry.name}`;
+                    const found = walk(entry.value, graphIndex, nextPrefix);
+                    if (found) {
+                        return found;
+                    }
                 }
             }
+        }
+        return null;
+    };
+    const modules = model.modules || [];
+    for (let graphIndex = 0; graphIndex < modules.length; graphIndex++) {
+        const found = walk(modules[graphIndex], graphIndex, null);
+        if (found) {
+            return found;
         }
     }
     return null;
@@ -2245,7 +2334,26 @@ export const getGraphByPath = (model, pathInfo) => {
         return model.modules[pathInfo.index] || null;
     }
     const graph = model.modules[pathInfo.graphIndex];
-    const hostNode = graph && graph.nodes ? graph.nodes[pathInfo.nodeIndex] : null;
+    if (!graph) {
+        return null;
+    }
+    if (Array.isArray(pathInfo.segments) && pathInfo.segments.length > 0) {
+        let currentGraph = graph;
+        for (const segment of pathInfo.segments) {
+            const hostNode = currentGraph.nodes ? currentGraph.nodes[segment.nodeIndex] : null;
+            if (!hostNode) {
+                return null;
+            }
+            const entry = [...(hostNode.attributes || []), ...(hostNode.blocks || [])]
+                .find((item) => item.name === segment.attrName && item.type === 'graph' && item.value);
+            if (!entry) {
+                return null;
+            }
+            currentGraph = entry.value;
+        }
+        return currentGraph;
+    }
+    const hostNode = graph.nodes ? graph.nodes[pathInfo.nodeIndex] : null;
     if (!hostNode) {
         return null;
     }

@@ -17,7 +17,7 @@ import {
     syncShellAttribute,
     validateAmbapbPatch
 } from '../source/ambapb-editor.js';
-import { ModelEditor } from '../source/model-editor.js';
+import { ModelEditor, getNodeByEntityId } from '../source/model-editor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -306,6 +306,61 @@ describe('ambapb shell editing', () => {
             newValue: updatedNvpJson
         });
         assert.equal(sessionCompiledGraph.nodes[1].attributes[0].value, updatedNvpJson);
+    });
+
+    it('records doubly nested compiled node edits as modify in delta', () => {
+        const model = buildShellCheckpointModel();
+        const compiledGraph = model._modules[0].nodes[0].attributes.find((entry) => entry.name === 'compiled_prim_graph').value;
+        compiledGraph._ambapbCompiledGraph = true;
+        compiledGraph.nodes.push({
+            name: 'inner_nvp',
+            type: { name: CVFLOW_NVP_OP_TYPE },
+            attributes: [{
+                name: 'compiled_prim_graph',
+                type: 'graph',
+                value: {
+                    name: 'inner_compiled',
+                    nodes: [{
+                        name: 'test',
+                        type: { name: 'Conv' },
+                        description: 'before',
+                        attributes: [{ name: 'strides', type: 'int64[]', value: [1, 1] }],
+                        inputs: [],
+                        outputs: []
+                    }],
+                    inputs: [],
+                    outputs: []
+                }
+            }],
+            inputs: [],
+            outputs: []
+        });
+
+        const session = ModelEditor.createSession(model);
+        const nodeEntityId = 'graph:0/node:0/compiled_prim_graph/node:0/compiled_prim_graph/node:0';
+        const attrEntityId = `${nodeEntityId}/attr:0`;
+
+        const descriptionChange = session.applyPatch({
+            entityId: nodeEntityId,
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'description',
+            newValue: 'after'
+        });
+        assert.equal(descriptionChange.changeType, 'modify');
+        assert.equal(descriptionChange.oldValue, 'before');
+        assert.equal(getNodeByEntityId(session.modified.model, nodeEntityId).description, 'after');
+
+        const attributeChange = session.applyPatch({
+            entityId: attrEntityId,
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: 'attributes.strides',
+            newValue: [2, 2]
+        });
+        assert.equal(attributeChange.changeType, 'modify');
+        assert.deepEqual(attributeChange.oldValue, [1, 1]);
+        assert.deepEqual(getNodeByEntityId(session.modified.model, nodeEntityId).attributes[0].value, [2, 2]);
     });
 
     it('deep-clones nested compiled connection values with getter-based fields and metadata', () => {
