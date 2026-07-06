@@ -92,6 +92,7 @@ view.View = class {
         // expanded batch call names are here
         this._batchInlineExpanded = new Set();
         this._userDefSelectedMarkers = new Map();
+        this._borderStackOrder = new Map();
         this._displayGraphCache = null;
         this._displayGraphRevision = 0;
         this._refreshPromise = null;
@@ -2059,11 +2060,13 @@ view.View = class {
                     }
                     if (isUserDefSelected) {
                         this._userDefSelectedMarkers.delete(marker.nodeId);
+                        this._removeBorderLayer(marker.nodeId, 'userdef-selected');
                         if (nodeView.context && nodeView.context.select) {
                             nodeView.context.select(null);
                         }
                     } else {
                         this._userDefSelectedMarkers.set(marker.nodeId, marker);
+                        this._pushBorderLayer(marker.nodeId, 'userdef-selected');
                     }
                     this._refreshUserDefSelectionStyles();
                 }
@@ -2289,6 +2292,48 @@ view.View = class {
         this._graphContextMenu.open();
     }
 
+    _pushBorderLayer(nodeId, kind) {
+        if (!nodeId || !kind) {
+            return;
+        }
+        const stack = (this._borderStackOrder.get(nodeId) || []).filter((entry) => entry !== kind);
+        stack.push(kind);
+        this._borderStackOrder.set(nodeId, stack);
+    }
+
+    _removeBorderLayer(nodeId, kind) {
+        if (!nodeId || !kind) {
+            return;
+        }
+        const stack = this._borderStackOrder.get(nodeId);
+        if (!stack) {
+            return;
+        }
+        const next = stack.filter((entry) => entry !== kind);
+        if (next.length > 0) {
+            this._borderStackOrder.set(nodeId, next);
+        } else {
+            this._borderStackOrder.delete(nodeId);
+        }
+    }
+
+    _clearBorderLayerKind(kind) {
+        if (!kind) {
+            return;
+        }
+        for (const [nodeId, stack] of this._borderStackOrder.entries()) {
+            const next = stack.filter((entry) => entry !== kind);
+            if (next.length === stack.length) {
+                continue;
+            }
+            if (next.length > 0) {
+                this._borderStackOrder.set(nodeId, next);
+            } else {
+                this._borderStackOrder.delete(nodeId);
+            }
+        }
+    }
+
     // mark begin node for graph extraction
     _markRangeBegin(nodeView) {
         const marker = this._createRangeMarker(nodeView);
@@ -2297,10 +2342,17 @@ view.View = class {
         }
         if (this._isRangeBeginForNode(nodeView)) {
             this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
+            if (marker.nodeId) {
+                this._removeBorderLayer(marker.nodeId, 'range-begin');
+            }
         } else {
             this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
             this._rangeBegins.push(marker);
             this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
+            if (marker.nodeId) {
+                this._removeBorderLayer(marker.nodeId, 'range-end');
+                this._pushBorderLayer(marker.nodeId, 'range-begin');
+            }
         }
         this._refreshRangeMarkerStyles();
     }
@@ -2313,10 +2365,17 @@ view.View = class {
         }
         if (this._isRangeEndForNode(nodeView)) {
             this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
+            if (marker.nodeId) {
+                this._removeBorderLayer(marker.nodeId, 'range-end');
+            }
         } else {
             this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
             this._rangeEnds.push(marker);
             this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
+            if (marker.nodeId) {
+                this._removeBorderLayer(marker.nodeId, 'range-begin');
+                this._pushBorderLayer(marker.nodeId, 'range-end');
+            }
         }
         this._refreshRangeMarkerStyles();
     }
@@ -2324,6 +2383,8 @@ view.View = class {
     _clearRangeMarkers() {
         this._rangeBegins = [];
         this._rangeEnds = [];
+        this._clearBorderLayerKind('range-begin');
+        this._clearBorderLayerKind('range-end');
         this._refreshRangeMarkerStyles();
     }
 
@@ -2413,6 +2474,8 @@ view.View = class {
             this._host.document.title = `${this._exportBasenameOverride}.onnx`;
             this._rangeBegins = [];
             this._rangeEnds = [];
+            this._clearBorderLayerKind('range-begin');
+            this._clearBorderLayerKind('range-end');
             this._batchInlineExpanded.clear();
             this._persistBatchInlineState();
             this._sidebar.close();
@@ -2769,6 +2832,7 @@ view.View = class {
             this._syncBatchInlineToSession();
 
             this._userDefSelectedMarkers.clear();
+            this._clearBorderLayerKind('userdef-selected');
             this._sidebar.close();
             this._bindEditorSession();
             await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
@@ -5082,7 +5146,8 @@ view.Graph = class extends grapher.Graph {
 .edge-path-control-dependency { stroke-dasharray: 2, 2; }
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
 .edge-path.edge-path-edited { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url(#${prefix}arrowhead-select); }
-.node-border-outer { fill: none; stroke: none; pointer-events: none; }
+.node path.node-border-layer,
+.node path.node-border-outer { fill: none; stroke: none; stroke-width: 0; pointer-events: none; }
 .select > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .edge-path-tunnel { stroke-dasharray: 5, 3; marker-end: url(#${prefix}arrowhead-tunnel); opacity: 0.5; }
 #${prefix}arrowhead { fill: #000; }
@@ -6227,6 +6292,46 @@ const _nodeBorderColors = (dark) => ({
     userdef: 'rgba(255, 140, 0, 0.95)',
 });
 
+const _nodeBorderLayerKinds = ['range-begin', 'range-end', 'userdef-selected', 'inline-expanded', 'dangling', 'edited'];
+
+const _nodeBorderLayerIsActive = (el, kind) => {
+    switch (kind) {
+        case 'edited':
+            return el.classList.contains('edited');
+        case 'range-begin':
+            return el.classList.contains('range-begin');
+        case 'range-end':
+            return el.classList.contains('range-end');
+        case 'userdef-selected':
+            return el.classList.contains('userdef-selected');
+        case 'inline-expanded':
+            return el.classList.contains('inline-expanded');
+        case 'dangling':
+            return el.classList.contains('dangling');
+        default:
+            return false;
+    }
+};
+
+const _nodeBorderLayerStyle = (kind, colors) => {
+    switch (kind) {
+        case 'edited':
+            return { stroke: colors.edited, width: 2 };
+        case 'range-begin':
+            return { stroke: colors.rangeBegin, width: 2 };
+        case 'range-end':
+            return { stroke: colors.rangeEnd, width: 2 };
+        case 'userdef-selected':
+            return { stroke: colors.userdef, width: 2 };
+        case 'inline-expanded':
+            return { stroke: colors.inlineExpanded, width: 2 };
+        case 'dangling':
+            return { stroke: colors.dangling, width: 2, dasharray: '6 4' };
+        default:
+            return null;
+    }
+};
+
 view.Node = class extends grapher.Node {
 
     constructor(context, value, type, blockKey, entityId) {
@@ -6303,7 +6408,17 @@ view.Node = class extends grapher.Node {
             return;
         }
         const state = this.context.deltaTracker.getAggregateState(this._entityId);
-        this.element.classList.toggle('edited', state === 'modified' || state === 'added' || state === 'deleted');
+        const wasEdited = this.element.classList.contains('edited');
+        const isEdited = state === 'modified' || state === 'added' || state === 'deleted';
+        this.element.classList.toggle('edited', isEdited);
+        const view = this.context.view;
+        if (view) {
+            if (!wasEdited && isEdited) {
+                view._pushBorderLayer(this._entityId, 'edited');
+            } else if (wasEdited && !isEdited) {
+                view._removeBorderLayer(this._entityId, 'edited');
+            }
+        }
     }
 
     // apply range marker style for graph extraction
@@ -6336,7 +6451,16 @@ view.Node = class extends grapher.Node {
             return;
         }
         const expanded = Boolean(this.value && this.value._inlineExpanded && !this.value._inlineExpandedFromUserDef);
+        const wasExpanded = this.element.classList.contains('inline-expanded');
         this.element.classList.toggle('inline-expanded', expanded);
+        const view = this.context.view;
+        if (view && this._entityId) {
+            if (!wasExpanded && expanded) {
+                view._pushBorderLayer(this._entityId, 'inline-expanded');
+            } else if (wasExpanded && !expanded) {
+                view._removeBorderLayer(this._entityId, 'inline-expanded');
+            }
+        }
     }
 
     applyDanglingStyle() {
@@ -6345,40 +6469,39 @@ view.Node = class extends grapher.Node {
         }
         const nodeName = this.value && this.value.name;
         const dangling = nodeName && this.context.view._danglingNodeNames.has(nodeName);
+        const wasDangling = this.element.classList.contains('dangling');
         this.element.classList.toggle('dangling', Boolean(dangling));
+        const view = this.context.view;
+        if (view && this._entityId) {
+            if (!wasDangling && dangling) {
+                view._pushBorderLayer(this._entityId, 'dangling');
+            } else if (wasDangling && !dangling) {
+                view._removeBorderLayer(this._entityId, 'dangling');
+            }
+        }
     }
 
     applyBorderStackStyle() {
-        if (!this.element || !this.border || !this.borderOuter) {
+        if (!this.element || !this.border) {
             return;
         }
         const dark = typeof window !== 'undefined' &&
             window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         const colors = _nodeBorderColors(dark);
         const el = this.element;
+        const view = this.context.view;
+        const nodeId = this._entityId;
 
-        const layers = [];
-        if (el.classList.contains('edited')) {
-            layers.push({ stroke: colors.edited, width: 2 });
-        }
-        if (el.classList.contains('range-begin') || el.classList.contains('range-end')) {
-            let stroke = colors.rangeBegin;
-            if (el.classList.contains('range-begin') && el.classList.contains('range-end')) {
-                stroke = colors.rangeBoth;
-            } else if (el.classList.contains('range-end')) {
-                stroke = colors.rangeEnd;
+        let stack = nodeId && view && view._borderStackOrder ?
+            (view._borderStackOrder.get(nodeId) || []).filter((kind) => _nodeBorderLayerIsActive(el, kind)) :
+            [];
+        for (const kind of _nodeBorderLayerKinds) {
+            if (_nodeBorderLayerIsActive(el, kind) && !stack.includes(kind)) {
+                stack.push(kind);
             }
-            layers.push({ stroke, width: 2 });
         }
-        if (el.classList.contains('inline-expanded')) {
-            layers.push({ stroke: colors.inlineExpanded, width: 2 });
-        }
-        if (el.classList.contains('dangling')) {
-            layers.push({ stroke: colors.dangling, width: 2, dasharray: '6 4' });
-        }
-        if (el.classList.contains('userdef-selected')) {
-            layers.push({ stroke: colors.userdef, width: 2 });
-        }
+
+        const layers = stack.map((kind) => _nodeBorderLayerStyle(kind, colors)).filter(Boolean);
 
         const clear = (path) => {
             path.style.removeProperty('stroke');
@@ -6395,42 +6518,51 @@ view.Node = class extends grapher.Node {
             }
         };
 
+        this._ensureBorderPathCount(Math.max(0, layers.length - 1));
+        const d = this.border.getAttribute('d');
+        if (d) {
+            for (const path of this._borderPaths) {
+                path.setAttribute('d', d);
+            }
+        }
+        const paths = [...this._borderPaths, this.border];
+
+        for (const path of paths) {
+            clear(path);
+        }
         if (layers.length === 0) {
-            clear(this.border);
-            clear(this.borderOuter);
-            return;
-        }
-        if (layers.length === 1) {
-            apply(this.border, layers[0], layers[0].width);
-            clear(this.borderOuter);
             return;
         }
 
-        // 2+ active: first in apply order → inner, last → outer
-        apply(this.border, layers[0], layers[0].width);
-        apply(this.borderOuter, layers[layers.length - 1], 6);
+        for (let pathIdx = 0; pathIdx < layers.length; pathIdx++) {
+            const layerIdx = layers.length - 1 - pathIdx;
+            const strokeWidth = layers.length === 1
+                ? layers[0].width
+                : 2 + ((layers.length - 1 - pathIdx) / (layers.length - 1)) * 4;
+            apply(paths[pathIdx], layers[layerIdx], strokeWidth);
         }
+    }
 
-        select() {
-            const result = super.select();
-            this.applyBorderStackStyle();
-            return result;
-        }
+    select() {
+        const result = super.select();
+        this.applyBorderStackStyle();
+        return result;
+    }
 
-        deselect() {
-            super.deselect();
-            this.applyBorderStackStyle();
-        }
+    deselect() {
+        super.deselect();
+        this.applyBorderStackStyle();
+    }
 
-        update() {
-            super.update();
-            this.applyDeltaStyle();
-            this.applyRangeMarkerStyle();
-            this.applyInlineExpandedStyle();
-            this.applyDanglingStyle();
-            this.applyUserDefSelectionStyle();
-            this.applyBorderStackStyle();
-        } 
+    update() {
+        super.update();
+        this.applyDeltaStyle();
+        this.applyRangeMarkerStyle();
+        this.applyInlineExpandedStyle();
+        this.applyDanglingStyle();
+        this.applyUserDefSelectionStyle();
+        this.applyBorderStackStyle();
+    }
 
     _add(value, type) {
         const node = (type === 'graph' || type === 'function') ? { type: value } : value;

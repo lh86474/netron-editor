@@ -70,7 +70,8 @@
 .edge-path { stroke: #000; stroke-width: 1px; fill: none; marker-end: url("#arrowhead"); }
 .edge-paths-hit-test { pointer-events: stroke; stroke-width: 0.5em; fill: none; stroke: #000; stroke-opacity: 0.001; }
 
-.node-border-outer { fill: none; stroke: none; pointer-events: none; }
+.node path.node-border-layer,
+.node path.node-border-outer { fill: none; stroke: none; stroke-width: 0; pointer-events: none; }
 
 .select > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }

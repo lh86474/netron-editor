@@ -404,8 +404,7 @@ grapher.Node = class {
         this.element.style.opacity = 0;
         parent.appendChild(this.element);
         // added border outer to support edited state and range state one the same node
-        this.borderOuter = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        this.borderOuter.setAttribute('class', 'node node-border-outer');
+        this._borderPaths = [];
         this.border = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         this.border.setAttribute('class', 'node node-border');
         for (let i = 0; i < this.blocks.length; i++) {
@@ -418,7 +417,6 @@ grapher.Node = class {
         // this is a context-menu hook
         // makes sure to override the browser's default right-click behavior
         // sometimes, might need to disable cache developer tools to see the new context menu as old grapher.js may cache in the browser
-        this.element.appendChild(this.borderOuter);
         this.element.appendChild(this.border);
         if (this.onContextMenu) {
             // the trigger of the contextmenu
@@ -463,8 +461,10 @@ grapher.Node = class {
             block.update();
         }
         const borderPath = grapher.Node.roundedRect(0, 0, this.width, this.height, true, true, true, true);
-        this.borderOuter.setAttribute('d', borderPath);
         this.border.setAttribute('d', borderPath);
+        for (const path of this._borderPaths) {
+            path.setAttribute('d', borderPath);
+        }
         this.element.setAttribute('transform', `translate(${this.x - (this.width / 2)},${this.y - (this.height / 2)})`);
         this.element.style.removeProperty('opacity');
     }
@@ -483,6 +483,24 @@ grapher.Node = class {
         }
     }
 
+    _ensureBorderPathCount(count) {
+        if (!this.element || !this.border) {
+            return;
+        }
+        const d = this.border.getAttribute('d');
+        while (this._borderPaths.length < count) {
+            const path = this.element.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'path');
+            path.setAttribute('class', 'node node-border-layer');
+            if (d) {
+                path.setAttribute('d', d);
+            }
+            this.element.insertBefore(path, this.border);
+            this._borderPaths.push(path);
+        }
+        while (this._borderPaths.length > count) {
+            this._borderPaths.pop().remove();
+        }
+    }
     static roundedRect(x, y, width, height, r1, r2, r3, r4) {
         const radius = 5;
         r1 = r1 ? radius : 0;
