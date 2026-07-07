@@ -17,6 +17,7 @@ import {
     READ_ONLY_SHELL_ATTRIBUTES,
     resolveCheckpointRuntimeGraph,
     resolveSelectedPrimitiveId,
+    syncPrimGraphFromJson,
     validateAmbapbPatch
 } from './ambapb-editor.js';
 import { AmbapbMetadataResolver } from './ambapb-metadata.js';
@@ -7932,13 +7933,16 @@ view.PrimGraphHybridEditor = class extends view.Control {
 
     _commitAttribute(primitiveId, attributeName, value) {
         if (!this._canEdit || !this._onCommit) {
-            return;
+            return false;
         }
         try {
             const jsonText = buildPrimGraphJsonAfterAttributeEdit(this._ambapb, primitiveId, attributeName, value);
+            syncPrimGraphFromJson(this._ambapb, jsonText);
             this._commitPrimGraphJson(jsonText);
+            return true;
         } catch (error) {
             this._view.error(error, 'Error applying prim_graph edit.', null);
+            return false;
         }
     }
     // we heavily use DOM manipulation here, like appendChild, though appendChild is quite outdated
@@ -8016,10 +8020,12 @@ view.PrimGraphHybridEditor = class extends view.Control {
             if (!this._canEdit) {
                 input.setAttribute('readonly', 'true');
             } else {
-                const committedValue = input.value;
+                let committedValue = input.value;
                 const commit = () => {
                     if (input.value !== committedValue) {
-                        this._commitAttribute(primitive.id, key, input.value);
+                        if (this._commitAttribute(primitive.id, key, input.value)) {
+                            committedValue = input.value;
+                        }
                     }
                 };
                 input.addEventListener('blur', commit);
@@ -8094,6 +8100,11 @@ view.PrimGraphHybridEditor = class extends view.Control {
                     } catch {
                         // validation happens when the patch is applied
                     }
+                    try {
+                        syncPrimGraphFromJson(this._ambapb, value);
+                    } catch {
+                        // validation happens when the patch is applied
+                    }
                     this._commitPrimGraphJson(value);
                 }
             }
@@ -8131,29 +8142,60 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
         return 'node';
     }
 
+    _resolveShellAmbapb(node) {
+        const modelAmbapb = this._editSession && this._editSession.modified &&
+            this._editSession.modified.model ?
+            this._editSession.modified.model._ambapb :
+            null;
+        if (modelAmbapb && modelAmbapb.primGraph) {
+            if (node._ambapb && node._ambapb !== modelAmbapb && node._ambapb._uiState) {
+                Object.assign(ensureAmbapbUiState(modelAmbapb), node._ambapb._uiState);
+            }
+            node._ambapb = modelAmbapb;
+            return modelAmbapb;
+        }
+        if (node._ambapb) {
+            return node._ambapb;
+        }
+        const primGraphAttr = (node.attributes || []).find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
+        if (primGraphAttr && primGraphAttr.value) {
+            try {
+                const ambapb = {
+                    primGraph: parsePrimGraphJson(primGraphAttr.value),
+                    canEdit: modelAmbapb?.canEdit ?? true,
+                    metadata: modelAmbapb?.metadata ?? {}
+                };
+                node._ambapb = ambapb;
+                return ambapb;
+            } catch {
+                // Ignore
+            }
+        }
+        return modelAmbapb;
+    }
+
+    _syncShellAmbapbFromJson(node, jsonText) {
+        const modelAmbapb = this._editSession && this._editSession.modified &&
+            this._editSession.modified.model ?
+            this._editSession.modified.model._ambapb :
+            null;
+        try {
+            if (modelAmbapb) {
+                syncPrimGraphFromJson(modelAmbapb, jsonText);
+                node._ambapb = modelAmbapb;
+            } else if (node._ambapb) {
+                syncPrimGraphFromJson(node._ambapb, jsonText);
+            }
+        } catch {
+            // validation happens when the patch is applied
+        }
+    }
+
     render() {
         const displayNode = this._node;
         const node = sourceNodeForEntity(displayNode) || displayNode;
         const nodeId = this._entity ? this._entity.nodeId : null;
-        let ambapb = node._ambapb;
-        if (!ambapb) {
-            const primGraphAttr = (node.attributes || []).find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
-            if (primGraphAttr && primGraphAttr.value) {
-                try {
-                    ambapb = {
-                        primGraph: parsePrimGraphJson(primGraphAttr.value),
-                        canEdit: this._editSession.modified.model._ambapb?.canEdit ?? true,
-                        metadata: this._editSession.modified.model._ambapb?.metadata ?? {}
-                    };
-                    node._ambapb = ambapb;
-                } catch {
-                    // Ignore
-                }
-            }
-        }
-        if (!ambapb) {
-            ambapb = this._editSession.modified.model._ambapb;
-        }
+        const ambapb = this._resolveShellAmbapb(node);
         if (node.type) {
             const type = node.type;
             const item = this.addProperty('type', node.type.identifier || node.type.name);
@@ -8228,6 +8270,7 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
                         entityId: attributeId,
                         canEdit: true,
                         onCommit: (value) => {
+                            this._syncShellAmbapbFromJson(node, value);
                             this._view.applyEditorPatch({
                                 entityId: attributeId,
                                 entityType: 'attribute',
@@ -8235,12 +8278,6 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
                                 property: `attributes.${attribute.name}`,
                                 newValue: value
                             });
-                            try {
-                                if (node._ambapb) {
-                                    node._ambapb.primGraph = parsePrimGraphJson(value);
-                                }
-                            } catch {
-                            }
                         }
                     });
                     this.addEntry(attribute.name, item);
