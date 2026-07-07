@@ -478,6 +478,67 @@ export const resolveEdgeBftNumber = (value) => {
     return value && value._bftEdgeNumber != null ? value._bftEdgeNumber : null;
 };
 
+const forEachTensorInGraph = (graph, callback) => {
+    if (!graph) {
+        return;
+    }
+    for (const input of graph.inputs || []) {
+        for (const value of argumentValues(input)) {
+            if (value) {
+                callback(value);
+            }
+        }
+    }
+    for (const output of graph.outputs || []) {
+        for (const value of argumentValues(output)) {
+            if (value) {
+                callback(value);
+            }
+        }
+    }
+    for (const node of graph.nodes || []) {
+        for (const input of node.inputs || []) {
+            for (const value of argumentValues(input)) {
+                if (value) {
+                    callback(value);
+                }
+            }
+        }
+        for (const output of node.outputs || []) {
+            for (const value of argumentValues(output)) {
+                if (value) {
+                    callback(value);
+                }
+            }
+        }
+    }
+};
+
+export const resolveSidebarBftValue = (value, graphRoots) => {
+    if (!value || value._bftEdgeNumber != null) {
+        return value;
+    }
+    for (const root of graphRoots || []) {
+        if (!root) {
+            continue;
+        }
+        for (const graph of collectNestedGraphs(root)) {
+            let match = null;
+            forEachTensorInGraph(graph, (tensor) => {
+                if (tensor === value || (value.name && tensor.name === value.name)) {
+                    if (tensor._bftEdgeNumber != null) {
+                        match = tensor;
+                    }
+                }
+            });
+            if (match) {
+                return match;
+            }
+        }
+    }
+    return value;
+};
+
 export const nodeIsInDisplayedGraph = (node, displayGraph) => {
     if (!node || !displayGraph || !Array.isArray(displayGraph.nodes)) {
         return false;

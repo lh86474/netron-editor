@@ -30,7 +30,8 @@ import {
     assignBftNumbers,
     assignEdgeBftNumbers,
     getCompiledGraphFromNode,
-    nodeIsInDisplayedGraph
+    nodeIsInDisplayedGraph,
+    resolveSidebarBftValue
 } from './ambapb-bft-numbering.js';
 import {
     applyBatchInlineExpansions,
@@ -524,13 +525,7 @@ view.View = class {
         viewGraph._bftDisplayGraph = displayGraph;
     }
 
-    _resolveSidebarBftNode(node) {
-        if (!node) {
-            return node;
-        }
-        if (node._bftNumber != null || node._bftWrapperNumber != null || node._bftCheckpoint != null) {
-            return node;
-        }
+    _bftDisplayGraphRoots() {
         const graphs = [];
         if (this._target && this._target._bftDisplayGraph) {
             graphs.push(this._target._bftDisplayGraph);
@@ -541,9 +536,19 @@ view.View = class {
         if (this._leftPane && this._leftPane.graph && this._leftPane.graph._bftDisplayGraph) {
             graphs.push(this._leftPane.graph._bftDisplayGraph);
         }
-        for (const graph of graphs) {
+        return graphs;
+    }
+
+    _resolveSidebarBftNode(node) {
+        if (!node) {
+            return node;
+        }
+        if (node._bftNumber != null || node._bftWrapperNumber != null) {
+            return node;
+        }
+        for (const graph of this._bftDisplayGraphRoots()) {
             const direct = (graph.nodes || []).find((entry) => entry === node || (entry.name && node.name && entry.name === node.name));
-            if (direct && (direct._bftNumber != null || direct._bftWrapperNumber != null || direct._bftCheckpoint != null)) {
+            if (direct && (direct._bftNumber != null || direct._bftWrapperNumber != null)) {
                 return direct;
             }
             for (const shell of graph.nodes || []) {
@@ -552,7 +557,7 @@ view.View = class {
                     continue;
                 }
                 const nested = (compiled.nodes || []).find((entry) => entry === node || (entry.name && node.name && entry.name === node.name));
-                if (nested && (nested._bftNumber != null || nested._bftCheckpoint != null)) {
+                if (nested && nested._bftNumber != null) {
                     return nested;
                 }
                 if (shell.type?.name === 'UserDefSubgraph') {
@@ -583,14 +588,12 @@ view.View = class {
         if (displayNode._bftWrapperNumber != null) {
             sidebar.addProperty('wrapper order', String(displayNode._bftWrapperNumber), 'nowrap');
         }
-        if (displayNode._bftCheckpoint != null) {
-            sidebar.addProperty('traversal checkpoint', String(displayNode._bftCheckpoint), 'nowrap');
-        }
     }
 
     _addBftConnectionSidebarProperty(sidebar, value) {
-        if (value && value._bftEdgeNumber != null) {
-            sidebar.addProperty('order', String(value._bftEdgeNumber), 'nowrap');
+        const displayValue = resolveSidebarBftValue(value, this._bftDisplayGraphRoots());
+        if (displayValue && displayValue._bftEdgeNumber != null) {
+            sidebar.addProperty('order', String(displayValue._bftEdgeNumber), 'nowrap');
         }
     }
 

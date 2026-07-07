@@ -16,7 +16,8 @@ import {
     clearBftMetadata,
     getCompiledGraphFromNode,
     nodeIsInDisplayedGraph,
-    resolveAmbapbNumberingMode
+    resolveAmbapbNumberingMode,
+    resolveSidebarBftValue
 } from '../source/ambapb-bft-numbering.js';
 import { applyBatchInlineExpansions, inlineExpansionBatchCallName } from '../source/ambapb-batch-inline.js';
 
@@ -291,6 +292,202 @@ describe('ambapb bft numbering', () => {
         assignEdgeBftNumbers({ viewGraph, layoutDirection: 'horizontal' });
         assert.equal(value1._bftEdgeNumber, 1);
         assert.equal(value2._bftEdgeNumber, 2);
+    });
+
+    it('sorts same-level edges left to right by midpoint position', () => {
+        const graph = {
+            name: 'diamond',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'root',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('root_out')] }]
+                },
+                {
+                    name: 'left',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('root_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('left_out')] }]
+                },
+                {
+                    name: 'right',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('root_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('right_out')] }]
+                },
+                {
+                    name: 'merge',
+                    type: { name: 'Add' },
+                    inputs: [
+                        { name: 'a', value: [tensor('left_out')] },
+                        { name: 'b', value: [tensor('right_out')] }
+                    ],
+                    outputs: [{ name: 'y', value: [tensor('merge_out')] }]
+                }
+            ]
+        };
+        const positions = new Map([
+            [graph.nodes[0], { x: 0, y: 0 }],
+            [graph.nodes[1], { x: 1, y: 10 }],
+            [graph.nodes[2], { x: 1, y: 0 }],
+            [graph.nodes[3], { x: 2, y: 0 }]
+        ]);
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(positions),
+            layoutDirection: 'horizontal'
+        });
+        const leftView = { value: graph.nodes[1], class: 'graph-node', x: 1, y: 10 };
+        const rightView = { value: graph.nodes[2], class: 'graph-node', x: 1, y: 0 };
+        const mergeView = { value: graph.nodes[3], class: 'graph-node', x: 2, y: 0 };
+        const leftOut = graph.nodes[1].outputs[0].value[0];
+        const rightOut = graph.nodes[2].outputs[0].value[0];
+        const edgeFromRight = { from: rightView, to: mergeView, value: { value: rightOut } };
+        const edgeFromLeft = { from: leftView, to: mergeView, value: { value: leftOut } };
+        const viewGraph = {
+            edges: new Map([
+                ['2:3', { label: edgeFromRight }],
+                ['1:3', { label: edgeFromLeft }]
+            ])
+        };
+        assignEdgeBftNumbers({ viewGraph, layoutDirection: 'horizontal' });
+        assert.equal(rightOut._bftEdgeNumber, 1);
+        assert.equal(leftOut._bftEdgeNumber, 2);
+    });
+
+    it('sorts same-level edges top to bottom in vertical layout', () => {
+        const graph = {
+            name: 'diamond',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'root',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('root_out')] }]
+                },
+                {
+                    name: 'top',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('root_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('top_out')] }]
+                },
+                {
+                    name: 'bottom',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('root_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('bottom_out')] }]
+                },
+                {
+                    name: 'merge',
+                    type: { name: 'Add' },
+                    inputs: [
+                        { name: 'a', value: [tensor('top_out')] },
+                        { name: 'b', value: [tensor('bottom_out')] }
+                    ],
+                    outputs: [{ name: 'y', value: [tensor('merge_out')] }]
+                }
+            ]
+        };
+        const positions = new Map([
+            [graph.nodes[0], { x: 0, y: 0 }],
+            [graph.nodes[1], { x: 0, y: 1 }],
+            [graph.nodes[2], { x: 10, y: 1 }],
+            [graph.nodes[3], { x: 5, y: 2 }]
+        ]);
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(positions),
+            layoutDirection: 'vertical'
+        });
+        const topView = { value: graph.nodes[1], class: 'graph-node', x: 0, y: 1 };
+        const bottomView = { value: graph.nodes[2], class: 'graph-node', x: 10, y: 1 };
+        const mergeView = { value: graph.nodes[3], class: 'graph-node', x: 5, y: 2 };
+        const topOut = graph.nodes[1].outputs[0].value[0];
+        const bottomOut = graph.nodes[2].outputs[0].value[0];
+        const edgeFromTop = { from: topView, to: mergeView, value: { value: topOut } };
+        const edgeFromBottom = { from: bottomView, to: mergeView, value: { value: bottomOut } };
+        const viewGraph = {
+            edges: new Map([
+                ['2:3', { label: edgeFromBottom }],
+                ['1:3', { label: edgeFromTop }]
+            ])
+        };
+        assignEdgeBftNumbers({ viewGraph, layoutDirection: 'vertical' });
+        assert.equal(topOut._bftEdgeNumber, 1);
+        assert.equal(bottomOut._bftEdgeNumber, 2);
+    });
+
+    it('skips graph input and output terminal edges', () => {
+        const graph = buildLinearGraph();
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [graph.nodes[1], { x: 1, y: 0 }],
+                [graph.nodes[2], { x: 2, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        const graphIn = graph.inputs[0].value[0];
+        const graphOut = graph.outputs[0].value[0];
+        const inputTerminal = { value: graphIn, class: 'graph-input', x: -1, y: 0 };
+        const outputTerminal = { value: graphOut, class: 'graph-output', x: 3, y: 0 };
+        const firstNode = { value: graph.nodes[0], class: 'graph-node', x: 0, y: 0 };
+        const lastNode = { value: graph.nodes[2], class: 'graph-node', x: 2, y: 0 };
+        const internalValue = graph.nodes[0].outputs[0].value[0];
+        const inputEdge = { from: inputTerminal, to: firstNode, value: { value: graphIn } };
+        const outputEdge = { from: lastNode, to: outputTerminal, value: { value: graphOut } };
+        const internalEdge = {
+            from: { value: graph.nodes[0], class: 'graph-node', x: 0, y: 0 },
+            to: { value: graph.nodes[1], class: 'graph-node', x: 1, y: 0 },
+            value: { value: internalValue }
+        };
+        const viewGraph = {
+            edges: new Map([
+                ['in:0', { label: inputEdge }],
+                ['2:out', { label: outputEdge }],
+                ['0:1', { label: internalEdge }]
+            ])
+        };
+        assignEdgeBftNumbers({ viewGraph, layoutDirection: 'horizontal' });
+        assert.equal(graphIn._bftEdgeNumber, undefined);
+        assert.equal(graphOut._bftEdgeNumber, undefined);
+        assert.equal(internalValue._bftEdgeNumber, 1);
+    });
+
+    it('resolves sidebar connection order from numbered display graph roots', () => {
+        const graph = buildLinearGraph();
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [graph.nodes[1], { x: 1, y: 0 }],
+                [graph.nodes[2], { x: 2, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        const fromNode = { value: graph.nodes[0], class: 'graph-node', x: 0, y: 0 };
+        const midNode = { value: graph.nodes[1], class: 'graph-node', x: 1, y: 0 };
+        const value = graph.nodes[0].outputs[0].value[0];
+        const edge = { from: fromNode, to: midNode, value: { value } };
+        const viewGraph = {
+            edges: new Map([
+                ['0:1', { label: edge }]
+            ])
+        };
+        assignEdgeBftNumbers({ viewGraph, layoutDirection: 'horizontal' });
+        const alias = { name: value.name };
+        const resolved = resolveSidebarBftValue(alias, [graph]);
+        assert.equal(resolved._bftEdgeNumber, 1);
     });
 
     it('detects when header title fills majority of header width', () => {
