@@ -260,7 +260,10 @@ describe('ambapb bft numbering', () => {
         const inlined = displayGraph.nodes.find((node) => node._inlineExpanded);
         assert.ok(inlined);
         assert.equal(inlineExpansionBatchCallName(inlined), 'batch_call');
+        assert.equal(inlined._bftWrapperNumber, 3);
+        assert.equal(inner._bftNumber, 3);
         assert.equal(inlined._bftWrapperNumber, 2);
+        assert.equal(inner._bftNumber, 3);
         assert.ok(inlined._bftNumber != null);
     });
 

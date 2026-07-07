@@ -6689,7 +6689,7 @@ view.Node = class extends grapher.Node {
             element.setAttribute('class', className);
             element.setAttribute('font-size', '14');
             element.setAttribute('font-weight', 'bold');
-            element.setAttribute('fill', '#fff');
+            element.setAttribute('fill', className === 'node-bft-wrapper-label' ? '#000' : '#fff');
             element.style.pointerEvents = 'none';
             this.element.appendChild(element);
             this[key] = element;
@@ -6719,6 +6719,7 @@ view.Node = class extends grapher.Node {
         text.textContent = String(this.value._bftNumber);
         text.setAttribute('x', String(this.width - pad));
         text.setAttribute('text-anchor', 'end');
+        text.setAttribute('fill', '#000');
         text.setAttribute('y', String(y));
     }
 
@@ -6736,7 +6737,7 @@ view.Node = class extends grapher.Node {
             }
             return;
         }
-        const pad = 10;
+        const pad = 14;
         if (!this._inlineWrapperPath) {
             this._inlineWrapperPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             this._inlineWrapperPath.setAttribute('class', 'node-inline-wrapper');
@@ -6749,6 +6750,7 @@ view.Node = class extends grapher.Node {
         text.setAttribute('x', String(this.width + pad - 4));
         text.setAttribute('y', String(-pad + 14));
         text.setAttribute('text-anchor', 'end');
+        text.setAttribute('fill', '#000');
     }
 
     select() {

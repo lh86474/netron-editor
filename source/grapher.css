@@ -54,18 +54,24 @@
 .node-argument > text { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 9px; font-weight: normal; text-rendering: geometricPrecision; user-select: none; }
 .node-argument > rect { fill: transparent; }
 
-.node-bft-label,
-.node-bft-wrapper-label {
+.node-bft-label {
     font-weight: bold;
     font-size: 14px;
     fill: #fff;
     pointer-events: none;
 }
 
+.node-bft-wrapper-label {
+    font-weight: bold;
+    font-size: 14px;
+    fill: #000;
+    pointer-events: none;
+}
+
 .node-inline-wrapper {
     fill: none;
     stroke: #333;
-    stroke-width: 1px;
+    stroke-width: 3px;
     pointer-events: none;
 }
 

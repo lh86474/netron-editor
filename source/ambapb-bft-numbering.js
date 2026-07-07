@@ -3,7 +3,7 @@
  * Author: Luray He
  */
 import { findValueConsumers, findValueProducers } from './model-editor.js';
-import { inlineExpansionBatchCallName } from './ambapb-batch-inline.js';
+import { inlineExpansionBatchCallName, resolveBatchCallTarget } from './ambapb-batch-inline.js';
 
 export const FRAG_SHELL_TYPES = new Set(['FragSubgraph', 'UserDefSubgraph']);
 
@@ -310,6 +310,69 @@ const applyInlineWrapperNumbers = (displayGraph, batchCallNumbers) => {
     }
 };
 
+const snapshotBftNumbers = (graph) => {
+    const byNode = new Map();
+    for (const nested of collectNestedGraphs(graph)) {
+        for (const node of nested.nodes || []) {
+            if (node._bftNumber != null) {
+                byNode.set(node, node._bftNumber);
+            }
+        }
+    }
+    return byNode;
+};
+
+const applyPersistedInlineBftNumbers = (displayGraph, sourceBftByNode) => {
+    for (const node of displayGraph.nodes || []) {
+        if (!node._inlineExpanded || !node._sourceNode) {
+            continue;
+        }
+        const persisted = sourceBftByNode.get(node._sourceNode);
+        if (persisted == null) {
+            continue;
+        }
+        node._bftNumber = persisted;
+    }
+};
+
+const minBftNumberInGraph = (graph) => {
+    if (!graph) {
+        return null;
+    }
+    let min = null;
+    for (const node of graph.nodes || []) {
+        if (node._bftNumber != null) {
+            min = min == null ? node._bftNumber : Math.min(min, node._bftNumber);
+        }
+        const compiled = getCompiledGraphFromNode(node);
+        if (compiled) {
+            const nested = minBftNumberInGraph(compiled);
+            if (nested != null) {
+                min = min == null ? nested : Math.min(min, nested);
+            }
+        }
+    }
+    return min;
+};
+
+const buildBatchCallNumberMapFromNumberedSource = (sourceGraph) => {
+    const map = new Map();
+    if (!sourceGraph) {
+        return map;
+    }
+    for (const node of sourceGraph.nodes || []) {
+        if (node.type?.name !== 'BatchCall' && node.type?.name !== 'UserDefCall') {
+            continue;
+        }
+        const target = resolveBatchCallTarget(sourceGraph, node);
+        const wrapperNumber = minBftNumberInGraph(target);
+        if (wrapperNumber != null && node.name) {
+            map.set(node.name, wrapperNumber);
+        }
+    }
+    return map;
+};
+
 const collectNestedShellNodes = (graph) => {
     return (graph.nodes || []).filter((node) => (
         node.type?.name === 'FragSubgraph' || node.type?.name === 'UserDefSubgraph'
@@ -378,6 +441,20 @@ export const assignBftNumbers = (ctx) => {
 
     const mode = resolveAmbapbNumberingMode({ displayGraph, navigationHost });
     const compiledLike = mode === 'compiledFrag';
+    const runtimeLike = mode === 'runtime';
+
+    let batchCallNumbers = new Map();
+    let sourceBftByNode = new Map();
+    if (sourceGraph && runtimeLike) {
+        let sourceCounter = assignNumbersToGraph(sourceGraph, viewGraph, 1, {
+            assignUnreachableAtEnd: false,
+            entryOnlySources: false,
+            layoutDirection
+        });
+        assignNestedShellGraphs(sourceGraph, viewGraph, sourceCounter, layoutDirection);
+        sourceBftByNode = snapshotBftNumbers(sourceGraph);
+        clearBftMetadata(sourceGraph);
+    }
 
     let counter = assignNumbersToGraph(displayGraph, viewGraph, 1, {
         assignUnreachableAtEnd: compiledLike,
@@ -389,8 +466,18 @@ export const assignBftNumbers = (ctx) => {
         assignNestedShellGraphs(displayGraph, viewGraph, counter, layoutDirection);
     }
 
-    const batchCallNumbers = buildBatchCallNumberMap(sourceGraph || displayGraph, layoutDirection, viewGraph);
-    applyInlineWrapperNumbers(displayGraph, batchCallNumbers);
+    const displayTraversalByNode = new Map();
+    for (const node of displayGraph.nodes || []) {
+        if (node._inlineExpanded && node._bftNumber != null) {
+            displayTraversalByNode.set(node, node._bftNumber);
+        }
+    }
+
+    applyPersistedInlineBftNumbers(displayGraph, sourceBftByNode);
+
+    for (const [node, traversalNumber] of displayTraversalByNode) {
+        node._bftWrapperNumber = traversalNumber;
+    }
 };
 
 const isGraphTerminalViewNode = (viewNode) => {
