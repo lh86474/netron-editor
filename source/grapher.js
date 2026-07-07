@@ -1,6 +1,16 @@
 
 const grapher = {};
 
+// Minimum node width before BFT order labels move to the left gutter.
+// Matches grapher.ArgumentList.measure() floor width.
+grapher.BFT_RIGHT_LABEL_MIN_WIDTH = 75;
+// Extra width reserved on the left for compact nodes (gap + label).
+grapher.BFT_LEFT_GUTTER = 28;
+
+grapher.isCompactNodeWidth = (naturalWidth) => {
+    return naturalWidth < grapher.BFT_RIGHT_LABEL_MIN_WIDTH;
+};
+
 grapher.Graph = class {
 
     constructor(compound) {
@@ -1157,4 +1167,12 @@ grapher.Edge.Path = class {
     }
 };
 
-export const { Graph, Node, Edge, Argument } = grapher;
+export const {
+    Graph,
+    Node,
+    Edge,
+    Argument,
+    BFT_RIGHT_LABEL_MIN_WIDTH,
+    BFT_LEFT_GUTTER,
+    isCompactNodeWidth
+} = grapher;

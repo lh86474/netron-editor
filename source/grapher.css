@@ -54,6 +54,21 @@
 .node-argument > text { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 9px; font-weight: normal; text-rendering: geometricPrecision; user-select: none; }
 .node-argument > rect { fill: transparent; }
 
+.node-bft-label,
+.node-bft-wrapper-label {
+    font-weight: bold;
+    font-size: 14px;
+    fill: #fff;
+    pointer-events: none;
+}
+
+.node-inline-wrapper {
+    fill: none;
+    stroke: #333;
+    stroke-width: 1px;
+    pointer-events: none;
+}
+
 .graph-item-input path { fill: #eee; }
 .graph-item-input:hover { cursor: pointer; }
 .graph-item-input:hover path { fill: #fff; }

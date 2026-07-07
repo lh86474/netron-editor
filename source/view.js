@@ -27,6 +27,12 @@ import { validateNodeInsert } from './onnx-operator-validation.js';
 import { GraphPane } from './graph-pane.js';
 import { MergeWorkspaceController } from './merge-workspace.js';
 import {
+    assignBftNumbers,
+    assignEdgeBftNumbers,
+    getCompiledGraphFromNode,
+    nodeIsInDisplayedGraph
+} from './ambapb-bft-numbering.js';
+import {
     applyBatchInlineExpansions,
     attachCompiledGraphSourceRefs,
     canExpandBatchCall,
@@ -488,6 +494,82 @@ view.View = class {
     _invalidateDisplayGraphCache() {
         this._displayGraphRevision++;
         this._displayGraphCache = null;
+    }
+
+    _bftLayoutDirection() {
+        return this.options && this.options.direction === 'vertical' ? 'vertical' : 'horizontal';
+    }
+
+    _applyBftNumbering(pane, displayGraph, sourceGraph, viewGraph) {
+        assignBftNumbers({
+            displayGraph,
+            sourceGraph: sourceGraph || displayGraph,
+            viewGraph,
+            layoutDirection: this._bftLayoutDirection()
+        });
+        assignEdgeBftNumbers({
+            viewGraph,
+            layoutDirection: this._bftLayoutDirection()
+        });
+        viewGraph._bftDisplayGraph = displayGraph;
+    }
+
+    _resolveSidebarBftNode(node) {
+        if (!node) {
+            return node;
+        }
+        if (node._bftNumber != null || node._bftWrapperNumber != null || node._bftCheckpoint != null) {
+            return node;
+        }
+        const graphs = [];
+        if (this._target && this._target._bftDisplayGraph) {
+            graphs.push(this._target._bftDisplayGraph);
+        }
+        if (this._rightPane && this._rightPane.graph && this._rightPane.graph._bftDisplayGraph) {
+            graphs.push(this._rightPane.graph._bftDisplayGraph);
+        }
+        if (this._leftPane && this._leftPane.graph && this._leftPane.graph._bftDisplayGraph) {
+            graphs.push(this._leftPane.graph._bftDisplayGraph);
+        }
+        for (const graph of graphs) {
+            const direct = (graph.nodes || []).find((entry) => entry === node || (entry.name && node.name && entry.name === node.name));
+            if (direct && (direct._bftNumber != null || direct._bftWrapperNumber != null || direct._bftCheckpoint != null)) {
+                return direct;
+            }
+            for (const shell of graph.nodes || []) {
+                const compiled = getCompiledGraphFromNode(shell);
+                if (!compiled) {
+                    continue;
+                }
+                const nested = (compiled.nodes || []).find((entry) => entry === node || (entry.name && node.name && entry.name === node.name));
+                if (nested && nested._bftNumber != null) {
+                    return nested;
+                }
+            }
+        }
+        return node;
+    }
+
+    _addBftSidebarProperties(sidebar, node) {
+        const displayNode = this._resolveSidebarBftNode(node);
+        if (!displayNode) {
+            return;
+        }
+        if (displayNode._bftNumber != null) {
+            sidebar.addProperty('order', String(displayNode._bftNumber), 'nowrap');
+        }
+        if (displayNode._bftWrapperNumber != null) {
+            sidebar.addProperty('wrapper order', String(displayNode._bftWrapperNumber), 'nowrap');
+        }
+        if (displayNode._bftCheckpoint != null) {
+            sidebar.addProperty('traversal checkpoint', String(displayNode._bftCheckpoint), 'nowrap');
+        }
+    }
+
+    _addBftConnectionSidebarProperty(sidebar, value) {
+        if (value && value._bftEdgeNumber != null) {
+            sidebar.addProperty('order', String(value._bftEdgeNumber), 'nowrap');
+        }
     }
 
     _graphBusyElement() {
@@ -3174,6 +3256,7 @@ view.View = class {
             await viewGraph.measure();
             status = await viewGraph.layout(this._worker);
             if (status === '') {
+                this._applyBftNumbering(pane, graph, sourceGraph, viewGraph);
                 viewGraph.update();
                 viewGraph.updateTunnels();
                 viewGraph.restore(state);
@@ -3278,6 +3361,7 @@ view.View = class {
             await viewGraph.measure();
             const status = await viewGraph.layout(this._worker);
             if (status === '') {
+                this._applyBftNumbering(pane, graph, sourceGraph, viewGraph);
                 for (const child of oldChildren) {
                     if (child.parentNode === origin) {
                         origin.removeChild(child);
@@ -6544,6 +6628,119 @@ view.Node = class extends grapher.Node {
         }
     }
 
+    async measure() {
+        await super.measure();
+        this._naturalWidth = this.width;
+        this._bftLeftGutter = 0;
+        this._bftLabelOnLeft = false;
+        if (grapher.isCompactNodeWidth(this._naturalWidth)) {
+            this._bftLeftGutter = grapher.BFT_LEFT_GUTTER;
+            this._bftLabelOnLeft = true;
+            this.width = this._naturalWidth + this._bftLeftGutter;
+            for (const block of this.blocks) {
+                block.width = this.width;
+            }
+        }
+    }
+
+    async layout() {
+        const gutter = this._bftLeftGutter || 0;
+        let y = 0;
+        for (const block of this.blocks) {
+            block.x = gutter;
+            block.y = y;
+            block.width = this.width;
+            // eslint-disable-next-line no-await-in-loop
+            await block.layout();
+            y += block.height;
+        }
+    }
+
+    _bftDisplayGraph() {
+        return this.context._bftDisplayGraph || this.context.target;
+    }
+
+    _shouldShowBftCanvasLabel() {
+        if (!this.value || this.value._bftNumber == null) {
+            return false;
+        }
+        return nodeIsInDisplayedGraph(this.value, this._bftDisplayGraph());
+    }
+
+    _ensureBftLabelElement(className) {
+        const key = className === 'node-bft-wrapper-label' ? '_bftWrapperText' : '_bftText';
+        if (!this[key]) {
+            const element = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            element.setAttribute('class', className);
+            element.setAttribute('font-size', '14');
+            element.setAttribute('font-weight', 'bold');
+            element.setAttribute('fill', '#fff');
+            element.style.pointerEvents = 'none';
+            this.element.appendChild(element);
+            this[key] = element;
+        }
+        return this[key];
+    }
+
+    _removeBftLabelElement(key) {
+        if (this[key]) {
+            this[key].remove();
+            this[key] = null;
+        }
+    }
+
+    _renderBftLabel() {
+        if (!this.element) {
+            return;
+        }
+        if (!this._shouldShowBftCanvasLabel()) {
+            this._removeBftLabelElement('_bftText');
+            return;
+        }
+        const text = this._ensureBftLabelElement('node-bft-label');
+        const pad = 7;
+        const headerHeight = this.blocks && this.blocks.length > 0 ? this.blocks[0].height : this.height;
+        const y = Math.max(14, (headerHeight / 2) + 5);
+        text.textContent = String(this.value._bftNumber);
+        if (this._bftLabelOnLeft) {
+            text.setAttribute('x', String(pad));
+            text.setAttribute('text-anchor', 'start');
+        } else {
+            text.setAttribute('x', String(this.width - pad));
+            text.setAttribute('text-anchor', 'end');
+        }
+        text.setAttribute('y', String(y));
+    }
+
+    _renderInlineWrapper() {
+        if (!this.element) {
+            return;
+        }
+        const wrapperNumber = this.value && this.value._bftWrapperNumber;
+        const showWrapper = wrapperNumber != null && this._shouldShowBftCanvasLabel();
+        if (!showWrapper) {
+            this._removeBftLabelElement('_bftWrapperText');
+            if (this._inlineWrapperPath) {
+                this._inlineWrapperPath.remove();
+                this._inlineWrapperPath = null;
+            }
+            return;
+        }
+        const pad = 10;
+        if (!this._inlineWrapperPath) {
+            this._inlineWrapperPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            this._inlineWrapperPath.setAttribute('class', 'node-inline-wrapper');
+            this.element.insertBefore(this._inlineWrapperPath, this.element.firstChild);
+        }
+        const d = grapher.Node.roundedRect(-pad, -pad, this.width + (pad * 2), this.height + (pad * 2), true, true, true, true);
+        this._inlineWrapperPath.setAttribute('d', d);
+        const text = this._ensureBftLabelElement('node-bft-wrapper-label');
+        text.textContent = String(wrapperNumber);
+        text.setAttribute('x', String(this.width + pad - 4));
+        text.setAttribute('y', String(-pad + 14));
+        text.setAttribute('text-anchor', 'end');
+    }
+
     select() {
         const result = super.select();
         this.applyBorderStackStyle();
@@ -6563,6 +6760,8 @@ view.Node = class extends grapher.Node {
         this.applyDanglingStyle();
         this.applyUserDefSelectionStyle();
         this.applyBorderStackStyle();
+        this._renderBftLabel();
+        this._renderInlineWrapper();
     }
 
     _add(value, type) {
@@ -7622,6 +7821,7 @@ view.NodeSidebar = class extends view.ObjectSidebar {
                 this.addProperty('module', value, 'nowrap');
             }
         }
+        this._view._addBftSidebarProperties(this, node);
         if (node.name) {
             this.addProperty('name', node.name, 'nowrap');
         }
@@ -7740,6 +7940,7 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
                 this.addProperty('module', value, 'nowrap');
             }
         }
+        this._view._addBftSidebarProperties(this, displayNode);
         if (node.name && nodeId) {
             this.addEditableProperty('name', node.name, (value) => {
                 this._view.applyEditorPatch({
@@ -8230,6 +8431,7 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
                 this.addProperty('module', value, 'nowrap');
             }
         }
+        this._view._addBftSidebarProperties(this, displayNode);
         if (node.name && nodeId) {
             this.addEditableProperty('name', node.name, (value) => {
                 this._view.applyEditorPatch({
@@ -9211,6 +9413,7 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
                 item.toggle();
             }
         }
+        this._view._addBftConnectionSidebarProperty(this, displayValue);
         if (from) {
             this.addSection('Inputs');
             this.addNodeList('from', [from]);
@@ -9287,6 +9490,7 @@ view.ConnectionSidebar = class extends view.ObjectSidebar {
         const to = this._to;
         const [name] = value.name.split('\n');
         this.addProperty('name', name);
+        this._view._addBftConnectionSidebarProperty(this, value);
         if (value.type) {
             const item = new view.ValueView(this._view, value);
             this.addEntry('type', item);
