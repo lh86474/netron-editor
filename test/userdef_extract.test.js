@@ -123,7 +123,7 @@ describe('UserDefCall and boundary selection', () => {
         const selectedNodes = [graph.nodes[0], graph.nodes[1]]; // Conv1 and Relu1
         
         const { beginNodes, endNodes } = findBoundaryNodes(graph, selectedNodes);
-        const extracted = extractSubgraph(graph, beginNodes, endNodes);
+        let extracted = extractSubgraph(graph, beginNodes, endNodes);
         
         assert.equal(extracted.nodes.length, 2);
         assert.equal(extracted.inputs.length, 1);

@@ -4,7 +4,12 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isCompactNodeWidth } from '../source/grapher.js';
+import {
+    isCompactNodeWidth,
+    headerTitleTextWidth,
+    headerNeedsBftLabelGutter,
+    BFT_HEADER_TITLE_MAJORITY
+} from '../source/grapher.js';
 import {
     assignBftNumbers,
     assignEdgeBftNumbers,
@@ -14,13 +19,6 @@ import {
     resolveAmbapbNumberingMode
 } from '../source/ambapb-bft-numbering.js';
 import { applyBatchInlineExpansions, inlineExpansionBatchCallName } from '../source/ambapb-batch-inline.js';
-
-import {
-    isCompactNodeWidth,
-    headerTitleTextWidth,
-    headerNeedsBftLabelGutter,
-    BFT_HEADER_TITLE_MAJORITY
-} from '../source/grapher.js';
 
 const tensor = (name) => ({ name, type: 'float32' });
 
@@ -403,7 +401,7 @@ describe('ambapb bft numbering', () => {
         assert.equal(graph.nodes[2]._bftNumber, undefined);
     });
 
-    it('stores a checkpoint and numbers userdef inner frags right to left locally', () => {
+    it('numbers userdef compiled graph like frags left to right with global counter', () => {
         const fragLeftInner = {
             name: 'frag_left_inner',
             type: { name: 'Conv' },
@@ -466,7 +464,7 @@ describe('ambapb bft numbering', () => {
                 {
                     name: 'userdef',
                     type: { name: 'UserDefSubgraph' },
-                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: userDefCompiled }],
+                    attributes: [{ name: 'graph', type: 'graph', value: userDefCompiled }],
                     inputs: [],
                     outputs: []
                 }
@@ -484,13 +482,59 @@ describe('ambapb bft numbering', () => {
             layoutDirection: 'horizontal'
         });
         assert.equal(graph.nodes[0]._bftNumber, 1);
-        assert.equal(graph.nodes[1]._bftCheckpoint, 2);
         assert.equal(graph.nodes[1]._bftNumber, undefined);
-        assert.equal(fragRightInner._bftNumber, 1);
+        assert.equal(graph.nodes[1]._bftCheckpoint, undefined);
         assert.equal(fragLeftInner._bftNumber, 2);
+        assert.equal(fragRightInner._bftNumber, 3);
     });
 
-    it('uses local numbering when viewing a userdef compiled graph directly', () => {
+    it('numbers flat single-node userdef body like a frag compiled graph', () => {
+        const innerConv = {
+            name: 'conv0',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('data_in')] }],
+            outputs: [{ name: 'y', value: [tensor('data_out')] }]
+        };
+        const userDefCompiled = {
+            name: 'userdefsubgraph_0',
+            inputs: [{ name: 'input', value: [tensor('data_in')] }],
+            outputs: [{ name: 'output', value: [tensor('data_out')] }],
+            nodes: [innerConv]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                {
+                    name: 'userdef',
+                    type: { name: 'UserDefSubgraph' },
+                    attributes: [{ name: 'graph', type: 'graph', value: userDefCompiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [graph.nodes[1], { x: 1, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(graph.nodes[0]._bftNumber, 1);
+        assert.equal(innerConv._bftNumber, 2);
+    });
+
+    it('uses compiled frag numbering when viewing a userdef compiled graph directly', () => {
         const inner = {
             name: 'inner',
             type: { name: 'Conv' },
@@ -531,7 +575,7 @@ describe('ambapb bft numbering', () => {
         assert.equal(resolveAmbapbNumberingMode({
             displayGraph: userDefCompiled,
             navigationHost: { type: { name: 'UserDefSubgraph' } }
-        }), 'compiledUserDef');
+        }), 'compiledFrag');
         assert.equal(inner._bftNumber, 1);
         assert.equal(userDefCompiled.nodes[0]._bftNumber, undefined);
     });
