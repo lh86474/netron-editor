@@ -308,6 +308,11 @@ const cloneNode = (node, prefix, valueMap, nameMap, options = {}) => {
             type: attribute.type,
             value: cloneAttributeValue(attribute.value)
         })),
+        blocks: (node.blocks || []).map((block) => ({
+            name: block.name,
+            type: block.type,
+            value: cloneAttributeValue(block.value)
+        })),
         inputs: (node.inputs || []).map((input) => cloneArgument(input)),
         outputs: (node.outputs || []).map((output) => cloneArgument(output)),
     };

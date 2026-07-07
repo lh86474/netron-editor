@@ -6655,6 +6655,14 @@ view.Node = class extends grapher.Node {
         return this._entityId;
     }
 
+    _blockEntityPrefix(argumentName, blockKey) {
+        const node = this.value;
+        if (node && node._inlineExpanded && node._sourceEntityId && argumentName) {
+            return `${node._sourceEntityId}/${argumentName}`;
+        }
+        return blockKey;
+    }
+
     _populateArgumentList(node, list) {
         const options = this.context.options;
         let hiddenTensors = false;
@@ -6741,9 +6749,10 @@ view.Node = class extends grapher.Node {
             let content = null;
             const hostEntityId = this._blockHostEntityId();
             const blockKey = this.context.blockKey(hostEntityId, argument.name);
+            const blockEntityPrefix = this._blockEntityPrefix(argument.name, blockKey);
             if (type === 'graph' && blockKey && this.context.isBlockExpanded(blockKey)) {
                 content = this.context.createGraph(argument.value, 'graph', blockKey, this.value);
-                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks, blockKey, this.context.deltaTracker));
+                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks, blockEntityPrefix, this.context.deltaTracker));
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
