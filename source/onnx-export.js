@@ -470,28 +470,21 @@ const isShellNodeType = (node) => {
     return name === CVFLOW_NVP_OP_TYPE;
 };
 
-const isShellLayoutGraph = (graph) => {
+export const isShellLayoutGraph = (graph) => {
     const nodes = graph && graph.nodes ? graph.nodes : [];
     return nodes.length === 1 && isShellNodeType(nodes[0]);
 };
 
-const getCompiledGraphFromShellNode = (node) => {
-    if (!node) {
-        return null;
-    }
-    for (const entry of modifiedGraphArguments(node)) {
-        if (entry.name === COMPILED_PRIM_GRAPH_ATTRIBUTE && entry.type === 'graph' && entry.value) {
-            return entry.value;
-        }
-    }
-    return null;
-};
-
-const protoHasCompiledPrimGraph = (wrapperNode) => {
-    if (!wrapperNode || !Array.isArray(wrapperNode.attribute)) {
+// Checkpoint shell export only when the session root is the single CVFlowNVP wrapper.
+// Runtime CVFlowNVP ops inside a flat graph must not trigger re-wrapping.
+export const shouldExportCheckpointShell = (modifiedGraph, proto) => {
+    if (!modifiedGraph || !proto || !proto.graph) {
         return false;
     }
-    return wrapperNode.attribute.some((attribute) => attribute && attribute.name === COMPILED_PRIM_GRAPH_ATTRIBUTE);
+    if (!findCVFlowNVPNode(proto.graph)) {
+        return false;
+    }
+    return isShellLayoutGraph(modifiedGraph);
 };
 
 const buildPrimGraphAttributeFromModified = (value, originalAttribute) => {
@@ -537,42 +530,6 @@ const buildTensorAttributeProto = (name, value, originalAttribute, attributeType
         return cloneAttributeProto(originalAttribute);
     }
     throw new OnnxExportError(`Unsupported tensor attribute '${name}' for export.`);
-};
-
-const resolveCheckpointExportGraph = (editSession, proto) => {
-    const modifiedGraph = editSession.modified.getGraph(0);
-    if (!isShellLayoutGraph(modifiedGraph)) {
-        return {
-            runtimeGraph: modifiedGraph,
-            shellNode: null
-        };
-    }
-    const shellNode = modifiedGraph.nodes[0];
-    const compiledGraph = getCompiledGraphFromShellNode(shellNode);
-    const wrapperNode = findCVFlowNVPNode(proto.graph);
-    if (compiledGraph || (wrapperNode && protoHasCompiledPrimGraph(wrapperNode))) {
-        return {
-            runtimeGraph: compiledGraph || { name: '', inputs: [], outputs: [], nodes: [] },
-            shellNode
-        };
-    }
-    return {
-        runtimeGraph: null,
-        shellNode
-    };
-};
-
-const shouldUseCheckpointRebuild = (editSession, proto) => {
-    const wrapperNode = findCVFlowNVPNode(proto && proto.graph);
-    if (!wrapperNode) {
-        return false;
-    }
-    const modifiedGraph = editSession.modified.getGraph(0);
-    if (!isShellLayoutGraph(modifiedGraph)) {
-        return false;
-    }
-    const { runtimeGraph } = resolveCheckpointExportGraph(editSession, proto);
-    return runtimeGraph !== null;
 };
 
 const buildGraphAttributeProto = (name, graphBody, originalAttribute = null) => {
@@ -1427,14 +1384,14 @@ const rebuildCheckpointWrapperAttributes = (wrapperNode, modifiedGraph, sourceGr
     };
 };
 
-const rebuildFlatGraphProtoFromModified = (modifiedGraph, sourceGraph, wrapperNode) => {
+const rebuildFlatGraphProtoFromModified = (modifiedGraph, sourceGraph, wrapperNode, ambapbPrimGraph = null) => {
     const runtimeGraph = resolveCheckpointRuntimeGraph(modifiedGraph);
     const originalByName = collectOriginalNodesByName(sourceGraph, wrapperNode);
     const usedNames = collectArgumentValueNamesFromGraph(runtimeGraph);
     const body = buildRuntimeGraphBody(runtimeGraph, sourceGraph, originalByName);
 
     const immsTensors = wrapperNode ? loadCheckpointImmsTensors(wrapperNode) : [];
-    let primGraph = wrapperNode ? loadCheckpointPrimGraph(wrapperNode, null) : null;
+    let primGraph = wrapperNode ? loadCheckpointPrimGraph(wrapperNode, ambapbPrimGraph) : null;
     if (primGraph && Array.isArray(primGraph.primitives)) {
         const keptIds = resolveKeptPrimitiveIds(runtimeGraph, primGraph);
         for (const prim of primGraph.primitives) {
@@ -1499,7 +1456,7 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto, option
     }
     const sourceGraph = sourceProto.graph;
     const wrapperNode = findCVFlowNVPNode(sourceGraph);
-    if (wrapperNode) {
+    if (wrapperNode && isShellLayoutGraph(modifiedGraph)) {
         const checkpoint = rebuildCheckpointGraphProtoFromModified(
             modifiedGraph,
             sourceProto,
@@ -1507,6 +1464,14 @@ export const rebuildGraphProtoFromModified = (modifiedGraph, sourceProto, option
             options.ambapbPrimGraph || null
         );
         return checkpoint.graph;
+    }
+    if (wrapperNode) {
+        return rebuildFlatGraphProtoFromModified(
+            modifiedGraph,
+            sourceGraph,
+            wrapperNode,
+            options.ambapbPrimGraph || null
+        );
     }
 
     const originalByName = collectOriginalNodesByName(sourceGraph, null);
@@ -1522,20 +1487,38 @@ export const rebuildGraphProtoFromModifiedWithAmbapb = (modifiedGraph, sourcePro
             slicedPrimGraph: null
         };
     }
-    return rebuildCheckpointGraphProtoFromModified(
-        modifiedGraph,
-        sourceProto,
-        wrapperNode,
-        ambapbPrimGraph,
-        modifiedShellNode
-    );
+    if (isShellLayoutGraph(modifiedGraph)) {
+        return rebuildCheckpointGraphProtoFromModified(
+            modifiedGraph,
+            sourceProto,
+            wrapperNode,
+            ambapbPrimGraph,
+            modifiedShellNode
+        );
+    }
+    return {
+        graph: rebuildFlatGraphProtoFromModified(modifiedGraph, sourceGraph, wrapperNode, ambapbPrimGraph),
+        slicedPrimGraph: null
+    };
 };
 
 const applyCheckpointGraphFromModified = (graph, originalProto, editSession, ambapbPrimGraph) => {
-    const modifiedGraph = resolveCheckpointRuntimeGraph(editSession.modified.getGraph(0));
+    const modifiedGraph = editSession.modified.getGraph(0);
     const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(modifiedGraph, originalProto, ambapbPrimGraph);
     Object.assign(graph, rebuilt.graph);
     return rebuilt.slicedPrimGraph;
+};
+
+const applyFlatGraphFromModified = (graph, originalProto, editSession, ambapbPrimGraph) => {
+    const modifiedGraph = editSession.modified.getGraph(0);
+    const wrapperNode = findCVFlowNVPNode(originalProto.graph);
+    const rebuilt = rebuildFlatGraphProtoFromModified(
+        modifiedGraph,
+        originalProto.graph,
+        wrapperNode,
+        ambapbPrimGraph
+    );
+    Object.assign(graph, rebuilt);
 };
 
 // This supports node insertions and deletions by rebuilding graph.node from the modified graph.
@@ -1657,15 +1640,15 @@ const applyChanges = (cloned, originalProto, editSession, options = {}) => {
     }
 
     const modifiedGraph = editSession.modified.getGraph(0);
-    const runtimeHasShellNodes = (modifiedGraph.nodes || []).some(isShellNodeType);
-    const useCheckpointPath = checkpointWrapper && (
-        isShellLayoutGraph(modifiedGraph) || runtimeHasShellNodes
-    );
-    if (useCheckpointPath) {
-        applyCheckpointGraphFromModified(graph, originalProto, editSession, options.ambapbPrimGraph || null);
+    if (shouldExportCheckpointShell(modifiedGraph, originalProto)) {
+        return applyCheckpointGraphFromModified(graph, originalProto, editSession, options.ambapbPrimGraph || null);
+    }
+    if (checkpointWrapper) {
+        applyFlatGraphFromModified(graph, originalProto, editSession, options.ambapbPrimGraph || null);
     } else {
         applyStructuralNodeChanges(graph, originalProto, editSession);
     }
+    return null;
 };
 
 export const canExportOnnx = (model) => {
@@ -1696,28 +1679,12 @@ export const exportModifiedOnnx = (model, editSession) => {
         throw new OnnxExportError('Original ONNX protobuf is not available for export.');
     }
     const cloned = cloneModelProto(proto);
-    if (shouldUseCheckpointRebuild(editSession, proto)) {
-        const { runtimeGraph, shellNode } = resolveCheckpointExportGraph(editSession, proto);
-        const ambapbPrimGraph = model._ambapb && model._ambapb.primGraph ? model._ambapb.primGraph : null;
-        const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(
-            runtimeGraph,
-            proto,
-            ambapbPrimGraph,
-            shellNode
-        );
-        cloned.graph = rebuilt.graph;
-        if (rebuilt.slicedPrimGraph && model._ambapb) {
-            model._ambapb.primGraph = rebuilt.slicedPrimGraph;
-        }
-    } else {
-        applyChanges(cloned, proto, editSession, {
-            ambapbPrimGraph: model._ambapb && model._ambapb.primGraph ? model._ambapb.primGraph : null
-        });
+    const ambapbPrimGraph = model._ambapb && model._ambapb.primGraph ? model._ambapb.primGraph : null;
+    const slicedPrimGraph = applyChanges(cloned, proto, editSession, { ambapbPrimGraph });
+    if (slicedPrimGraph && model._ambapb) {
+        model._ambapb.primGraph = slicedPrimGraph;
     }
     normalizeGraphReferences(cloned.graph);
-    applyChanges(cloned, proto, editSession, {
-        ambapbPrimGraph: model._ambapb && model._ambapb.primGraph ? model._ambapb.primGraph : null
-    });
     validateModel(cloned);
     return onnx.ModelProto.encodeBytes(cloned);
 };

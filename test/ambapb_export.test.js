@@ -11,7 +11,7 @@ import { onnx } from '../source/onnx-proto.js';
 import '../source/onnx-encode.js';
 import { BinaryReader } from '../source/protobuf.js';
 import { ModelEditor } from '../source/model-editor.js';
-import { exportModifiedOnnx, rebuildGraphProtoFromModified, rebuildGraphProtoFromModifiedWithAmbapb } from '../source/onnx-export.js';
+import { exportModifiedOnnx, rebuildGraphProtoFromModified, rebuildGraphProtoFromModifiedWithAmbapb, shouldExportCheckpointShell, isShellLayoutGraph } from '../source/onnx-export.js';
 import { attachCheckpoint, parseCheckpoint } from '../source/ambapb.js';
 import { parsePrimGraphJson, serializePrimGraphJson } from '../source/ambapb-prim-graph.js';
 import { COMPILED_PRIM_GRAPH_ATTRIBUTE, PRIM_GRAPH_ATTRIBUTE } from '../source/ambapb-editor.js';
@@ -199,6 +199,8 @@ describe('ambapb checkpoint export', () => {
         const proto = buildCheckpointModelProto(primGraph);
         const model = buildCheckpointViewModel(proto, primGraph);
         const session = ModelEditor.createSession(model);
+        assert.equal(shouldExportCheckpointShell(session.modified.getGraph(0), proto), true);
+        assert.equal(isShellLayoutGraph(session.modified.getGraph(0)), true);
         const bytes = exportModifiedOnnx(model, session);
         const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
         const checkpoint = parseCheckpoint(decoded);
@@ -259,20 +261,61 @@ describe('ambapb checkpoint export', () => {
             ]
         };
 
-        const rebuilt = rebuildGraphProtoFromModified(extracted, proto);
+        const rebuilt = rebuildGraphProtoFromModified(extracted, proto, { ambapbPrimGraph: primGraph });
         assert.equal(rebuilt.node.length, 1);
-        assert.equal(rebuilt.node[0].op_type, 'CVFlowNVP');
-        const immsAttr = rebuilt.node[0].attribute.find((attr) => attr.name === 'prim_graph_imms');
-        assert.ok(immsAttr);
-        assert.equal(immsAttr.tensors.length, 1);
-        assert.equal(immsAttr.tensors[0].name, 'conv0.weight');
-        assert.deepEqual(Array.from(immsAttr.tensors[0].float_data), [1.0, 2.0, 3.0, 4.0]);
-        const primGraphAttr = rebuilt.node[0].attribute.find((attr) => attr.name === 'prim_graph');
-        assert.ok(primGraphAttr);
-        const parsed = parsePrimGraphJson(primGraphAttr.t);
-        assert.equal(parsed.primitives.length, 2);
-        assert.ok(parsed.primitives.some((prim) => prim.id === 'conv0'));
-        assert.ok(parsed.primitives.some((prim) => prim.id === 'data'));
+        assert.equal(rebuilt.node[0].name, 'conv0');
+        assert.equal(rebuilt.node[0].op_type, 'Conv');
+        const weightInit = (rebuilt.initializer || []).find((tensor) => tensor.name === 'conv0.weight');
+        assert.ok(weightInit);
+        assert.deepEqual(Array.from(weightInit.float_data), [1.0, 2.0, 3.0, 4.0]);
+    });
+
+    it('exports flat runtime graph with runtime CVFlowNVP nodes', () => {
+        const primGraph = loadSyntheticPrimGraph();
+        const proto = buildCheckpointModelProto(primGraph);
+        const model = buildCheckpointViewModel(proto, primGraph);
+        const session = ModelEditor.createSession(model);
+        const flatRuntime = {
+            name: 'conti_1320',
+            inputs: [
+                { name: 'value', value: [{ name: 'value', type: 'float32' }] },
+                { name: 'query', value: [{ name: 'query', type: 'float32' }] }
+            ],
+            outputs: [
+                { name: 'out0', value: [{ name: 'conti_1320_prim_nvp0:0', type: 'float32' }] }
+            ],
+            nodes: [
+                {
+                    name: 'conti_1320_prim_nvp0',
+                    type: { name: 'CVFlowNVP', identifier: 'CVFlowNVP' },
+                    attributes: [],
+                    inputs: [
+                        { name: 'value', value: [{ name: 'value' }] },
+                        { name: 'query', value: [{ name: 'query' }] }
+                    ],
+                    outputs: [
+                        { name: 'out0', value: [{ name: 'conti_1320_prim_nvp0:0' }] }
+                    ]
+                },
+                {
+                    name: 'conti_1320_prim_runtime2',
+                    type: { name: 'BatchCall', identifier: 'BatchCall' },
+                    attributes: [{ name: 'graph_id', type: 'string', value: 'subgraph_body' }],
+                    inputs: [{ name: 'in0', value: [{ name: 'conti_1320_prim_nvp0:0' }] }],
+                    outputs: [{ name: 'out0', value: [{ name: 'conti_1320_prim_runtime2:0' }] }]
+                }
+            ]
+        };
+        session.replaceGraph(0, flatRuntime);
+        assert.equal(shouldExportCheckpointShell(session.modified.getGraph(0), proto), false);
+        const bytes = exportModifiedOnnx(model, session);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        assert.ok(decoded.graph.node.length >= 2);
+        const soleWrapper = decoded.graph.node.length === 1 &&
+            decoded.graph.node[0].op_type === 'CVFlowNVP';
+        assert.ok(!soleWrapper);
+        assert.ok(decoded.graph.node.some((node) => node.name === 'conti_1320_prim_nvp0'));
+        assert.ok(decoded.graph.node.some((node) => node.name === 'conti_1320_prim_runtime2'));
     });
 
     it('exports flat runtime graph without re-wrapping in a CVFlowNVP shell', () => {
@@ -339,13 +382,15 @@ describe('ambapb checkpoint export', () => {
             }]
         };
         session.replaceGraph(0, extracted);
-        const rebuilt = rebuildGraphProtoFromModified(extracted, proto);
+        const rebuilt = rebuildGraphProtoFromModified(extracted, proto, { ambapbPrimGraph: primGraph });
         model.proto.graph = rebuilt;
         const bytes = exportModifiedOnnx(model, session);
         const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
-        const checkpoint = parseCheckpoint(decoded);
-        assert.equal(checkpoint.primGraphImmsAttribute.tensors.length, 1);
-        assert.equal(checkpoint.primGraphImmsAttribute.tensors[0].name, 'conv0.weight');
+        assert.equal(decoded.graph.node.length, 1);
+        assert.equal(decoded.graph.node[0].name, 'conv0');
+        const weightInit = (decoded.graph.initializer || []).find((tensor) => tensor.name === 'conv0.weight');
+        assert.ok(weightInit);
+        assert.equal(weightInit.name, 'conv0.weight');
     });
 
     it('exports checkpoint with UserDefCall on multi-node runtime graph and preserves prim_graph_imms', () => {
@@ -418,16 +463,17 @@ describe('ambapb checkpoint export', () => {
 
         const bytes = exportModifiedOnnx(model, session);
         const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
-        const checkpoint = parseCheckpoint(decoded);
-        assert.equal(checkpoint.primGraphImmsAttribute.tensors.length, 1);
-        assert.equal(checkpoint.primGraphImmsAttribute.tensors[0].name, 'conv0.weight');
-        assert.deepEqual(Array.from(checkpoint.primGraphImmsAttribute.tensors[0].float_data), [1.0, 2.0, 3.0, 4.0]);
-        const compiledAttr = checkpoint.compiledPrimGraphAttribute;
-        assert.ok(compiledAttr && compiledAttr.g);
-        assert.equal(compiledAttr.g.node.length, 3);
+        assert.ok(decoded.graph.node.length >= 3);
+        const soleWrapper = decoded.graph.node.length === 1 &&
+            decoded.graph.node[0].op_type === 'CVFlowNVP';
+        assert.ok(!soleWrapper);
+        assert.ok(decoded.graph.node.some((node) => node.name === 'userdefsubgraph_0'));
+        assert.ok(decoded.graph.node.some((node) => node.name === 'userDefCall_0'));
+        assert.ok(decoded.graph.node.some((node) => node.name === 'output0'));
+        const weightInit = (decoded.graph.initializer || []).find((tensor) => tensor.name === 'conv0.weight');
+        assert.ok(weightInit);
+        assert.deepEqual(Array.from(weightInit.float_data), [1.0, 2.0, 3.0, 4.0]);
     });
-
-    it('exports UserDefSubgraph with tensor-valued prim_graph after CVFlowNVP + BatchCall selection', () => {
         const primGraph = loadSyntheticPrimGraph();
         const producerPrimGraph = {
             primitives: [{
@@ -619,9 +665,8 @@ describe('ambapb checkpoint export', () => {
 
         const rebuilt = rebuildGraphProtoFromModifiedWithAmbapb(runtimeGraph, proto, primGraph);
         assert.ok(rebuilt && rebuilt.graph);
-        const compiled = rebuilt.graph.node[0].attribute.find((attr) => attr.name === COMPILED_PRIM_GRAPH_ATTRIBUTE);
-        assert.ok(compiled && compiled.g);
-        const userDefSubgraphNode = compiled.g.node.find((node) => node.name === 'userdefsubgraph_0');
+        assert.ok(rebuilt.graph.node.length >= 4);
+        const userDefSubgraphNode = rebuilt.graph.node.find((node) => node.name === 'userdefsubgraph_0');
         assert.ok(userDefSubgraphNode);
         const graphAttr = userDefSubgraphNode.attribute.find((attr) => attr.name === 'graph');
         assert.ok(graphAttr && graphAttr.g);
@@ -711,13 +756,16 @@ describe('ambapb checkpoint export', () => {
 
         const bytes = exportModifiedOnnx(model, session);
         const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
-        const checkpoint = parseCheckpoint(decoded);
-        assert.equal(checkpoint.primGraphImmsAttribute.tensors.length, 1);
-        assert.equal(checkpoint.primGraphImmsAttribute.tensors[0].name, 'conv0.weight');
-        assert.deepEqual(Array.from(checkpoint.primGraphImmsAttribute.tensors[0].float_data), [1.0, 2.0, 3.0, 4.0]);
-        const compiledAttr = checkpoint.compiledPrimGraphAttribute;
-        assert.ok(compiledAttr && compiledAttr.g);
-        assert.equal(compiledAttr.g.node.length, 3);
+        assert.ok(decoded.graph.node.length >= 3);
+        const soleWrapper = decoded.graph.node.length === 1 &&
+            decoded.graph.node[0].op_type === 'CVFlowNVP';
+        assert.ok(!soleWrapper);
+        assert.ok(decoded.graph.node.some((node) => node.name === 'userdefsubgraph_0'));
+        assert.ok(decoded.graph.node.some((node) => node.name === 'userDefCall_0'));
+        assert.ok(decoded.graph.node.some((node) => node.name === 'output0'));
+        const weightInit = (decoded.graph.initializer || []).find((tensor) => tensor.name === 'conv0.weight');
+        assert.ok(weightInit);
+        assert.deepEqual(Array.from(weightInit.float_data), [1.0, 2.0, 3.0, 4.0]);
     });
 
     it('preserves FragSubgraph graph attributes during graph rebuild', () => {
@@ -781,7 +829,7 @@ describe('ambapb checkpoint export', () => {
         assert.equal(rebuiltGraphAttr.g.node[0].name, 'inner_nvp');
     });
 
-    it('preserves FragSubgraph graph attributes during checkpoint compiled graph rebuild', () => {
+    it('preserves FragSubgraph graph attributes during flat checkpoint graph rebuild', () => {
         const primGraph = loadSyntheticPrimGraph();
         primGraph.raw.primitives.push({
             id: 'inner_nvp',
@@ -877,15 +925,15 @@ describe('ambapb checkpoint export', () => {
         };
 
         const rebuilt = rebuildGraphProtoFromModified(extracted, proto);
-        const rebuiltCompiled = rebuilt.node[0].attribute.find((attr) => attr.name === 'compiled_prim_graph');
-        assert.ok(rebuiltCompiled && rebuiltCompiled.g);
-        const rebuiltFrag = rebuiltCompiled.g.node.find((node) => node.name === 'frag_node');
+        assert.equal(rebuilt.node.length, 2);
+        const rebuiltFrag = rebuilt.node.find((node) => node.name === 'frag_node');
         assert.ok(rebuiltFrag);
         const rebuiltGraphAttr = rebuiltFrag.attribute.find((attr) => attr.name === 'graph');
         assert.ok(rebuiltGraphAttr && rebuiltGraphAttr.g);
         assert.equal(rebuiltGraphAttr.g.name, 'subgraph_body');
         assert.equal(rebuiltGraphAttr.g.node.length, 1);
         assert.equal(rebuiltGraphAttr.g.node[0].name, 'inner_nvp');
+        assert.ok(rebuilt.node.some((node) => node.name === 'batch_call'));
     });
 
     it('exports compiled_prim_graph attribute edits through exportModifiedOnnx', () => {
