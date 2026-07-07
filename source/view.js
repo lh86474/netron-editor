@@ -500,12 +500,22 @@ view.View = class {
         return this.options && this.options.direction === 'vertical' ? 'vertical' : 'horizontal';
     }
 
+    _bftNavigationHost(pane) {
+        const path = pane ? this._panePathArray(pane.id) : null;
+        if (!Array.isArray(path) || path.length === 0) {
+            return null;
+        }
+        const state = path[0].state;
+        return state && state.context ? state.context : null;
+    }
+
     _applyBftNumbering(pane, displayGraph, sourceGraph, viewGraph) {
         assignBftNumbers({
             displayGraph,
             sourceGraph: sourceGraph || displayGraph,
             viewGraph,
-            layoutDirection: this._bftLayoutDirection()
+            layoutDirection: this._bftLayoutDirection(),
+            navigationHost: this._bftNavigationHost(pane)
         });
         assignEdgeBftNumbers({
             viewGraph,
@@ -542,8 +552,20 @@ view.View = class {
                     continue;
                 }
                 const nested = (compiled.nodes || []).find((entry) => entry === node || (entry.name && node.name && entry.name === node.name));
-                if (nested && nested._bftNumber != null) {
+                if (nested && (nested._bftNumber != null || nested._bftCheckpoint != null)) {
                     return nested;
+                }
+                if (shell.type?.name === 'UserDefSubgraph') {
+                    for (const innerFrag of compiled.nodes || []) {
+                        const innerCompiled = getCompiledGraphFromNode(innerFrag);
+                        if (!innerCompiled) {
+                            continue;
+                        }
+                        const deep = (innerCompiled.nodes || []).find((entry) => entry === node || (entry.name && node.name && entry.name === node.name));
+                        if (deep && deep._bftNumber != null) {
+                            return deep;
+                        }
+                    }
                 }
             }
         }

@@ -262,11 +262,7 @@ const orderedGraphNodes = (graph, viewGraph, options = {}) => {
 };
 
 const assignNumbersToGraph = (graph, viewGraph, counter, options = {}) => {
-    const {
-        useGlobalCounter = true
-    } = options;
-
-    let nextCounter = useGlobalCounter ? counter : 1;
+    let nextCounter = counter;
     for (const entry of orderedGraphNodes(graph, viewGraph, options)) {
         entry.node._bftNumber = nextCounter++;
         entry.node._bftLevel = entry.level;
@@ -340,6 +336,48 @@ const assignNestedFragGraphs = (graph, viewGraph, counter, layoutDirection) => {
     return nextCounter;
 };
 
+const isUserDefNavigationHost = (navigationHost) => {
+    const typeName = navigationHost && navigationHost.type && navigationHost.type.name;
+    return typeName === 'UserDefSubgraph' || typeName === 'UserDefCall';
+};
+
+export const resolveAmbapbNumberingMode = (ctx) => {
+    const { displayGraph, navigationHost = null } = ctx || {};
+    if (!displayGraph) {
+        return 'plain';
+    }
+    if (isUserDefNavigationHost(navigationHost)) {
+        return 'compiledUserDef';
+    }
+    if (displayGraph._ambapbCompiledGraph) {
+        return 'compiledFrag';
+    }
+    if (graphHasAmbapbShells(displayGraph)) {
+        return 'runtime';
+    }
+    return 'plain';
+};
+
+const assignUserDefInnerFrags = (graph, viewGraph, layoutDirection) => {
+    const innerFrags = collectShellNodes(graph, 'FragSubgraph').map((node, index) => ({
+        node,
+        view: findViewNode(viewGraph, node),
+        fallbackIndex: index
+    }));
+    let localCounter = 1;
+    for (const fragEntry of sortEntriesByVisualPosition(innerFrags, layoutDirection).reverse()) {
+        const subGraph = getCompiledGraphFromNode(fragEntry.node);
+        if (!subGraph) {
+            continue;
+        }
+        localCounter = assignNumbersToGraph(subGraph, viewGraph, localCounter, {
+            assignUnreachableAtEnd: true,
+            entryOnlySources: true,
+            layoutDirection
+        });
+    }
+};
+
 const assignUserDefSubgraphs = (graph, viewGraph, counter, layoutDirection) => {
     const userDefs = collectShellNodes(graph, 'UserDefSubgraph');
     const entries = userDefs.map((node, index) => ({
@@ -354,24 +392,7 @@ const assignUserDefSubgraphs = (graph, viewGraph, counter, layoutDirection) => {
         if (!compiled) {
             continue;
         }
-        const innerFrags = collectShellNodes(compiled, 'FragSubgraph').map((node, index) => ({
-            node,
-            view: findViewNode(viewGraph, node),
-            fallbackIndex: index
-        }));
-        let localCounter = 1;
-        for (const fragEntry of sortEntriesByVisualPosition(innerFrags, layoutDirection).reverse()) {
-            const subGraph = getCompiledGraphFromNode(fragEntry.node);
-            if (!subGraph) {
-                continue;
-            }
-            localCounter = assignNumbersToGraph(subGraph, viewGraph, localCounter, {
-                assignUnreachableAtEnd: true,
-                entryOnlySources: true,
-                layoutDirection,
-                useGlobalCounter: false
-            });
-        }
+        assignUserDefInnerFrags(compiled, viewGraph, layoutDirection);
     }
     return nextCounter;
 };
@@ -381,24 +402,32 @@ export const assignBftNumbers = (ctx) => {
         displayGraph,
         sourceGraph = null,
         viewGraph = null,
-        layoutDirection = 'horizontal'
+        layoutDirection = 'horizontal',
+        navigationHost = null
     } = ctx || {};
 
     if (!displayGraph) {
         return;
     }
 
-    clearBftMetadata(displayGraph);
+    const metadataRoot = sourceGraph || displayGraph;
+    clearBftMetadata(metadataRoot);
 
-    let counter = assignNumbersToGraph(displayGraph, viewGraph, 1, {
-        assignUnreachableAtEnd: Boolean(displayGraph._ambapbCompiledGraph),
-        entryOnlySources: Boolean(displayGraph._ambapbCompiledGraph),
-        layoutDirection
-    });
+    const mode = resolveAmbapbNumberingMode({ displayGraph, navigationHost });
 
-    if (graphHasAmbapbShells(displayGraph)) {
-        counter = assignNestedFragGraphs(displayGraph, viewGraph, counter, layoutDirection);
-        assignUserDefSubgraphs(displayGraph, viewGraph, counter, layoutDirection);
+    if (mode === 'compiledUserDef') {
+        assignUserDefInnerFrags(displayGraph, viewGraph, layoutDirection);
+    } else {
+        let counter = assignNumbersToGraph(displayGraph, viewGraph, 1, {
+            assignUnreachableAtEnd: mode === 'compiledFrag',
+            entryOnlySources: mode === 'compiledFrag',
+            layoutDirection
+        });
+
+        if (mode === 'runtime') {
+            counter = assignNestedFragGraphs(displayGraph, viewGraph, counter, layoutDirection);
+            assignUserDefSubgraphs(displayGraph, viewGraph, counter, layoutDirection);
+        }
     }
 
     const batchCallNumbers = buildBatchCallNumberMap(sourceGraph || displayGraph, layoutDirection, viewGraph);

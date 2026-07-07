@@ -10,7 +10,8 @@ import {
     assignEdgeBftNumbers,
     clearBftMetadata,
     getCompiledGraphFromNode,
-    nodeIsInDisplayedGraph
+    nodeIsInDisplayedGraph,
+    resolveAmbapbNumberingMode
 } from '../source/ambapb-bft-numbering.js';
 import { applyBatchInlineExpansions, inlineExpansionBatchCallName } from '../source/ambapb-batch-inline.js';
 
@@ -298,5 +299,329 @@ describe('ambapb bft numbering', () => {
         const graph = buildLinearGraph();
         assert.equal(nodeIsInDisplayedGraph(graph.nodes[0], graph), true);
         assert.equal(nodeIsInDisplayedGraph({ name: 'other' }, graph), false);
+    });
+
+    it('numbers multiple frags left to right after the main graph', () => {
+        const leftInner = {
+            name: 'left_inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('left_in')] }],
+            outputs: [{ name: 'y', value: [tensor('left_out')] }]
+        };
+        const rightInnerA = {
+            name: 'right_a',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('right_in')] }],
+            outputs: [{ name: 'y', value: [tensor('right_mid')] }]
+        };
+        const rightInnerB = {
+            name: 'right_b',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('right_mid')] }],
+            outputs: [{ name: 'y', value: [tensor('right_out')] }]
+        };
+        const leftCompiled = {
+            name: 'left_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('left_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('left_out')] }],
+            nodes: [leftInner]
+        };
+        const rightCompiled = {
+            name: 'right_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('right_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('right_out')] }],
+            nodes: [rightInnerA, rightInnerB]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                {
+                    name: 'frag_left',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: leftCompiled }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'frag_right',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: rightCompiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [graph.nodes[1], { x: 1, y: 0 }],
+                [graph.nodes[2], { x: 1, y: 10 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(graph.nodes[0]._bftNumber, 1);
+        assert.equal(leftInner._bftNumber, 2);
+        assert.equal(rightInnerA._bftNumber, 3);
+        assert.equal(rightInnerB._bftNumber, 4);
+        assert.equal(graph.nodes[1]._bftNumber, undefined);
+        assert.equal(graph.nodes[2]._bftNumber, undefined);
+    });
+
+    it('stores a checkpoint and numbers userdef inner frags right to left locally', () => {
+        const fragLeftInner = {
+            name: 'frag_left_inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('left_in')] }],
+            outputs: [{ name: 'y', value: [tensor('left_out')] }]
+        };
+        const fragRightInner = {
+            name: 'frag_right_inner',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('right_in')] }],
+            outputs: [{ name: 'y', value: [tensor('right_out')] }]
+        };
+        const leftCompiled = {
+            name: 'left_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('left_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('left_out')] }],
+            nodes: [fragLeftInner]
+        };
+        const rightCompiled = {
+            name: 'right_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('right_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('right_out')] }],
+            nodes: [fragRightInner]
+        };
+        const userDefCompiled = {
+            name: 'userdef_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'frag_left',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: leftCompiled }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'frag_right',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: rightCompiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                {
+                    name: 'userdef',
+                    type: { name: 'UserDefSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: userDefCompiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [graph.nodes[1], { x: 1, y: 0 }],
+                [userDefCompiled.nodes[0], { x: 0, y: 0 }],
+                [userDefCompiled.nodes[1], { x: 0, y: 10 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(graph.nodes[0]._bftNumber, 1);
+        assert.equal(graph.nodes[1]._bftCheckpoint, 2);
+        assert.equal(graph.nodes[1]._bftNumber, undefined);
+        assert.equal(fragRightInner._bftNumber, 1);
+        assert.equal(fragLeftInner._bftNumber, 2);
+    });
+
+    it('uses local numbering when viewing a userdef compiled graph directly', () => {
+        const inner = {
+            name: 'inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'y', value: [tensor('sub_out')] }]
+        };
+        const compiled = {
+            name: 'frag_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('sub_out')] }],
+            nodes: [inner]
+        };
+        const userDefCompiled = {
+            name: 'userdef_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: compiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: userDefCompiled,
+            sourceGraph: userDefCompiled,
+            navigationHost: { type: { name: 'UserDefSubgraph' } },
+            viewGraph: mockViewGraph(new Map([
+                [userDefCompiled.nodes[0], { x: 0, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(resolveAmbapbNumberingMode({
+            displayGraph: userDefCompiled,
+            navigationHost: { type: { name: 'UserDefSubgraph' } }
+        }), 'compiledUserDef');
+        assert.equal(inner._bftNumber, 1);
+        assert.equal(userDefCompiled.nodes[0]._bftNumber, undefined);
+    });
+
+    it('numbers only the navigated compiled graph, not sibling frags on the parent', () => {
+        const viewedInner = {
+            name: 'viewed_inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('viewed_in')] }],
+            outputs: [{ name: 'y', value: [tensor('viewed_out')] }]
+        };
+        const siblingInner = {
+            name: 'sibling_inner',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('sibling_in')] }],
+            outputs: [{ name: 'y', value: [tensor('sibling_out')] }]
+        };
+        const viewedCompiled = {
+            name: 'viewed_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('viewed_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('viewed_out')] }],
+            nodes: [viewedInner]
+        };
+        const siblingCompiled = {
+            name: 'sibling_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('sibling_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('sibling_out')] }],
+            nodes: [siblingInner]
+        };
+        const runtime = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                {
+                    name: 'viewed_frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: viewedCompiled }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'sibling_frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: siblingCompiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: viewedCompiled,
+            sourceGraph: viewedCompiled,
+            navigationHost: { type: { name: 'FragSubgraph' } },
+            viewGraph: mockViewGraph(new Map([
+                [viewedInner, { x: 0, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(viewedInner._bftNumber, 1);
+        assert.equal(siblingInner._bftNumber, undefined);
+        assert.equal(runtime.nodes[0]._bftNumber, undefined);
+    });
+
+    it('hides canvas labels for collapsed frag inner nodes on the runtime graph', () => {
+        const inner = {
+            name: 'inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'y', value: [tensor('sub_out')] }]
+        };
+        const compiled = {
+            name: 'compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('sub_out')] }],
+            nodes: [inner]
+        };
+        const runtime = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: compiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: runtime,
+            sourceGraph: runtime,
+            viewGraph: mockViewGraph(new Map()),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(nodeIsInDisplayedGraph(runtime.nodes[0], runtime), true);
+        assert.equal(nodeIsInDisplayedGraph(inner, runtime), false);
+        assert.equal(inner._bftNumber, 2);
     });
 });
