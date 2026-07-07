@@ -261,7 +261,7 @@ export class DeltaTracker {
                 ...change,
                 entityId: newId,
                 parentId: change.parentId ?
-                    this._remapKey(change.parentId, orderedEntires):
+                    this._remapKey(change.parentId, orderedEntries):
                     change.parentId
             });
         }
