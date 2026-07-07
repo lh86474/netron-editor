@@ -6,9 +6,46 @@ const grapher = {};
 grapher.BFT_RIGHT_LABEL_MIN_WIDTH = 75;
 // Extra width reserved on the left for compact nodes (gap + label).
 grapher.BFT_RIGHT_LABEL_GUTTER = 28;
+// guarantee 20 px for the albel
+grapher.BFT_LABEL_RESERVE = 20;
+// title text uses this much of header before we widen
+grapher.BFT_HEADER_TITLE_MAJORITY = 0.55;
 
 grapher.isCompactNodeWidth = (naturalWidth) => {
     return naturalWidth < grapher.BFT_RIGHT_LABEL_MIN_WIDTH;
+};
+
+grapher.headerTitleTextWidth = (titleEntry) => {
+    if (!titleEntry) {
+        return 0;
+    }
+    if (titleEntry.textWidth != null) {
+        return titleEntry.textWidth;
+    }
+    const pad = titleEntry.padding ?? 7;
+    return Math.max(0, titleEntry.width - pad - pad);
+};
+
+grapher.headerNeedsBftLabelGutter = (headerBlock, nodeWidth) => {
+    if (!headerBlock || !headerBlock._entries || headerBlock._entries.length === 0) {
+        return false;
+    }
+    const titleEntry = headerBlock._entries[0];
+    const textWidth = grapher.headerTitleTextWidth(titleEntry);
+    const otherWidth = headerBlock._entries.slice(1).reduce((sum, entry) => sum + entry.width, 0);
+    const titleArea = nodeWidth - otherWidth;
+    if (titleArea <= 0) {
+        return false;
+    }
+    // Majority check (your request)
+    if (textWidth / titleArea >= grapher.BFT_HEADER_TITLE_MAJORITY) {
+        return true;
+    }
+    // Overlap check (catches borderline cases like Relu + "64")
+    const titleLeft = titleEntry.tx ?? 7;
+    const textEnd = titleLeft + textWidth;
+    const labelStart = nodeWidth - 7 - grapher.BFT_LABEL_RESERVE;
+    return textEnd > labelStart;
 };
 
 grapher.Graph = class {
@@ -657,6 +694,7 @@ grapher.Node.Header.Entry = class {
         this.text.removeAttribute('x');
         this.text.removeAttribute('y');
         const boundingBox = this.text.getBBox();
+        this.textWidth = boundingBox.width;
         if (x !== null) {
             this.text.setAttribute('x', x);
         }
@@ -664,7 +702,7 @@ grapher.Node.Header.Entry = class {
             this.text.setAttribute('y', y);
         }
         // Here, we compute the width and height of the header entry
-        this.width = boundingBox.width + xPadding + xPadding;
+        this.width = this.textWidth + xPadding + xPadding;
         this.height = boundingBox.height + yPadding + yPadding;
         this.tx = xPadding;
         this.ty = yPadding - boundingBox.y;
@@ -1174,5 +1212,9 @@ export const {
     Argument,
     BFT_RIGHT_LABEL_MIN_WIDTH,
     BFT_RIGHT_LABEL_GUTTER,
-    isCompactNodeWidth
+    BFT_LABEL_RESERVE,
+    BFT_HEADER_TITLE_MAJORITY,
+    isCompactNodeWidth,
+    headerTitleTextWidth,
+    headerNeedsBftLabelGutter
 } = grapher;

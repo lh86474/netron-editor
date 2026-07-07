@@ -15,6 +15,13 @@ import {
 } from '../source/ambapb-bft-numbering.js';
 import { applyBatchInlineExpansions, inlineExpansionBatchCallName } from '../source/ambapb-batch-inline.js';
 
+import {
+    isCompactNodeWidth,
+    headerTitleTextWidth,
+    headerNeedsBftLabelGutter,
+    BFT_HEADER_TITLE_MAJORITY
+} from '../source/grapher.js';
+
 const tensor = (name) => ({ name, type: 'float32' });
 
 const buildLinearGraph = () => ({
@@ -286,6 +293,23 @@ describe('ambapb bft numbering', () => {
         assignEdgeBftNumbers({ viewGraph, layoutDirection: 'horizontal' });
         assert.equal(value1._bftEdgeNumber, 1);
         assert.equal(value2._bftEdgeNumber, 2);
+    });
+
+    it('detects when header title fills majority of header width', () => {
+        const titleEntry = { textWidth: 120, width: 134, padding: 7, tx: 7 };
+        assert.equal(headerTitleTextWidth(titleEntry), 120);
+
+        const shortHeader = {
+            width: 134,
+            _entries: [titleEntry]
+        };
+        assert.equal(headerNeedsBftLabelGutter(shortHeader, 134), true);
+
+        const longHeader = {
+            width: 200,
+            _entries: [{ textWidth: 40, width: 54, padding: 7, tx: 7 }]
+        };
+        assert.equal(headerNeedsBftLabelGutter(longHeader, 200), false);
     });
 
     it('detects compact nodes by measured width', () => {

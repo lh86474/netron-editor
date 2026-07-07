@@ -6653,11 +6653,18 @@ view.Node = class extends grapher.Node {
     async measure() {
         await super.measure();
         this._naturalWidth = this.width;
-        if (grapher.isCompactNodeWidth(this._naturalWidth)) {
+
+        const headerBlock = this.blocks[0];
+        const needsLabelGutter = 
+            grapher.isCompactNodeWidth(this._naturalWidth) ||
+            (headerBlock instanceof grapher.Node.Header &&
+                grapher.headerNeedsBftLabelGutter(headerBlock, this._naturalWidth));
+        
+        if (needsLabelGutter) {
             this.width = this._naturalWidth + grapher.BFT_RIGHT_LABEL_GUTTER;
-            for (const block of this.blocks) {
+             for (const block of this.blocks) {
                 block.width = this.width;
-            }
+             }
         }
     }
 
