@@ -6653,28 +6653,11 @@ view.Node = class extends grapher.Node {
     async measure() {
         await super.measure();
         this._naturalWidth = this.width;
-        this._bftLeftGutter = 0;
-        this._bftLabelOnLeft = false;
         if (grapher.isCompactNodeWidth(this._naturalWidth)) {
-            this._bftLeftGutter = grapher.BFT_LEFT_GUTTER;
-            this._bftLabelOnLeft = true;
-            this.width = this._naturalWidth + this._bftLeftGutter;
+            this.width = this._naturalWidth + grapher.BFT_RIGHT_LABEL_GUTTER;
             for (const block of this.blocks) {
                 block.width = this.width;
             }
-        }
-    }
-
-    async layout() {
-        const gutter = this._bftLeftGutter || 0;
-        let y = 0;
-        for (const block of this.blocks) {
-            block.x = gutter;
-            block.y = y;
-            block.width = this.width;
-            // eslint-disable-next-line no-await-in-loop
-            await block.layout();
-            y += block.height;
         }
     }
 
@@ -6724,13 +6707,8 @@ view.Node = class extends grapher.Node {
         const headerHeight = this.blocks && this.blocks.length > 0 ? this.blocks[0].height : this.height;
         const y = Math.max(14, (headerHeight / 2) + 5);
         text.textContent = String(this.value._bftNumber);
-        if (this._bftLabelOnLeft) {
-            text.setAttribute('x', String(pad));
-            text.setAttribute('text-anchor', 'start');
-        } else {
-            text.setAttribute('x', String(this.width - pad));
-            text.setAttribute('text-anchor', 'end');
-        }
+        text.setAttribute('x', String(this.width - pad));
+        text.setAttribute('text-anchor', 'end');
         text.setAttribute('y', String(y));
     }
 

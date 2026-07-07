@@ -5,7 +5,7 @@ const grapher = {};
 // Matches grapher.ArgumentList.measure() floor width.
 grapher.BFT_RIGHT_LABEL_MIN_WIDTH = 75;
 // Extra width reserved on the left for compact nodes (gap + label).
-grapher.BFT_LEFT_GUTTER = 28;
+grapher.BFT_RIGHT_LABEL_GUTTER = 28;
 
 grapher.isCompactNodeWidth = (naturalWidth) => {
     return naturalWidth < grapher.BFT_RIGHT_LABEL_MIN_WIDTH;
@@ -1173,6 +1173,6 @@ export const {
     Edge,
     Argument,
     BFT_RIGHT_LABEL_MIN_WIDTH,
-    BFT_LEFT_GUTTER,
+    BFT_RIGHT_LABEL_GUTTER,
     isCompactNodeWidth
 } = grapher;
