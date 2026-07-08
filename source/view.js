@@ -90,6 +90,7 @@ view.View = class {
         this._leftPane = null;
         this._rightPane = null;
         this.__activePane = 'modified';
+        this._focusedPaneId = null;
         this._leftPath = [];
         this._rightPath = [];
         this._mergePanePaths = new Map();
@@ -645,28 +646,41 @@ view.View = class {
         }
     }
 
-    find() {
+   find() {
         if (this._target && this._sidebar.identifier !== 'find') {
-            this._target.select(null);
-            const sidebar = new view.FindSidebar(this, this._find, this.activeTarget, this.activeSignature);
+            const grapher = this._focusedPaneGrapher();
+            const searchTarget = this._focusedPaneSearchTarget();
+            const searchSignature = this._focusedPaneSearchSignature();
+            if (grapher) {
+                grapher.select(null);
+            }
+            const sidebar = new view.FindSidebar(this, this._find, searchTarget, searchSignature);
             sidebar.on('state-changed', (sender, state) => {
                 this._find = state;
             });
             sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value], 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.select([value], 'sidebar'));
+                }
             });
             sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
+                if (grapher) {
+                    grapher.focus([value]);
+                }
             });
             sidebar.on('blur', (sender, value) => {
-                this._target.blur([value]);
+                if (grapher) {
+                    grapher.blur([value]);
+                }
             });
             sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value, 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.activate(value, 'sidebar'));
+                }
             });
             this._sidebar.open(sidebar, 'Find');
         }
-    }
+    } 
 
     get model() {
         return this._model;
@@ -922,6 +936,29 @@ view.View = class {
         return this._target;
     }
 
+    _focusedPaneIdOrDefault() {
+        return this._focusedPaneId || this._activePane || 'modified';
+    }
+
+    _focusedPaneGrapher() {
+        const paneId = this._focusedPaneIdOrDefault();
+        return this._paneGraph(paneId) || this._grapherForTarget(this.activeTarget) || this._target;
+    }
+
+    _focusedPaneSearchTarget() {
+        const grapher = this._focusedPaneGrapher();
+        if (grapher && grapher.target) {
+            return grapher.target;
+        }
+        const path = this._panePathArray(this._focusedPaneIdOrDefault());
+        return path && path.length > 0 ? path[0].target : this.activeTarget;
+    }
+
+    _focusedPaneSearchSignature() {
+        const path = this._panePathArray(this._focusedPaneIdOrDefault());
+        return path && path.length > 0 ? path[0].signature : this.activeSignature;
+    }
+
     //Search order: merge panes, main editor panes (original modified)
     // If we can't find the panes, we just return this._target, the original single-grapher behavior
     _grapherForTarget(target) {
@@ -974,6 +1011,34 @@ view.View = class {
         }
         return null;
     }
+
+    _setFocusedPane(paneId) {
+        if (!paneId || this._focusedPaneId === paneId) {
+            return;
+        }
+        this._focusedPaneId = paneId;
+        if (paneId === 'original' || paneId === 'modified') {
+            this._activePane = paneId;
+        }
+        this._updatePaneFocusVisuals();
+    }
+
+    _updatePaneFocusVisuals() {
+        for (const id of ['original', 'modified', 'merge-upstream', 'merge-downstream', 'merge-preview']) {
+            const pane = this._paneById(id);
+            if (pane && pane.container) {
+                pane.container.classList.toggle(
+                    'graph-pane-focused',
+                    this._focusedPaneId !== null && id === this._focusedPaneId
+                );
+            }
+        }
+    }
+
+    _clearPaneFocusVisuals() {
+        this._focusedPaneId = null;
+        this._updatePaneFocusVisuals();
+    }  
 
     _isMergePane(pane) {
         return Boolean(pane && pane.id && pane.id.startsWith('merge-'));
@@ -1066,15 +1131,12 @@ view.View = class {
         if (!pane || !pane.container) {
             return null;
         }
-        if (pane.id === 'original') {
-            return pane.container;
-        }
-        return this._ensurePaneScroll(pane.container);
+       return this._ensurePaneScroll(pane.container);
     }
 
     _clearPaneGraphContent(pane) {
         const container = pane.container;
-        const scroll = pane.id === 'original' ? null : container.querySelector(':scope > .graph-pane-scroll');
+        const scroll = container.querySelector(':scope > .graph-pane-scroll');
         if (scroll) {
             while (scroll.lastChild) {
                 scroll.removeChild(scroll.lastChild);
@@ -1154,9 +1216,7 @@ view.View = class {
                 if (i > 0) {
                     await this._popPanePathTo(paneId, i);
                 } else {
-                    if (paneId === 'original' || paneId === 'modified') {
-                        this._activePane = paneId;
-                    }
+                    this._setFocusedPane(paneId); 
                     await this.showTargetProperties(target);
                 }
             });
@@ -3257,10 +3317,8 @@ view.View = class {
     // render the graph in the pane
     async _renderGraphInPane(pane, target, signature, state, model) {
         const container = pane.container;
-        if (pane.id !== 'original') {
-            this._ensurePaneScroll(container);
-            this._ensurePanePath(container, pane.id);
-        }
+        this._ensurePaneScroll(container);
+        this._ensurePanePath(container, pane.id); 
         this._clearPaneGraphContent(pane);
         let status = '';
         if (target) {
@@ -6090,8 +6148,8 @@ view.Graph = class extends grapher.Graph {
             this._events.pointerdown = (e) => this._pointerDownHandler(e);
             this._events.touchstart = (e) => this._touchStartHandler(e);
             this._events.focuspane = () => {
-                if (this._paneId === 'original' || this._paneId === 'modified') {
-                    this.view._activePane = this._paneId;
+                if (this._paneId) {
+                    this.view._setFocusedPane(this._paneId);
                 }
             };
             const element = this._containerElement();
