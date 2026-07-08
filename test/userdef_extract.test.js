@@ -536,4 +536,83 @@ describe('UserDefCall and boundary selection', () => {
             extractSubgraph(graph, beginNodes, endNodes);
         });
     });
+
+    it('treats weight initializers as internal inputs, not boundary begins', () => {
+        const weight = { name: 'W', initializer: {} };
+        const activation = { name: 'act' };
+        const convOut = { name: 'conv_out' };
+        const graph = {
+            name: 'main',
+            inputs: [{ name: 'input', value: [activation] }],
+            outputs: [],
+            nodes: [{
+                name: 'Conv1',
+                type: { name: 'Conv' },
+                inputs: [
+                    { name: 'X', value: [activation] },
+                    { name: 'W', value: [weight] }
+                ],
+                outputs: [{ name: 'Y', value: [convOut] }]
+            }]
+        };
+        const conv = graph.nodes[0];
+        const { beginNodes, endNodes } = findBoundaryNodes(graph, [conv]);
+        assert.equal(beginNodes.length, 1);
+        assert.equal(beginNodes[0].name, 'Conv1');
+        assert.equal(endNodes.length, 1);
+        assert.equal(endNodes[0].name, 'Conv1');
+    });
+
+    it('identifies diamond fork boundaries when only one branch is selected', () => {
+        const rootOut = { name: 'root_out' };
+        const leftOut = { name: 'left_out' };
+        const rightOut = { name: 'right_out' };
+        const mergeOut = { name: 'merge_out' };
+        const graph = {
+            name: 'diamond',
+            inputs: [{ name: 'input', value: [{ name: 'graph_in' }] }],
+            outputs: [{ name: 'output', value: [mergeOut] }],
+            nodes: [
+                {
+                    name: 'root',
+                    type: { name: 'Conv' },
+                    inputs: [{ name: 'x', value: [{ name: 'graph_in' }] }],
+                    outputs: [{ name: 'y', value: [rootOut] }]
+                },
+                {
+                    name: 'left',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [rootOut] }],
+                    outputs: [{ name: 'y', value: [leftOut] }]
+                },
+                {
+                    name: 'right',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [rootOut] }],
+                    outputs: [{ name: 'y', value: [rightOut] }]
+                },
+                {
+                    name: 'merge',
+                    type: { name: 'Add' },
+                    inputs: [
+                        { name: 'a', value: [leftOut] },
+                        { name: 'b', value: [rightOut] }
+                    ],
+                    outputs: [{ name: 'y', value: [mergeOut] }]
+                }
+            ]
+        };
+        const selected = [graph.nodes[1]];
+        const { beginNodes, endNodes } = findBoundaryNodes(graph, selected);
+        assert.deepEqual(beginNodes.map((node) => node.name), ['left']);
+        assert.deepEqual(endNodes.map((node) => node.name), ['left']);
+    });
+
+    it('extracts subgraphs with unicode node names', () => {
+        const graph = mockChainModel.modules[0];
+        const relu = graph.nodes[1];
+        relu.name = '节点_α';
+        const extracted = extractSubgraph(graph, graph.nodes[0], relu);
+        assert.equal(extracted.nodes[1].name, '节点_α');
+    });
 });

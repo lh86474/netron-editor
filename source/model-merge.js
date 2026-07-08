@@ -16,9 +16,23 @@ import {
     collectGraphNamesForMerge as collectGraphNames,
     validateGraphForMerge as validateGraph
 } from './onnx-export.js';
-import { detectCheckpoint, parseCheckpoint } from './ambapb.js';
+import { detectCheckpoint, parseCheckpoint, findCVFlowNVPNode, getPrimGraphAttribute } from './ambapb.js';
 
 const DEFAULT_DOWNSTREAM_PREFIX = 'downstream_';
+
+const checkpointModelProtoForGraph = (graph) => {
+    if (!graph) {
+        return null;
+    }
+    if (detectCheckpoint({ graph })) {
+        return { graph };
+    }
+    const wrapperNode = findCVFlowNVPNode(graph);
+    if (wrapperNode && getPrimGraphAttribute(wrapperNode)) {
+        return { graph, producer_name: 'cvflowbackend' };
+    }
+    return null;
+};
 // Since onnx.proto works with logical identifiers to represent data types, we have to map the numbers back to a string
 // There are probably more data types that I'll have to worry about in the future, but this works for now.
 const elemTypeNames = new Map([
@@ -111,7 +125,6 @@ const getDimensions = (dimension) => {
 };
 
 const convertOportToValueInfo = (name, oport) => {
-    console.log('DEBUG OPORT:', JSON.stringify(oport, null, 2));
     const valueInfo = new onnx.ValueInfoProto();
     valueInfo.name = name;
 
@@ -186,16 +199,18 @@ const extractCheckpointIO = (modelProto) => {
 
 // if graph and output exist, get the output from array, else empty and will throw error later on
 export const extractGraphOutputs = (graph) => {
-    if (graph && detectCheckpoint({ graph })) {
-        const io = extractCheckpointIO({ graph });
+    const checkpointProto = checkpointModelProtoForGraph(graph);
+    if (checkpointProto) {
+        const io = extractCheckpointIO(checkpointProto);
         return io.outputs;
     }
     return Array.isArray(graph && graph.output) ? graph.output.slice() : [];
 };
 
 export const extractGraphInputs = (graph) => {
-    if (graph && detectCheckpoint({ graph })) {
-        const io = extractCheckpointIO({ graph });
+    const checkpointProto = checkpointModelProtoForGraph(graph);
+    if (checkpointProto) {
+        const io = extractCheckpointIO(checkpointProto);
         return io.inputs;
     }
     return Array.isArray(graph && graph.input) ? graph.input.slice() : [];
@@ -276,8 +291,9 @@ export const resolveValueType = (graph, name, options = {}) => {
     if (!graph || !name) {
         return null;
     }
-    if (detectCheckpoint({ graph })) {
-        const io = extractCheckpointIO({ graph });
+    const checkpointProto = checkpointModelProtoForGraph(graph);
+    if (checkpointProto) {
+        const io = extractCheckpointIO(checkpointProto);
         const match = io.inputs.find((val) => val.name === name) || io.outputs.find((val) => val.name === name);
         if (match) {
             return match.type;
@@ -829,8 +845,8 @@ export const applyMappingRenames = (downstreamGraph, mapping, prefixMap = new Ma
 };
 
 export const removeMappedDownstreamInputs = (downstreamGraph, mapping) => {
-    const mappedUpstreamNames = new Set((mapping || []).map((entry) => entry.upstream));
-    downstreamGraph.input = (downstreamGraph.input || []).filter((value) => !mappedUpstreamNames.has(value.name));
+    const mappedDownstreamNames = new Set((mapping || []).map((entry) => entry.downstream));
+    downstreamGraph.input = (downstreamGraph.input || []).filter((value) => !mappedDownstreamNames.has(value.name));
 };
 
 // dedupeValueInfo is used to deduplicate the value info
