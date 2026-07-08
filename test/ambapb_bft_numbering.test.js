@@ -1166,4 +1166,25 @@ describe('ambapb bft numbering', () => {
         assert.equal(location.ancestors[1].shell.name, 'frag_left');
         assert.equal(formatBftNodeLocation(graph, fragInner), 'userdef / frag_left');
     });
+
+    it('preserves global order numbers when viewing a drilled frag compiled graph', () => {
+        // reuse runtime graph from 'findNodeByBftOrder finds nested subgraph nodes' (~1075)
+        assignBftNumbers({
+            displayGraph: compiled,
+            sourceGraph: graph,          // runtime root
+            navigationHost: { type: { name: 'FragSubgraph' } },
+            viewGraph: { find: () => null },
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(innerA._bftNumber, 2);  // was 1 before fix
+        assert.equal(innerB._bftNumber, 3);
+    });
+
+    it('resolveShellGraphBlockKey matches expander block keys', () => {
+        const entity = locateNodeEntity(model, fragShell);
+        assert.equal(
+            `${entity.nodeId}/compiled_prim_graph`,
+            'graph:0/node:1/compiled_prim_graph'
+        );
+    });
 });

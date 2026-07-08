@@ -37,6 +37,20 @@ export const getCompiledGraphFromNode = (node) => {
     return null;
 };
 
+export const getCompiledGraphAttrName = (node) => {
+    if (!node) {
+        return null;
+    }
+    for (const name of COMPILED_GRAPH_ATTRS) {
+        for (const entry of graphArguments(node)) {
+            if (entry.name === name && entry.type === 'graph' && entry.value) {
+                return name;
+            }
+        }
+    }
+    return null;
+};
+
 const isShellNode = (node, skipTypes = FRAG_SHELL_TYPES) => {
     return Boolean(node && node.type && skipTypes.has(node.type.name));
 };
@@ -335,6 +349,20 @@ const applyPersistedInlineBftNumbers = (displayGraph, sourceBftByNode) => {
     }
 };
 
+const applyPersistedBftNumbersToGraph = (graph, sourceBftByNode) => {
+    if (!graph || !sourceBftByNode || sourceBftByNode.size === 0) {
+        return;
+    }
+    for (const nested of collectNestedGraphs(graph)) {
+        for (const node of nested.nodes || []) {
+            const persisted = sourceBftByNode.get(node);
+            if (persisted != null) {
+                node._bftNumber = persisted;
+            }
+        }
+    }
+};
+
 const minBftNumberInGraph = (graph) => {
     if (!graph) {
         return null;
@@ -442,10 +470,10 @@ export const assignBftNumbers = (ctx) => {
     const mode = resolveAmbapbNumberingMode({ displayGraph, navigationHost });
     const compiledLike = mode === 'compiledFrag';
     const runtimeLike = mode === 'runtime';
+    const drilledView = compiledLike && sourceGraph && sourceGraph !== displayGraph;
 
-    let batchCallNumbers = new Map();
     let sourceBftByNode = new Map();
-    if (sourceGraph && runtimeLike) {
+    if (sourceGraph && (runtimeLike || drilledView)) {
         let sourceCounter = assignNumbersToGraph(sourceGraph, viewGraph, 1, {
             assignUnreachableAtEnd: false,
             entryOnlySources: false,
@@ -456,14 +484,18 @@ export const assignBftNumbers = (ctx) => {
         clearBftMetadata(sourceGraph);
     }
 
-    let counter = assignNumbersToGraph(displayGraph, viewGraph, 1, {
-        assignUnreachableAtEnd: compiledLike,
-        entryOnlySources: compiledLike,
-        layoutDirection
-    });
+    if (drilledView && sourceBftByNode.size > 0) {
+        applyPersistedBftNumbersToGraph(displayGraph, sourceBftByNode);
+    } else {
+        let counter = assignNumbersToGraph(displayGraph, viewGraph, 1, {
+            assignUnreachableAtEnd: compiledLike,
+            entryOnlySources: compiledLike,
+            layoutDirection
+        });
 
-    if (mode === 'runtime' || mode === 'compiledFrag') {
-        assignNestedShellGraphs(displayGraph, viewGraph, counter, layoutDirection);
+        if (mode === 'runtime' || mode === 'compiledFrag') {
+            assignNestedShellGraphs(displayGraph, viewGraph, counter, layoutDirection);
+        }
     }
 
     const displayTraversalByNode = new Map();

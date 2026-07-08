@@ -31,6 +31,7 @@ import {
     assignEdgeBftNumbers,
     formatBftNodeLocation,
     getBftOrderRange,
+    getCompiledGraphAttrName,
     getCompiledGraphFromNode,
     locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
@@ -515,17 +516,27 @@ view.View = class {
 
     _bftNavigationHost(pane) {
         const path = pane ? this._panePathArray(pane.id) : null;
-        if (!Array.isArray(path) || path.length === 0) {
+        if (!Array.isArray(path) || path.length < 2) {
             return null;
         }
-        const state = path[0].state;
+        const state = path[1].state;
         return state && state.context ? state.context : null;
     }
 
+    _resolveRootPaneSourceGraph(pane, currentSourceGraph) {
+        const path = pane ? this._panePathArray(pane.id) : null;
+        if (!path || path.length <= 1) {
+            return currentSourceGraph;
+        }
+        const rootTarget = path[path.length -1].target;
+        return this._resolvePaneSourceGraph(pane, rootTarget) || currentSourceGraph;
+    }
+
     _applyBftNumbering(pane, displayGraph, sourceGraph, viewGraph) {
+        const rootSourceGraph = this._resolveRootPaneSourceGraph(pane, sourceGraph);
         assignBftNumbers({
             displayGraph,
-            sourceGraph: sourceGraph || displayGraph,
+            sourceGraph: rootSourceGraph || sourceGraph || displayGraph,
             viewGraph,
             layoutDirection: this._bftLayoutDirection(),
             navigationHost: this._bftNavigationHost(pane)
@@ -991,6 +1002,41 @@ view.View = class {
         return path && path.length > 0 ? path[0].signature : this.activeSignature;
     }
 
+    _resolveShellGraphBlockKey(shellNode) {
+        if (!shellNode || !this._editSession) {
+            return null;
+        }
+        const entity = locateNodeEntity(this._editSession.modified.model, shellNode);
+        if (!entity || !entity.nodeId) {
+            return null;
+        }
+        const attrName = getCompiledGraphAttrName(shellNode);
+        if (!attrName) {
+            return null;
+        }
+        return `${entity.nodeId}/${attrName}`;
+    }
+
+    async _expandBlocksForBftLocation(location, paneId) {
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher || !location || !Array.isArray(location.ancestors)) {
+            return false;
+        }
+        let changed = false;
+        for (const ancestor of location.ancestors) {
+            const blockKey = this._resolveShellGraphBlockKey(ancestor.shell);
+            if (blockKey && !grapher.blocks.has(blockKey)) {
+                grapher.blocks.add(blockKey);
+                changed = true;
+            }
+        }
+        if (!changed) {
+            return true;
+        }
+        await this.refresh(null, { paneId, busy: false });
+        return true;
+    }
+
     async _navigateAndActivateBftNode(modelNode, source = 'sidebar') {
         const grapher = this._focusedPaneGrapher();
         if (!grapher || !modelNode) {
@@ -1005,8 +1051,9 @@ view.View = class {
             return false;
         }
         const paneId = this._focusedPaneIdOrDefault();
-        const parent = location.ancestors[location.ancestors.length - 1];
-        await this.pushTarget(location.graph, parent.shell, paneId);
+        if (!await this._expandBlocksForBftLocation(location, paneId)) {
+            return false;
+        }
         return this._scrollToNodeInFocusedPane(modelNode, source);
     }
 
@@ -1025,8 +1072,9 @@ view.View = class {
             return;
         }
         const paneId = this._focusedPaneIdOrDefault();
-        const parent = location.ancestors[location.ancestors.length - 1];
-        await this.pushTarget(location.graph, parent.shell, paneId);
+        if (!await this._expandBlocksForBftLocation(location, paneId)) {
+            return;
+        }
         const refreshed = this._focusedPaneGrapher();
         if (refreshed) {
             refreshed.scrollTo(refreshed.select([modelNode], source));
