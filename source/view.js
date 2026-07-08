@@ -80,6 +80,7 @@ view.View = class {
         this._leftPane = null;
         this._rightPane = null;
         this.__activePane = 'modified';
+        this._focusedPaneId = null;
         this._leftPath = [];
         this._rightPath = [];
         this._mergePanePaths = new Map();
@@ -864,6 +865,34 @@ view.View = class {
         return null;
     }
 
+    _setFocusedPane(paneId) {
+        if (!paneId || this._focusedPaneId === paneId) {
+            return;
+        }
+        this._focusedPaneId = paneId;
+        if (paneId === 'original' || paneId === 'modified') {
+            this._activePane = paneId;
+        }
+        this._updatePaneFocusVisuals();
+    }
+
+    _updatePaneFocusVisuals() {
+        for (const id of ['original', 'modified', 'merge-upstream', 'merge-downstream', 'merge-preview']) {
+            const pane = this._paneById(id);
+            if (pane && pane.container) {
+                pane.container.classList.toggle(
+                    'graph-pane-focused',
+                    this._focusedPaneId !== null && id === this._focusedPaneId
+                );
+            }
+        }
+    }
+
+    _clearPaneFocusVisuals() {
+        this._focusedPaneId = null;
+        this._updatePaneFocusVisuals();
+    }  
+
     _isMergePane(pane) {
         return Boolean(pane && pane.id && pane.id.startsWith('merge-'));
     }
@@ -955,15 +984,12 @@ view.View = class {
         if (!pane || !pane.container) {
             return null;
         }
-        if (pane.id === 'original') {
-            return pane.container;
-        }
-        return this._ensurePaneScroll(pane.container);
+       return this._ensurePaneScroll(pane.container);
     }
 
     _clearPaneGraphContent(pane) {
         const container = pane.container;
-        const scroll = pane.id === 'original' ? null : container.querySelector(':scope > .graph-pane-scroll');
+        const scroll = container.querySelector(':scope > .graph-pane-scroll');
         if (scroll) {
             while (scroll.lastChild) {
                 scroll.removeChild(scroll.lastChild);
@@ -1043,9 +1069,7 @@ view.View = class {
                 if (i > 0) {
                     await this._popPanePathTo(paneId, i);
                 } else {
-                    if (paneId === 'original' || paneId === 'modified') {
-                        this._activePane = paneId;
-                    }
+                    this._setFocusedPane(paneId); 
                     await this.showTargetProperties(target);
                 }
             });
@@ -2921,10 +2945,8 @@ view.View = class {
     // render the graph in the pane
     async _renderGraphInPane(pane, target, signature, state, model) {
         const container = pane.container;
-        if (pane.id !== 'original') {
-            this._ensurePaneScroll(container);
-            this._ensurePanePath(container, pane.id);
-        }
+        this._ensurePaneScroll(container);
+        this._ensurePanePath(container, pane.id); 
         this._clearPaneGraphContent(pane);
         let status = '';
         if (target) {
@@ -5766,8 +5788,8 @@ view.Graph = class extends grapher.Graph {
             this._events.pointerdown = (e) => this._pointerDownHandler(e);
             this._events.touchstart = (e) => this._touchStartHandler(e);
             this._events.focuspane = () => {
-                if (this._paneId === 'original' || this._paneId === 'modified') {
-                    this.view._activePane = this._paneId;
+                if (this._paneId) {
+                    this.view._setFocusedPane(this._paneId);
                 }
             };
             const element = this._containerElement();

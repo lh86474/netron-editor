@@ -287,6 +287,7 @@ export class MergeWorkspaceController {
         this._session = null;
         const page = this._returnPage === 'merge-workspace' ? 'welcome' : this._returnPage;
         this._view._clearMergePanePaths();
+        this._view._clearPaneFocusVisuals();
         for (const id of ['merge-upstream', 'merge-downstream', 'merge-preview']) {
             this._view._updatePanePathUI(id);
         }
