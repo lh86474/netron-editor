@@ -561,6 +561,52 @@ export const resolveNodeBftNumber = (node) => {
     return node && node._bftNumber != null ? node._bftNumber : null;
 };
 
+export const getBftOrderRange = (graph) => {
+    if (!graph) {
+        return null;
+    }
+    let max = 0;
+    for (const node of graph.nodes || []) {
+        if (node._bftNumber != null) {
+            max = Math.max(max, node._bftNumber);
+        }
+    }
+    return max > 0 ? { min: 1, max } : null;
+};
+
+export const findNodeByBftOrder = (graph, order) => {
+    if (!graph || !Number.isInteger(order) || order <= 0) {
+        return null;
+    }
+    return (graph.nodes || []).find((node) => node._bftNumber === order) || null;
+};
+
+export const parseBftOrderQuery = (text, graph) => {
+    const trimmed = (text || '').trim();
+    if (!trimmed) {
+        return { ok: false, error: 'Enter an order number.' };
+    }
+    if (!/^\d+$/.test(trimmed)) {
+        return { ok: false, error: 'Enter a positive whole number.' };
+    }
+    const value = Number(trimmed);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        return { ok: false, error: 'Enter a positive whole number.' };
+    }
+    const range = getBftOrderRange(graph);
+    if (!range) {
+        return { ok: false, error: 'No order numbers in this graph.' };
+    }
+    if (value < range.min || value > range.max) {
+        return { ok: false, error: `Order must be between ${range.min} and ${range.max}.` };
+    }
+    const node = findNodeByBftOrder(graph, value);
+    if (!node) {
+        return { ok: false, error: `No node with order ${value}.` };
+    }
+    return { ok: true, value, node };
+};
+
 export const resolveEdgeBftNumber = (value) => {
     return value && value._bftEdgeNumber != null ? value._bftEdgeNumber : null;
 };

@@ -512,6 +512,12 @@ app.Application = class {
                         label: '&Find...',
                         accelerator: 'CmdOrCtrl+F',
                         click: async () => await this.execute('find', null),
+                    },
+                    {
+                        id: 'edit.find-node-by-order',
+                        label: 'Find Node by &Order...',
+                        accelerator: 'CmdOrCtrl+G',
+                        click: async () => await this.execute('find-node-by-order', null),
                     }
                 ]
             });
@@ -634,6 +640,9 @@ app.Application = class {
                 enabled: (view) => view && view.path ? true : false
             });
             commandTable.set('edit.find', {
+                enabled: (view) => view && view.path ? true : false
+            });
+            commandTable.set('edit.find-node-by-order', {
                 enabled: (view) => view && view.path ? true : false
             });
             commandTable.set('view.toggle-attributes', {

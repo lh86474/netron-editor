@@ -14,8 +14,11 @@ import {
     assignBftNumbers,
     assignEdgeBftNumbers,
     clearBftMetadata,
+    findNodeByBftOrder,
+    getBftOrderRange,
     getCompiledGraphFromNode,
     nodeIsInDisplayedGraph,
+    parseBftOrderQuery,
     resolveAmbapbNumberingMode,
     resolveSidebarBftValue
 } from '../source/ambapb-bft-numbering.js';
@@ -1014,5 +1017,38 @@ describe('ambapb bft numbering', () => {
             graph.nodes.map((node) => node._bftNumber),
             [1, 2, 3]
         );
+    });
+
+    it('getBftOrderRange returns min/max for numbered nodes', () => {
+        const graph = {
+            nodes: [
+                { name: 'a', _bftNumber: 1 },
+                { name: 'b', _bftNumber: 3 }
+            ]
+        };
+        assert.deepEqual(getBftOrderRange(graph), { min: 1, max: 3 });
+    });
+
+    it('parseBftOrderQuery rejects non-integers and out-of-range values', () => {
+        const graph = {
+            nodes: [
+                { name: 'a', _bftNumber: 1 },
+                { name: 'b', _bftNumber: 2 }
+            ]
+        };
+        assert.equal(parseBftOrderQuery('-1', graph).ok, false);
+        assert.equal(parseBftOrderQuery('0', graph).ok, false);
+        assert.equal(parseBftOrderQuery('1.5', graph).ok, false);
+        assert.equal(parseBftOrderQuery('abc', graph).ok, false);
+        assert.equal(parseBftOrderQuery('3', graph).ok, false);
+    });
+
+    it('parseBftOrderQuery finds node by order', () => {
+        const node = { name: 'relu', _bftNumber: 2 };
+        const graph = { nodes: [{ name: 'conv', _bftNumber: 1 }, node] };
+        const result = parseBftOrderQuery('2', graph);
+        assert.equal(result.ok, true);
+        assert.equal(result.node, node);
+        assert.equal(findNodeByBftOrder(graph, 2), node);
     });
 });

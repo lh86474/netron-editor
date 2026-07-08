@@ -29,8 +29,10 @@ import { MergeWorkspaceController } from './merge-workspace.js';
 import {
     assignBftNumbers,
     assignEdgeBftNumbers,
+    getBftOrderRange,
     getCompiledGraphFromNode,
     nodeIsInDisplayedGraph,
+    parseBftOrderQuery,
     resolveSidebarBftValue
 } from './ambapb-bft-numbering.js';
 import {
@@ -114,6 +116,7 @@ view.View = class {
         this._exportBasenameOverride = null;
         this._sidebar = new view.Sidebar(this._host);
         this._find = null;
+        this._findNodeByOrder = null;
         this._modelFactoryService = new view.ModelFactoryService(this._host);
         this._modelFactoryService.import();
         this._worker = this._host.environment('serial') ? null : new view.Worker(this._host);
@@ -315,6 +318,12 @@ view.View = class {
                     label: '&Find...',
                     accelerator: 'CmdOrCtrl+F',
                     execute: () => this.find(),
+                    enabled: () => this.activeTarget
+                });
+                edit.add({
+                    label: 'Find Node by &Order...',
+                    accelerator: 'CmdOrCtrl+G',
+                    execute: () => this.findNodeByOrder(),
                     enabled: () => this.activeTarget
                 });
                 const view = this._menu.group('&View');
@@ -680,7 +689,31 @@ view.View = class {
             });
             this._sidebar.open(sidebar, 'Find');
         }
-    } 
+    }
+
+    findNodeByOrder() {
+        if (this._target && this._sidebar.identifier !== 'find-node-by-order') {
+            const grapher = this._focusedPaneGrapher();
+            const searchTarget = this._focusedPaneSearchTarget();
+            if (grapher) {
+                grapher.select(null);
+            }
+            const sidebar = new view.FindNodeByOrderSidebar(this, this._findNodeByOrder, searchTarget);
+            sidebar.on('state-changed', (sender, state) => {
+                this._findNodeByOrder = state;
+            });
+            sidebar.on('select', (sender, node) => {
+                const paneGrapher = this._focusedPaneGrapher();
+                if (paneGrapher && node) {
+                    paneGrapher.scrollTo(paneGrapher.select([node], 'sidebar'));
+                }
+            });
+            sidebar.on('activate', (sender, node) => {
+                this._scrollToNodeInFocusedPane(node);
+            });
+            this._sidebar.open(sidebar, 'Find Node by Order');
+        }
+    }
 
     get model() {
         return this._model;
@@ -957,6 +990,19 @@ view.View = class {
     _focusedPaneSearchSignature() {
         const path = this._panePathArray(this._focusedPaneIdOrDefault());
         return path && path.length > 0 ? path[0].signature : this.activeSignature;
+    }
+
+    _scrollToNodeInFocusedPane(modelNode, source = 'sidebar') {
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher || !modelNode) {
+            return false;
+        }
+        const elements = grapher.activate(modelNode, source);
+        if (elements && elements.length > 0) {
+            grapher.scrollTo(elements, source);
+            return true;
+        }
+        return false;
     }
 
     //Search order: merge panes, main editor panes (original modified)
@@ -10469,6 +10515,136 @@ view.FindSidebar = class extends view.Control {
         const message = this.createTextNode(` ${error.message}`);
         element.appendChild(message);
         this._content.appendChild(element);
+    }
+};
+
+view.FindNodeByOrderSidebar = class extends view.Control {
+
+    constructor(context, state, graph) {
+        super(context);
+        this._target = graph;
+        this._state = state || { query: '' };
+    }
+
+    get identifier() {
+        return 'find-node-by-order';
+    }
+
+    _updateHint() {
+        const range = getBftOrderRange(this._target);
+        this._hint.textContent = range ?
+            `Valid orders: ${range.min}–${range.max}` :
+            'No order numbers in this graph.';
+    }
+
+    _validate() {
+        const trimmed = this._query.value.trim();
+        this._table.clear();
+        if (!trimmed) {
+            this._error.textContent = '';
+            this._result.replaceChildren();
+            return null;
+        }
+        const result = parseBftOrderQuery(trimmed, this._target);
+        if (!result.ok) {
+            this._error.textContent = result.error;
+            this._result.replaceChildren();
+            return null;
+        }
+        this._error.textContent = '';
+        const name = result.node.name || `[${result.node.type?.name || 'node'}]`;
+        this._result.replaceChildren();
+
+        const item = this.createElement('li');
+        item.innerHTML = `<svg class='sidebar-find-content-icon'><use href="#sidebar-icon-node"></use></svg>`;
+        item.appendChild(this._host.document.createTextNode(`${result.value}: ${name}`));
+        this._table.set(item, result.node);
+        this._result.appendChild(item);
+        return result.node;
+    }
+
+    _submit() {
+        const node = this._validate();
+        if (node) {
+            this.emit('activate', node);
+        }
+    }
+
+    render() {
+        this._table = new Map();
+
+        this._search = this.createElement('div', 'sidebar-find-search');
+        this._query = this.createElement('input', 'sidebar-find-query');
+        this._query.setAttribute('id', 'find-node-by-order');
+        this._query.setAttribute('type', 'text');
+        this._query.setAttribute('inputmode', 'numeric');
+        this._query.setAttribute('spellcheck', 'false');
+        this._query.setAttribute('placeholder', 'Order');
+        this._search.appendChild(this._query);
+
+        this._hint = this.createElement('div', 'sidebar-find-order-hint');
+        this._error = this.createElement('div', 'sidebar-find-order-error');
+        this._result = this.createElement('ol', 'sidebar-find-content');
+        this._result.setAttribute('tabindex', '-1');
+
+        this._query.addEventListener('input', (e) => {
+            this._state.query = e.target.value;
+            this.emit('state-changed', this._state);
+            this._validate();
+        });
+        this._query.addEventListener('keydown', (e) => {
+            if (e.keyCode === 0x08 && !e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey) {
+                e.stopPropagation();
+            } else if (e.keyCode === 0x0D) { // Enter
+                e.preventDefault();
+                e.stopPropagation();
+                this._submit();
+            }
+        });
+
+        this._result.addEventListener('click', (e) => {
+            if (this._table.has(e.target)) {
+                this.emit('select', this._table.get(e.target));
+            }
+        });
+        this._result.addEventListener('dblclick', (e) => {
+            if (this._table.has(e.target)) {
+                this.emit('activate', this._table.get(e.target));
+            }
+        });
+
+        this._updateHint();
+    }
+
+    get element() {
+        return [this._search, this._hint, this._error, this._result];
+    }
+
+    activate() {
+        this._query.value = this._state.query || '';
+        this._updateHint();
+        this._validate();
+        this._query.focus();
+        this._host.event('open_sidebar', {
+            sidebar_identifier: this.identifier,
+            sidebar_size: this._table.size
+        });
+    }
+
+    deactivate() {
+        this._table.clear();
+        this._result.replaceChildren();
+        this._error.textContent = '';
+    }
+
+    error(error, fatal) {
+        super.error(error, fatal);
+        const element = this.createElement('li');
+        const title = this.createElement('b');
+        title.textContent = 'ERROR: ';
+        element.appendChild(title);
+        element.appendChild(this.createTextNode(` ${error.message}`));
+        this._result.appendChild(element);
     }
 };
 

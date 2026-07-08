@@ -223,6 +223,9 @@ desktop.Host = class {
         electron.ipcRenderer.on('find', () => {
             this._view.find();
         });
+        electron.ipcRenderer.on('find-node-by-order', () => {
+            this._view.findNodeByOrder();
+        });
         electron.ipcRenderer.on('about', () => {
             this._view.about();
         });
