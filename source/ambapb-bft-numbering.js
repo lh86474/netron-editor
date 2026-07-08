@@ -561,15 +561,50 @@ export const resolveNodeBftNumber = (node) => {
     return node && node._bftNumber != null ? node._bftNumber : null;
 };
 
+export const locateBftNodeInGraph = (rootGraph, targetNode) => {
+    if (!rootGraph || !targetNode) {
+        return null;
+    }
+    const walk = (graph, ancestors) => {
+        if ((graph.nodes || []).includes(targetNode)) {
+            return { graph, ancestors };
+        }
+        for (const shell of graph.nodes || []) {
+            const compiled = getCompiledGraphFromNode(shell);
+            if (!compiled) {
+                continue;
+            }
+            const found = walk(compiled, ancestors.concat({ shell, graph: compiled }));
+            if (found) {
+                return found;
+            }
+        }
+        return null;
+    };
+    return walk(rootGraph, []);
+};
+
+export const formatBftNodeLocation = (rootGraph, node) => {
+    const location = locateBftNodeInGraph(rootGraph, node);
+    if (!location || location.ancestors.length === 0) {
+        return null;
+    }
+    return location.ancestors
+        .map((entry) => entry.shell.name || entry.shell.type?.name || 'subgraph')
+        .join(' / ');
+};
+
 export const getBftOrderRange = (graph) => {
     if (!graph) {
         return null;
     }
     let max = 0;
-    for (const node of graph.nodes || []) {
-        if (node._bftNumber != null) {
-            max = Math.max(max, node._bftNumber);
-        }
+    for (const nested of collectNestedGraphs(graph)) {
+        for (const node of nested.nodes || []) {
+                if (node._bftNumber != null) {
+                    max = Math.max(max, node._bftNumber);
+                }
+            }
     }
     return max > 0 ? { min: 1, max } : null;
 };
@@ -578,7 +613,14 @@ export const findNodeByBftOrder = (graph, order) => {
     if (!graph || !Number.isInteger(order) || order <= 0) {
         return null;
     }
-    return (graph.nodes || []).find((node) => node._bftNumber === order) || null;
+    // recursive search for find node bft so we can find nodes inside fragsubgraph
+    for (const nested of collectNestedGraphs(graph)) {
+        const node = (nested.nodes || []).find((entry) => entry._bftNumber === order);
+        if (node) {
+            return node;
+        }
+    }
+    return null;
 };
 
 export const parseBftOrderQuery = (text, graph) => {

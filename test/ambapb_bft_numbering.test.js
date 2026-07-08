@@ -15,8 +15,10 @@ import {
     assignEdgeBftNumbers,
     clearBftMetadata,
     findNodeByBftOrder,
+    formatBftNodeLocation,
     getBftOrderRange,
     getCompiledGraphFromNode,
+    locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
     parseBftOrderQuery,
     resolveAmbapbNumberingMode,
@@ -1050,5 +1052,118 @@ describe('ambapb bft numbering', () => {
         assert.equal(result.ok, true);
         assert.equal(result.node, node);
         assert.equal(findNodeByBftOrder(graph, 2), node);
+    });
+    it('getBftOrderRange includes nested subgraph nodes', () => {
+        const innerA = { name: 'inner_a', _bftNumber: 2 };
+        const innerB = { name: 'inner_b', _bftNumber: 3 };
+        const compiled = {
+            nodes: [innerA, innerB]
+        };
+        const graph = {
+            nodes: [
+                { name: 'main', _bftNumber: 1 },
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: compiled }]
+                }
+            ]
+        };
+        assert.deepEqual(getBftOrderRange(graph), { min: 1, max: 3 });
+    });
+
+    it('findNodeByBftOrder finds nested subgraph nodes', () => {
+        const innerA = { name: 'inner_a', type: { name: 'Conv' } };
+        const innerB = { name: 'inner_b', type: { name: 'Relu' } };
+        const compiled = {
+            _ambapbCompiledGraph: true,
+            inputs: [],
+            outputs: [],
+            nodes: [innerA, innerB]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: compiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: { find: () => null },
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(findNodeByBftOrder(graph, 2), innerA);
+        assert.equal(findNodeByBftOrder(graph, 3), innerB);
+        const result = parseBftOrderQuery('3', graph);
+        assert.equal(result.ok, true);
+        assert.equal(result.node, innerB);
+    });
+
+    it('findNodeByBftOrder finds deeply nested userdef frag nodes', () => {
+        const fragInner = { name: 'frag_inner', type: { name: 'Conv' } };
+        const leftCompiled = {
+            _ambapbCompiledGraph: true,
+            inputs: [],
+            outputs: [],
+            nodes: [fragInner]
+        };
+        const userDefCompiled = {
+            _ambapbCompiledGraph: true,
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'frag_left',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: leftCompiled }]
+                }
+            ]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'userdef',
+                    type: { name: 'UserDefSubgraph' },
+                    attributes: [{ name: 'graph', type: 'graph', value: userDefCompiled }]
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: { find: () => null },
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(findNodeByBftOrder(graph, 2), fragInner);
+        const location = locateBftNodeInGraph(graph, fragInner);
+        assert.equal(location.graph, leftCompiled);
+        assert.equal(location.ancestors.length, 2);
+        assert.equal(location.ancestors[0].shell.name, 'userdef');
+        assert.equal(location.ancestors[1].shell.name, 'frag_left');
+        assert.equal(formatBftNodeLocation(graph, fragInner), 'userdef / frag_left');
     });
 });

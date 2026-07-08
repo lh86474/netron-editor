@@ -29,8 +29,10 @@ import { MergeWorkspaceController } from './merge-workspace.js';
 import {
     assignBftNumbers,
     assignEdgeBftNumbers,
+    formatBftNodeLocation,
     getBftOrderRange,
     getCompiledGraphFromNode,
+    locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
     parseBftOrderQuery,
     resolveSidebarBftValue
@@ -702,14 +704,11 @@ view.View = class {
             sidebar.on('state-changed', (sender, state) => {
                 this._findNodeByOrder = state;
             });
-            sidebar.on('select', (sender, node) => {
-                const paneGrapher = this._focusedPaneGrapher();
-                if (paneGrapher && node) {
-                    paneGrapher.scrollTo(paneGrapher.select([node], 'sidebar'));
-                }
+            sidebar.on('select', async (sender, node) => {
+                await this._navigateAndSelectBftNode(node);
             });
-            sidebar.on('activate', (sender, node) => {
-                this._scrollToNodeInFocusedPane(node);
+            sidebar.on('activate', async (sender, node) => {
+                await this._navigateAndActivateBftNode(node);
             });
             this._sidebar.open(sidebar, 'Find Node by Order');
         }
@@ -990,6 +989,48 @@ view.View = class {
     _focusedPaneSearchSignature() {
         const path = this._panePathArray(this._focusedPaneIdOrDefault());
         return path && path.length > 0 ? path[0].signature : this.activeSignature;
+    }
+
+    async _navigateAndActivateBftNode(modelNode, source = 'sidebar') {
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher || !modelNode) {
+            return false;
+        }
+        if (grapher._table && grapher._table.has(modelNode)) {
+            return this._scrollToNodeInFocusedPane(modelNode, source);
+        }
+        const searchRoot = this._focusedPaneSearchTarget();
+        const location = locateBftNodeInGraph(searchRoot, modelNode);
+        if (!location || location.ancestors.length === 0) {
+            return false;
+        }
+        const paneId = this._focusedPaneIdOrDefault();
+        const parent = location.ancestors[location.ancestors.length - 1];
+        await this.pushTarget(location.graph, parent.shell, paneId);
+        return this._scrollToNodeInFocusedPane(modelNode, source);
+    }
+
+    async _navigateAndSelectBftNode(modelNode, source = 'sidebar') {
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher || !modelNode) {
+            return;
+        }
+        if (grapher._table && grapher._table.has(modelNode)) {
+            grapher.scrollTo(grapher.select([modelNode], source));
+            return;
+        }
+        const searchRoot = this._focusedPaneSearchTarget();
+        const location = locateBftNodeInGraph(searchRoot, modelNode);
+        if (!location || location.ancestors.length === 0) {
+            return;
+        }
+        const paneId = this._focusedPaneIdOrDefault();
+        const parent = location.ancestors[location.ancestors.length - 1];
+        await this.pushTarget(location.graph, parent.shell, paneId);
+        const refreshed = this._focusedPaneGrapher();
+        if (refreshed) {
+            refreshed.scrollTo(refreshed.select([modelNode], source));
+        }
     }
 
     _scrollToNodeInFocusedPane(modelNode, source = 'sidebar') {
@@ -10553,6 +10594,8 @@ view.FindNodeByOrderSidebar = class extends view.Control {
         }
         this._error.textContent = '';
         const name = result.node.name || `[${result.node.type?.name || 'node'}]`;
+        const location = formatBftNodeLocation(this._target, result.node);
+        const label = location ? `${result.value}: ${name} (in ${location})` : `${result.value} : ${name}`;
         this._result.replaceChildren();
 
         const item = this.createElement('li');
