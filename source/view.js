@@ -8364,49 +8364,91 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
         return 'node';
     }
 
+    _usesCheckpointPrimGraph(node) {
+        if (this._entity && this._entity.nested) {
+            return false;
+        }
+        const graphIndex = this._entity ? this._entity.graphIndex : 0;
+        const graph = this._editSession && this._editSession.modified ?
+            this._editSession.modified.getGraph(graphIndex) :
+            null;
+        const nodes = graph && graph.nodes ? graph.nodes : [];
+        if (nodes.length !== 1 || !isAmbapbShellNode(nodes[0])) {
+            return false;
+        }
+        const sourceNode = sourceNodeForEntity(node) || node;
+        return sourceNode === nodes[0];
+    }
+
+    _ambapbFromNodePrimGraph(node, modelAmbapb) {
+        const primGraphAttr = (node.attributes || []).find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
+        if (!primGraphAttr || primGraphAttr.value == null) {
+            return null;
+        }
+        try {
+            return {
+                primGraph: parsePrimGraphJson(primGraphAttr.value),
+                canEdit: modelAmbapb && modelAmbapb.canEdit !== undefined ? modelAmbapb.canEdit : true,
+                canExport: modelAmbapb ? modelAmbapb.canExport : undefined,
+                metadata: modelAmbapb && modelAmbapb.metadata ? modelAmbapb.metadata : {}
+            };
+        } catch {
+            return null;
+        }
+    }
+
     _resolveShellAmbapb(node) {
         const modelAmbapb = this._editSession && this._editSession.modified &&
             this._editSession.modified.model ?
             this._editSession.modified.model._ambapb :
             null;
-        if (modelAmbapb && modelAmbapb.primGraph) {
-            if (node._ambapb && node._ambapb !== modelAmbapb && node._ambapb._uiState) {
-                Object.assign(ensureAmbapbUiState(modelAmbapb), node._ambapb._uiState);
+
+        if (this._usesCheckpointPrimGraph(node)) {
+            if (modelAmbapb && modelAmbapb.primGraph) {
+                if (node._ambapb && node._ambapb !== modelAmbapb && node._ambapb._uiState) {
+                    Object.assign(ensureAmbapbUiState(modelAmbapb), node._ambapb._uiState);
+                }
+                node._ambapb = modelAmbapb;
+                return modelAmbapb;
             }
-            node._ambapb = modelAmbapb;
             return modelAmbapb;
         }
-        if (node._ambapb) {
+
+        if (node._ambapb && node._ambapb.primGraph) {
             return node._ambapb;
         }
-        const primGraphAttr = (node.attributes || []).find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
-        if (primGraphAttr && primGraphAttr.value) {
-            try {
-                const ambapb = {
-                    primGraph: parsePrimGraphJson(primGraphAttr.value),
-                    canEdit: modelAmbapb?.canEdit ?? true,
-                    metadata: modelAmbapb?.metadata ?? {}
-                };
-                node._ambapb = ambapb;
-                return ambapb;
-            } catch {
-                // Ignore
-            }
+
+        const nodeAmbapb = this._ambapbFromNodePrimGraph(node, modelAmbapb);
+        if (nodeAmbapb) {
+            node._ambapb = nodeAmbapb;
+            return nodeAmbapb;
         }
+
         return modelAmbapb;
     }
 
     _syncShellAmbapbFromJson(node, jsonText) {
-        const modelAmbapb = this._editSession && this._editSession.modified &&
-            this._editSession.modified.model ?
-            this._editSession.modified.model._ambapb :
-            null;
+        if (this._usesCheckpointPrimGraph(node)) {
+            const modelAmbapb = this._editSession && this._editSession.modified &&
+                this._editSession.modified.model ?
+                this._editSession.modified.model._ambapb :
+                null;
+            try {
+                if (modelAmbapb) {
+                    syncPrimGraphFromJson(modelAmbapb, jsonText);
+                    node._ambapb = modelAmbapb;
+                }
+            } catch {
+                // validation happens when the patch is applied
+            }
+            return;
+        }
+
+        const ambapb = this._resolveShellAmbapb(node);
         try {
-            if (modelAmbapb) {
-                syncPrimGraphFromJson(modelAmbapb, jsonText);
-                node._ambapb = modelAmbapb;
-            } else if (node._ambapb) {
-                syncPrimGraphFromJson(node._ambapb, jsonText);
+            if (ambapb) {
+                syncPrimGraphFromJson(ambapb, jsonText);
+                node._ambapb = ambapb;
             }
         } catch {
             // validation happens when the patch is applied
