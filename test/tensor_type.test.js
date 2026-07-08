@@ -33,4 +33,39 @@ describe('tensor-type', () => {
         assert.deepEqual(tensorTypeShapeDimensions('int64[batch]'), ['batch']);
         assert.equal(tensorTypeShapeDimensions('float32'), null);
     });
+
+    it('rejects nested bracket shapes', () => {
+        assert.throws(() => canonicalizeTensorTypeString('float32[][]'), TensorTypeError);
+    });
+
+    it('canonicalizes long rank shapes', () => {
+        assert.equal(
+            canonicalizeTensorTypeString('float32[1,2,3,4,5,6,7,8,9,10]'),
+            'float32[1,2,3,4,5,6,7,8,9,10]'
+        );
+        assert.deepEqual(
+            tensorTypeShapeDimensions('float32[1,2,3,4,5,6,7,8,9,10]'),
+            [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 10n]
+        );
+    });
+
+    it('canonicalizes whitespace around type names and dimensions', () => {
+        assert.equal(canonicalizeTensorTypeString(' float32 [ 1 , 2 ] '), 'float32[1,2]');
+    });
+
+    it('rejects unknown symbolic dimensions during canonicalization', () => {
+        assert.throws(() => canonicalizeTensorTypeString('float32[?]'), TensorTypeError);
+        assert.deepEqual(tensorTypeShapeDimensions('float32[?]'), ['?']);
+    });
+
+    it('rejects fullwidth bracket characters', () => {
+        assert.throws(() => canonicalizeTensorTypeString('float32［1］'), TensorTypeError);
+    });
+
+    it('returns empty string for blank input values', () => {
+        assert.equal(canonicalizeTensorTypeString(''), '');
+        assert.equal(canonicalizeTensorTypeString('   '), '');
+        assert.equal(canonicalizeTensorTypeString(null), '');
+        assert.equal(canonicalizeTensorTypeString(undefined), '');
+    });
 });

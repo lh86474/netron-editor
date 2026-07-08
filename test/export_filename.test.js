@@ -42,4 +42,30 @@ describe('export filename helpers', () => {
         assert.equal(normalizeExportFilename('slice.onnx', 'onnx'), 'slice.onnx');
         assert.equal(normalizeExportFilename('  ', 'onnx'), null);
     });
+
+    it('sanitizeExportBasename truncates very long names', () => {
+        const longName = 'a'.repeat(300);
+        const sanitized = sanitizeExportBasename(longName);
+        assert.equal(sanitized.length, 120);
+        assert.ok(sanitized.startsWith('aaa'));
+    });
+
+    it('sanitizeExportBasename neutralizes path traversal segments', () => {
+        assert.equal(sanitizeExportBasename('../../../etc/passwd.onnx'), '.._.._etc_passwd.onnx');
+    });
+
+    it('sanitizeExportBasename falls back to model when only invalid characters remain', () => {
+        assert.equal(sanitizeExportBasename('::::'), 'model');
+    });
+
+    it('buildSubgraphExportBasename preserves case in node names', () => {
+        assert.equal(
+            buildSubgraphExportBasename('model.onnx', 'Conv', 'conv'),
+            'model_Conv_to_conv'
+        );
+    });
+
+    it('stripExportExtension removes only the final extension', () => {
+        assert.equal(stripExportExtension('model.onnx.onnx'), 'model.onnx');
+    });
 });
