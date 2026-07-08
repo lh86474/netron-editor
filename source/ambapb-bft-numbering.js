@@ -137,24 +137,20 @@ const graphInputNames = (graph) => {
 };
 
 const isEntryNode = (graph, node, inputNames) => {
-    let hasNonInitializerInput = false;
     for (const input of node.inputs || []) {
         for (const value of argumentValues(input)) {
             if (!value || !value.name || value.initializer) {
                 continue;
             }
-            hasNonInitializerInput = true;
             if (inputNames.has(value.name)) {
                 return true;
             }
-            for (const producer of findValueProducers(graph, value)) {
-                if (producer.node && (graph.nodes || []).includes(producer.node)) {
-                    return false;
-                }
-            }
         }
     }
-    return hasNonInitializerInput ? false : !hasInGraphProducer(graph, node);
+    if (inputNames.size === 0) {
+        return !hasInGraphProducer(graph, node);
+    }
+    return false;
 };
 
 const computeBftLevels = (graph, skipTypes, options = {}) => {
@@ -296,6 +292,7 @@ const buildBatchCallNumberMap = (sourceGraph, layoutDirection, viewGraph) => {
     let counter = 1;
     for (const entry of orderedGraphNodes(sourceGraph, viewGraph, {
         assignUnreachableAtEnd: false,
+        entryOnlySources: true,
         layoutDirection
     })) {
         if (entry.node.type?.name === 'BatchCall' || entry.node.type?.name === 'UserDefCall') {
@@ -420,7 +417,7 @@ const assignNestedShellGraphs = (graph, viewGraph, counter, layoutDirection) => 
             continue;
         }
         nextCounter = assignNumbersToGraph(subGraph, viewGraph, nextCounter, {
-            assignUnreachableAtEnd: true,
+            assignUnreachableAtEnd: false,
             entryOnlySources: true,
             layoutDirection
         });
@@ -476,7 +473,7 @@ export const assignBftNumbers = (ctx) => {
     if (sourceGraph && (runtimeLike || drilledView)) {
         let sourceCounter = assignNumbersToGraph(sourceGraph, viewGraph, 1, {
             assignUnreachableAtEnd: false,
-            entryOnlySources: false,
+            entryOnlySources: true,
             layoutDirection
         });
         assignNestedShellGraphs(sourceGraph, viewGraph, sourceCounter, layoutDirection);
@@ -488,8 +485,8 @@ export const assignBftNumbers = (ctx) => {
         applyPersistedBftNumbersToGraph(displayGraph, sourceBftByNode);
     } else {
         let counter = assignNumbersToGraph(displayGraph, viewGraph, 1, {
-            assignUnreachableAtEnd: compiledLike,
-            entryOnlySources: compiledLike,
+            assignUnreachableAtEnd: false,
+            entryOnlySources: true,
             layoutDirection
         });
 
