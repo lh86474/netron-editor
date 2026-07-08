@@ -529,5 +529,56 @@ describe('ambapb batch inline expansion', () => {
         assert.ok(!result.graph.nodes.some((node) => node.type?.name === 'UserDefSubgraph'));
         assert.ok(!result.graph.nodes.some((node) => node.type?.name === 'UserDefCall'));
     });
+
+    it('parseMappingAttribute returns empty array for malformed JSON', () => {
+        assert.deepEqual(parseMappingAttribute({ value: '[{id: broken' }), []);
+        assert.deepEqual(parseMappingAttribute({ value: '' }), []);
+        assert.deepEqual(parseMappingAttribute({ value: '42' }), []);
+        assert.deepEqual(parseMappingAttribute(null), []);
+    });
+
+    it('expand collapse expand leaves source graph untouched', () => {
+        const graph = buildRuntimeGraph();
+        const sourceSnapshot = JSON.stringify(graph);
+
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+        assert.ok(!expanded.nodes.some((node) => node.name === 'batch_call'));
+
+        const collapsed = applyBatchInlineExpansions(graph, new Set());
+        assert.equal(collapsed, graph);
+        assert.ok(collapsed.nodes.some((node) => node.name === 'batch_call'));
+
+        const reExpanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+        assert.ok(!reExpanded.nodes.some((node) => node.name === 'batch_call'));
+        assert.ok(reExpanded.nodes.some((node) => node.name === 'inline::batch_call::inner_nvp'));
+        assert.equal(JSON.stringify(graph), sourceSnapshot);
+    });
+
+    it('skips expansion when graph_id does not resolve to a subgraph', () => {
+        const graph = buildRuntimeGraph();
+        const batchCall = graph.nodes.find((node) => node.name === 'batch_call');
+        batchCall.attributes.find((entry) => entry.name === 'graph_id').value = 'missing_subgraph';
+        assert.equal(canExpandBatchCall(graph, batchCall), false);
+
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+        assert.ok(expanded.nodes.some((node) => node.name === 'batch_call'));
+        assert.equal(expanded._inlineExpandedNodeNames.length, 0);
+    });
+
+    it('tolerates extra src_mappings beyond subgraph inputs', () => {
+        const graph = buildRuntimeGraph();
+        const batchCall = graph.nodes.find((node) => node.name === 'batch_call');
+        batchCall.attributes.find((entry) => entry.name === 'src_mappings').value = JSON.stringify([
+            { id: 'sub_input_0' },
+            { id: 'sub_input_1' },
+            { id: 'phantom_input' }
+        ]);
+
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+        const inner = expanded.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
+        assert.ok(inner);
+        assert.equal(inner.inputs[0].value[0].name, 'producer_out');
+        assert.equal(inner.inputs[1].value[0].name, 'external_ref');
+    });
 });
 

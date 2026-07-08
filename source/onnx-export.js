@@ -1176,6 +1176,48 @@ const buildValueInfoFromModifiedGraph = (modifiedGraph, sourceGraph, usedNames, 
     return Array.from(valueInfoByName.values());
 };
 
+const collectTopLevelExternalInputNames = (modifiedGraph) => {
+    const produced = new Set();
+    const consumed = [];
+
+    const trackProduced = (argument) => {
+        for (const name of collectArgumentValueNames(argument)) {
+            produced.add(name);
+        }
+    };
+
+    for (const entry of modifiedGraph.inputs || []) {
+        trackProduced(entry);
+    }
+    for (const node of modifiedGraph.nodes || []) {
+        for (const output of node.outputs || []) {
+            trackProduced(output);
+        }
+    }
+
+    for (const node of modifiedGraph.nodes || []) {
+        for (const input of node.inputs || []) {
+            for (const value of argumentValues(input)) {
+                if (!value || !value.name || value.initializer) {
+                    continue;
+                }
+                if (!produced.has(value.name)) {
+                    consumed.push(value.name);
+                }
+            }
+        }
+    }
+
+    return [...new Set(consumed)];
+};
+
+const argumentValues = (argument) => {
+    if (!argument || argument.value == null) {
+        return [];
+    }
+    return Array.isArray(argument.value) ? argument.value : [argument.value];
+};
+
 const syncGraphBoundaryFromModified = (graph, modifiedGraph, sourceGraph) => {
     const usedNames = collectArgumentValueNamesFromGraph(modifiedGraph);
     const input = [];
@@ -1256,8 +1298,30 @@ const buildGraphProtoFromModifiedGraph = (modifiedGraph, sourceGraphProto, origi
     }
     const sourceGraph = sourceGraphProto || {};
     const input = [];
+    const declaredInputNames = new Set();
     for (const modifiedInput of modifiedGraph.inputs || []) {
-        input.push(...buildGraphValueInfo(modifiedInput, sourceGraph, usedNames, modifiedGraph));
+        for (const info of buildGraphValueInfo(modifiedInput, sourceGraph, usedNames, modifiedGraph)) {
+            input.push(info);
+            if (info.name) {
+                declaredInputNames.add(info.name);
+            }
+        }
+    }
+    for (const name of collectTopLevelExternalInputNames(modifiedGraph)) {
+        if (declaredInputNames.has(name)) {
+            continue;
+        }
+        for (const info of buildGraphValueInfo(
+            { name, value: [{ name }] },
+            sourceGraph,
+            usedNames,
+            modifiedGraph
+        )) {
+            input.push(info);
+            if (info.name) {
+                declaredInputNames.add(info.name);
+            }
+        }
     }
     const output = [];
     for (const modifiedOutput of modifiedGraph.outputs || []) {
@@ -1575,10 +1639,13 @@ const applyChanges = (cloned, originalProto, editSession, options = {}) => {
     for (const change of changes) {
         if (change.entityType === 'node' && change.property === 'name') {
             const location = parseEntityId(change.entityId);
-            if (!location) {
+            if (!location || isNestedExportEntity(location) || location.nodeIndex == null) {
                 continue;
             }
-            graph.node[location.nodeIndex].name = change.newValue;
+            const protoNode = graph.node[location.nodeIndex];
+            if (protoNode) {
+                protoNode.name = change.newValue;
+            }
         }
     }
 

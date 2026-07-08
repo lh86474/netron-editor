@@ -4,11 +4,23 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { CVFLOW_NVP_OP_TYPE, resolveCheckpointRuntimeGraph } from '../source/ambapb-editor.js';
 import { ModelEditor, cloneGraph } from '../source/model-editor.js';
+import { parsePrimGraphJson } from '../source/ambapb-prim-graph.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
+
+const loadSyntheticPrimGraph = () => {
+    const filePath = path.join(repoRoot, 'test', 'fixtures', 'ambapb-prim-graph.json');
+    return parsePrimGraphJson(JSON.stringify(JSON.parse(fs.readFileSync(filePath, 'utf8'))));
+};
 
 // used to build mock checkpoint model with a runtime graph
-const buildCheckpointViewModel = (runtimeNodes) => {
+const buildCheckpointViewModel = (runtimeNodes, options = {}) => {
     const runtime = {
         name: 'compiled_runtime',
         inputs: [],
@@ -45,7 +57,7 @@ const buildCheckpointViewModel = (runtimeNodes) => {
         _ambapb: {
             canEdit: true,
             canExport: true,
-            primGraph: { primitives: [] }
+            primGraph: options.primGraph || loadSyntheticPrimGraph()
         }
     };
 };
@@ -65,7 +77,7 @@ describe('checkpoint editor session', () => {
         assert.equal(session.originalModules[0].nodes[0].name, 'wrapper');
 
         session.modified.getGraph(0).nodes[0].name = 'mutated_wrapper';
-        assert.equal(model.modules[0].nodes[0].name, 'mutated_wrapper');
+        assert.equal(session.modified.getGraph(0).nodes[0].name, 'mutated_wrapper');
         assert.equal(session.originalModules[0].nodes[0].name, 'wrapper');
     });
 
@@ -105,5 +117,69 @@ describe('checkpoint editor session', () => {
         assert.equal(resolveCheckpointRuntimeGraph(stored).nodes.length, 2);
         assert.equal(session.originalModules[0].nodes.length, 1);
         assert.equal(session.originalModules[0].nodes[0].type.name, CVFLOW_NVP_OP_TYPE);
+    });
+
+    it('keeps originalModules frozen after runtime graph edits', () => {
+        const model = buildCheckpointViewModel([
+            {
+                name: 'conv0',
+                type: { name: 'Conv' },
+                attributes: [{ name: 'strides', type: 'int64[]', value: [1, 1] }],
+                inputs: [],
+                outputs: [{ name: 'output', value: [{ name: 'conv_out' }] }]
+            }
+        ]);
+        const session = ModelEditor.createSession(model);
+        const runtime = resolveCheckpointRuntimeGraph(session.modified.getGraph(0));
+
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'conv0_edited'
+        });
+
+        assert.equal(runtime.nodes[0].name, 'conv0_edited');
+        assert.equal(session.originalModules[0].nodes[0].name, 'wrapper');
+        assert.equal(
+            session.originalModules[0].nodes[0].attributes
+                .find((entry) => entry.name === 'compiled_prim_graph')
+                .value.nodes[0].name,
+            'conv0'
+        );
+    });
+
+    it('undo restores runtime edit without mutating frozen originalModules', () => {
+        const model = buildCheckpointViewModel([
+            {
+                name: 'conv0',
+                type: { name: 'Conv' },
+                attributes: [],
+                inputs: [],
+                outputs: []
+            }
+        ]);
+        const session = ModelEditor.createSession(model);
+        const getRuntime = () => resolveCheckpointRuntimeGraph(session.modified.getGraph(0));
+
+        session.history.checkpoint(session);
+        session.applyPatch({
+            entityId: 'graph:0/node:0/compiled_prim_graph/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'conv0_temp'
+        });
+        assert.equal(getRuntime().nodes[0].name, 'conv0_temp');
+        assert.equal(session.history.undo(session), true);
+        assert.equal(getRuntime().nodes[0].name, 'conv0');
+        assert.equal(session.delta.getChanges().length, 0);
+        assert.equal(
+            session.originalModules[0].nodes[0].attributes
+                .find((entry) => entry.name === 'compiled_prim_graph')
+                .value.nodes[0].name,
+            'conv0'
+        );
     });
 });

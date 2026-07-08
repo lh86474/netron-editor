@@ -260,10 +260,8 @@ describe('ambapb bft numbering', () => {
         const inlined = displayGraph.nodes.find((node) => node._inlineExpanded);
         assert.ok(inlined);
         assert.equal(inlineExpansionBatchCallName(inlined), 'batch_call');
-        assert.equal(inlined._bftWrapperNumber, 3);
-        assert.equal(inner._bftNumber, 3);
         assert.equal(inlined._bftWrapperNumber, 2);
-        assert.equal(inner._bftNumber, 3);
+        assert.equal(inlined._bftNumber, 3);
         assert.ok(inlined._bftNumber != null);
     });
 
@@ -891,5 +889,130 @@ describe('ambapb bft numbering', () => {
         assert.equal(nodeIsInDisplayedGraph(runtime.nodes[0], runtime), true);
         assert.equal(nodeIsInDisplayedGraph(inner, runtime), false);
         assert.equal(inner._bftNumber, 2);
+    });
+
+    it('does not throw on a cyclic graph and leaves cycle nodes unnumbered', () => {
+        const aOut = tensor('a_out');
+        const bOut = tensor('b_out');
+        const cOut = tensor('c_out');
+        const graph = {
+            name: 'cycle',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'a',
+                    type: { name: 'Conv' },
+                    inputs: [{ name: 'x', value: [bOut] }],
+                    outputs: [{ name: 'y', value: [aOut] }]
+                },
+                {
+                    name: 'b',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [cOut] }],
+                    outputs: [{ name: 'y', value: [bOut] }]
+                },
+                {
+                    name: 'c',
+                    type: { name: 'Conv' },
+                    inputs: [{ name: 'x', value: [aOut] }],
+                    outputs: [{ name: 'y', value: [cOut] }]
+                }
+            ]
+        };
+        assert.doesNotThrow(() => {
+            assignBftNumbers({
+                displayGraph: graph,
+                sourceGraph: graph,
+                viewGraph: mockViewGraph(new Map()),
+                layoutDirection: 'horizontal'
+            });
+        });
+        assert.equal(graph.nodes[0]._bftNumber, undefined);
+        assert.equal(graph.nodes[1]._bftNumber, undefined);
+        assert.equal(graph.nodes[2]._bftNumber, undefined);
+    });
+
+    it('breaks ties at identical view positions by node index', () => {
+        const graph = {
+            name: 'tie',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'root',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('root_out')] }]
+                },
+                {
+                    name: 'later',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('root_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('later_out')] }]
+                },
+                {
+                    name: 'earlier',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('root_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('earlier_out')] }]
+                }
+            ]
+        };
+        const positions = new Map([
+            [graph.nodes[0], { x: 0, y: 0 }],
+            [graph.nodes[1], { x: 1, y: 5 }],
+            [graph.nodes[2], { x: 1, y: 5 }]
+        ]);
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(positions),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(graph.nodes[0]._bftNumber, 1);
+        assert.equal(graph.nodes[1]._bftNumber, 2);
+        assert.equal(graph.nodes[2]._bftNumber, 3);
+    });
+
+    it('assigns numbers when view positions are missing or non-finite', () => {
+        const graph = buildLinearGraph();
+        const positions = new Map([
+            [graph.nodes[0], { x: 0, y: 0 }],
+            [graph.nodes[1], { x: NaN, y: 0 }],
+            [graph.nodes[2], { x: 2, y: Number.POSITIVE_INFINITY }]
+        ]);
+        assert.doesNotThrow(() => {
+            assignBftNumbers({
+                displayGraph: graph,
+                sourceGraph: graph,
+                viewGraph: mockViewGraph(positions),
+                layoutDirection: 'horizontal'
+            });
+        });
+        const numbers = graph.nodes.map((node) => node._bftNumber).filter((value) => value != null);
+        assert.equal(numbers.length, 3);
+        assert.equal(new Set(numbers).size, 3);
+        assert.ok(numbers.every((value) => value >= 1));
+    });
+
+    it('re-run without clearBftMetadata does not duplicate numbers on reachable nodes', () => {
+        const graph = buildLinearGraph();
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map()),
+            layoutDirection: 'horizontal'
+        });
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map()),
+            layoutDirection: 'horizontal'
+        });
+        assert.deepEqual(
+            graph.nodes.map((node) => node._bftNumber),
+            [1, 2, 3]
+        );
     });
 });

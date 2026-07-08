@@ -380,6 +380,72 @@ describe('Node insertion', () => {
         assert.equal(node.inputs[0].name, 'X');
         assert.equal(node.outputs[0].name, 'Y');
     });
+
+    it('remaps delta through insert delete insert chaos sequence', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        const graph = editor.modified.getGraph();
+
+        const first = editor.applyPatch({
+            parentId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'add',
+            property: 'insert',
+            position: 'below',
+            newValue: identityNodeSpec('ChaosFirst')
+        });
+        const second = editor.applyPatch({
+            parentId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'add',
+            property: 'insert',
+            position: 'below',
+            newValue: identityNodeSpec('ChaosSecond')
+        });
+        const third = editor.applyPatch({
+            parentId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'add',
+            property: 'insert',
+            position: 'below',
+            newValue: identityNodeSpec('ChaosThird')
+        });
+
+        assert.equal(graph.nodes.length, 6);
+        assert.equal(editor.delta.getState(first.entityId), 'added');
+        assert.equal(editor.delta.getState(second.entityId), 'added');
+        assert.equal(editor.delta.getState(third.entityId), 'added');
+
+        editor.applyPatch({
+            entityId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'delete',
+            property: 'remove'
+        });
+        assert.equal(graph.nodes.length, 5);
+        assert.equal(editor.delta.getState('graph:0/node:1'), 'deleted');
+
+        editor.applyPatch({
+            parentId: 'graph:0/node:0',
+            entityType: 'node',
+            changeType: 'add',
+            property: 'insert',
+            position: 'below',
+            newValue: identityNodeSpec('ChaosReplacement')
+        });
+        assert.equal(graph.nodes.length, 6);
+
+        const changes = editor.delta.getChanges();
+        const addedIds = changes
+            .filter((entry) => entry.changeType === 'add' && entry.entityType === 'node')
+            .map((entry) => entry.entityId);
+        assert.equal(addedIds.length, 3);
+        assert.ok(addedIds.every((id) => editor.delta.getState(id) === 'added'));
+        assert.equal(editor.delta.getState('graph:0/node:2'), 'deleted');
+        assert.equal(graph.nodes[0].name, 'Conv1');
+        assert.equal(graph.nodes[1].name, 'ChaosReplacement');
+        assert.ok(graph.nodes.some((node) => node.name === 'ChaosThird'));
+        assert.ok(graph.nodes.some((node) => node.name === 'Softmax1'));
+    });
 });
 
 // Tests for node deletions
