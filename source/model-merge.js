@@ -16,23 +16,9 @@ import {
     collectGraphNamesForMerge as collectGraphNames,
     validateGraphForMerge as validateGraph
 } from './onnx-export.js';
-import { detectCheckpoint, parseCheckpoint, findCVFlowNVPNode, getPrimGraphAttribute } from './ambapb.js';
+import { detectCheckpoint } from './ambapb.js';
 
 const DEFAULT_DOWNSTREAM_PREFIX = 'downstream_';
-
-const checkpointModelProtoForGraph = (graph) => {
-    if (!graph) {
-        return null;
-    }
-    if (detectCheckpoint({ graph })) {
-        return { graph };
-    }
-    const wrapperNode = findCVFlowNVPNode(graph);
-    if (wrapperNode && getPrimGraphAttribute(wrapperNode)) {
-        return { graph, producer_name: 'cvflowbackend' };
-    }
-    return null;
-};
 // Since onnx.proto works with logical identifiers to represent data types, we have to map the numbers back to a string
 // There are probably more data types that I'll have to worry about in the future, but this works for now.
 const elemTypeNames = new Map([
@@ -84,135 +70,12 @@ const cloneGraph = (graph) => {
     return cloneModelProto(model).graph;
 };
 
-const getElemType = (dataFormat) => {
-    if (!dataFormat) {
-        return 1; // Default to float32
-    }
-    const { sign, bits, expbits } = dataFormat;
-    if (expbits > 0) {
-        return 1; // float32
-    }
-    if (bits === 8) {
-        return sign === 0 ? 2 : 3; // uint8 vs int8
-    }
-    if (bits === 16) {
-        return sign === 0 ? 4 : 5; // uint16 vs int16
-    }
-    if (bits === 32) {
-        return sign === 0 ? 12 : 6; // uint32 vs int32
-    }
-    return 1; // default to float32
-};
-
-const getDimensions = (dimension) => {
-    const dims = [];
-    if (dimension) {
-        // Order of dimensions: p (batch), d (channels/depth), h (height), w (width)
-        if (dimension.p !== undefined && dimension.p !== null) {
-            dims.push(Number(dimension.p));
-        }
-        if (dimension.d !== undefined && dimension.d !== null) {
-            dims.push(Number(dimension.d));
-        }
-        if (dimension.h !== undefined && dimension.h !== null) {
-            dims.push(Number(dimension.h));
-        }
-        if (dimension.w !== undefined && dimension.w !== null) {
-            dims.push(Number(dimension.w));
-        }
-    }
-    return dims;
-};
-
-const convertOportToValueInfo = (name, oport) => {
-    const valueInfo = new onnx.ValueInfoProto();
-    valueInfo.name = name;
-
-    const elemType = getElemType(oport && oport['data-format'] ? oport['data-format'] : (oport && oport.dataFormat));
-    const dims = getDimensions(oport && oport.dimension);
-
-    const type = new onnx.TypeProto();
-    const tensor = new onnx.TypeProto.Tensor();
-    tensor.elem_type = elemType;
-    if (dims.length > 0) {
-        const shape = new onnx.TensorShapeProto();
-        shape.dim = dims.map((dimVal) => {
-            const dimension = new onnx.TensorShapeProto.Dimension();
-            dimension.dim_value = BigInt(dimVal);
-            return dimension;
-        });
-        tensor.shape = shape;
-    }
-    type.tensor_type = tensor;
-    valueInfo.type = type;
-
-    return valueInfo;
-};
-
-const getOutputPrimitiveOport = (outputPrim, primitives) => {
-    if (outputPrim.oports && outputPrim.oports.length > 0) {
-        return outputPrim.oports[0];
-    }
-    if (outputPrim.sources && outputPrim.sources.length > 0) {
-        const source = outputPrim.sources[0];
-        const producer = primitives.find((p) => p.id === source.id);
-        if (producer && producer.oports && producer.oports.length > source.port) {
-            return producer.oports[source.port];
-        }
-    }
-    return null;
-};
-
-const extractCheckpointIO = (modelProto) => {
-    const checkpoint = parseCheckpoint(modelProto);
-    if (!checkpoint || !checkpoint.primGraph) {
-        return { inputs: [], outputs: [] };
-    }
-    const primitives = checkpoint.primGraph.primitives || [];
-    const raw = checkpoint.primGraph.raw || {};
-
-    // Find inputs
-    const inputFallbackId = (primitives.find((primitive) => primitive.type === 'input') || {}).id;
-    const graphInputId = raw.graph_input || inputFallbackId;
-    const inputPrims = primitives.filter((p) => p.type === 'input' || p.id === graphInputId);
-    const inputs = [];
-    for (const inputPrim of inputPrims) {
-        if (inputPrim.oports && inputPrim.oports.length > 0) {
-            inputs.push(convertOportToValueInfo(inputPrim.id, inputPrim.oports[0]));
-        }
-    }
-
-    // Find outputs
-    const outputFallbackId = (primitives.find((primitive) => primitive.type === 'output') || {}).id;
-    const graphOutputId = raw.graph_output || outputFallbackId;
-    const outputPrims = primitives.filter((p) => p.type === 'output' || p.id === graphOutputId);
-    const outputs = [];
-    for (const outputPrim of outputPrims) {
-        const oport = getOutputPrimitiveOport(outputPrim, primitives);
-        if (oport) {
-            outputs.push(convertOportToValueInfo(outputPrim.id, oport));
-        }
-    }
-
-    return { inputs, outputs };
-};
-
-// if graph and output exist, get the output from array, else empty and will throw error later on
+// Merge uses ONNX shell graph.input/graph.output only, not prim_graph contents.
 export const extractGraphOutputs = (graph) => {
-    const checkpointProto = checkpointModelProtoForGraph(graph);
-    if (checkpointProto) {
-        const io = extractCheckpointIO(checkpointProto);
-        return io.outputs;
-    }
     return Array.isArray(graph && graph.output) ? graph.output.slice() : [];
 };
 
 export const extractGraphInputs = (graph) => {
-    const checkpointProto = checkpointModelProtoForGraph(graph);
-    if (checkpointProto) {
-        const io = extractCheckpointIO(checkpointProto);
-        return io.inputs;
-    }
     return Array.isArray(graph && graph.input) ? graph.input.slice() : [];
 };
 // find the type
@@ -290,14 +153,6 @@ const inferTypeFromGraph = (graph, name, preferProducer) => {
 export const resolveValueType = (graph, name, options = {}) => {
     if (!graph || !name) {
         return null;
-    }
-    const checkpointProto = checkpointModelProtoForGraph(graph);
-    if (checkpointProto) {
-        const io = extractCheckpointIO(checkpointProto);
-        const match = io.inputs.find((val) => val.name === name) || io.outputs.find((val) => val.name === name);
-        if (match) {
-            return match.type;
-        }
     }
     const existing = findValueInfo(graph, name);
     if (existing && existing.type) {
@@ -844,8 +699,8 @@ export const applyMappingRenames = (downstreamGraph, mapping, prefixMap = new Ma
     }
 };
 
-export const removeMappedDownstreamInputs = (downstreamGraph, mapping) => {
-    const mappedDownstreamNames = new Set((mapping || []).map((entry) => entry.downstream));
+export const removeMappedDownstreamInputs = (downstreamGraph, mapping, prefixMap = new Map()) => {
+    const mappedDownstreamNames = new Set((mapping || []).map((entry) => prefixMap.get(entry.downstream) || entry.downstream));
     downstreamGraph.input = (downstreamGraph.input || []).filter((value) => !mappedDownstreamNames.has(value.name));
 };
 
@@ -914,8 +769,8 @@ export const mergeModelProtos = (upstreamProto, downstreamProto, options = {}) =
     const downstreamGraph = downstream.graph;
     const reservedNames = collectAllGraphNames(upstreamGraph);
     const prefixMap = prefixDownstreamGraph(downstreamGraph, prefix, reservedNames);
+    removeMappedDownstreamInputs(downstreamGraph, mapping, prefixMap);
     applyMappingRenames(downstreamGraph, mapping, prefixMap);
-    removeMappedDownstreamInputs(downstreamGraph, mapping);
     const mergedGraph = mergeGraphProtos(upstreamGraph, downstreamGraph);
     normalizeGraphReferences(mergedGraph);
     validateGraph(mergedGraph);

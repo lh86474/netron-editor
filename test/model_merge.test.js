@@ -521,7 +521,7 @@ describe('detectMergeRoles', () => {
 });
 
 describe('amba-checkpoint-merge', () => {
-    const makeCheckpointModel = (primitives, rawFields = {}) => {
+    const makeCheckpointModel = (primitives, rawFields = {}, shellTypes = {}) => {
         const model = new onnx.ModelProto();
         model.producer_name = 'cvflowbackend';
         model.metadata_props = [{ key: 'metagraph_type', value: 'checkpoint' }];
@@ -556,38 +556,60 @@ describe('amba-checkpoint-merge', () => {
         if (graphOutputId) {
             node.output = [graphOutputId];
         }
-        
-        graph.input = inputs.map((p) => {
+
+        const makeShellValueInfo = (name, elemType, dims) => {
             const val = new onnx.ValueInfoProto();
-            val.name = p.id;
+            val.name = name;
             const type = new onnx.TypeProto();
             const tensorProto = new onnx.TypeProto.Tensor();
-            tensorProto.elem_type = 2; // uint8
+            tensorProto.elem_type = elemType;
+            if (dims) {
+                const shape = new onnx.TensorShapeProto();
+                shape.dim = dims.map((dim) => {
+                    const dimension = new onnx.TensorShapeProto.Dimension();
+                    dimension.dim_value = BigInt(dim);
+                    return dimension;
+                });
+                tensorProto.shape = shape;
+            }
             type.tensor_type = tensorProto;
             val.type = type;
             return val;
-        });
-        
-        graph.output = outputs.map((p) => {
-            const val = new onnx.ValueInfoProto();
-            val.name = p.id;
-            const type = new onnx.TypeProto();
-            const tensorProto = new onnx.TypeProto.Tensor();
-            tensorProto.elem_type = 2; // uint8
-            type.tensor_type = tensorProto;
-            val.type = type;
-            return val;
-        });
+        };
+
+        graph.input = graphInputId ? [
+            makeShellValueInfo(
+                shellTypes.inputName || graphInputId,
+                shellTypes.inputElemType !== undefined ? shellTypes.inputElemType : 2,
+                shellTypes.inputDims
+            )
+        ] : [];
+
+        graph.output = graphOutputId ? [
+            makeShellValueInfo(
+                shellTypes.outputName || graphOutputId,
+                shellTypes.outputElemType !== undefined ? shellTypes.outputElemType : 2,
+                shellTypes.outputDims
+            )
+        ] : [];
         
         graph.node = [node];
         model.graph = graph;
         return model;
     };
 
-    it('extractCheckpointIO extracts inputs and outputs with correct shapes and formats', () => {
+    it('extractGraphInputs reads checkpoint shell graph IO only', () => {
         const prims = [
             {
                 id: 'input_data',
+                type: 'input',
+                oports: [{
+                    dimension: { w: 224, h: 224, d: 3, p: 1 },
+                    'data-format': { sign: 0, bits: 8, expoff: 0, expbits: 0 }
+                }]
+            },
+            {
+                id: 'input_extra',
                 type: 'input',
                 oports: [{
                     dimension: { w: 224, h: 224, d: 3, p: 1 },
@@ -609,22 +631,41 @@ describe('amba-checkpoint-merge', () => {
                 sources: [{ id: 'conv', port: 0 }]
             }
         ];
-        const model = makeCheckpointModel(prims, { graph_input: 'input_data', graph_output: 'output_data' });
+        const model = makeCheckpointModel(
+            prims,
+            { graph_input: 'input_data', graph_output: 'output_data' },
+            { inputName: 'boundary_tensor', inputElemType: 2, outputElemType: 3, outputDims: [1, 32, 112, 112] }
+        );
         const inputs = extractGraphInputs(model.graph);
         const outputs = extractGraphOutputs(model.graph);
         
         assert.equal(inputs.length, 1);
-        assert.equal(inputs[0].name, 'input_data');
-        assert.equal(inputs[0].type.tensor_type.elem_type, 2); // uint8
-        assert.equal(inputs[0].type.tensor_type.shape.dim.length, 4);
-        assert.equal(inputs[0].type.tensor_type.shape.dim[0].dim_value, 1n); // p
-        assert.equal(inputs[0].type.tensor_type.shape.dim[1].dim_value, 3n); // d
-        assert.equal(inputs[0].type.tensor_type.shape.dim[2].dim_value, 224n); // h
-        assert.equal(inputs[0].type.tensor_type.shape.dim[3].dim_value, 224n); // w
+        assert.equal(inputs[0].name, 'boundary_tensor');
+        assert.equal(inputs[0].type.tensor_type.elem_type, 2);
+        assert.equal(inputs[0].type.tensor_type.shape?.dim?.length, undefined);
         
         assert.equal(outputs.length, 1);
         assert.equal(outputs[0].name, 'output_data');
-        assert.equal(outputs[0].type.tensor_type.elem_type, 3); // int8 (conv product)
+        assert.equal(outputs[0].type.tensor_type.elem_type, 3);
+        assert.equal(outputs[0].type.tensor_type.shape.dim.length, 4);
+    });
+
+    it('validates mapping against shell tensor names, ignoring extra prim inputs', () => {
+        const upstream = makeCheckpointModel(
+            [{ id: 'input_data', type: 'input', oports: [{ dimension: { w: 224, h: 224, d: 3, p: 1 }, 'data-format': { sign: 0, bits: 8 } }] },
+                { id: 'output_data', type: 'output', sources: [{ id: 'input_data', port: 0 }] }],
+            { graph_input: 'input_data', graph_output: 'output_data' },
+            { outputElemType: 2, outputDims: [1, 3, 224, 224] }
+        );
+        const downstream = makeCheckpointModel(
+            [{ id: 'input_features', type: 'input', oports: [{ dimension: { w: 224, h: 224, d: 3, p: 1 }, 'data-format': { sign: 0, bits: 8 } }] },
+                { id: 'input_extra', type: 'input', oports: [{ dimension: { w: 224, h: 224, d: 3, p: 1 }, 'data-format': { sign: 0, bits: 8 } }] },
+                { id: 'output_data', type: 'output', sources: [{ id: 'input_features', port: 0 }] }],
+            { graph_input: 'input_features', graph_output: 'output_data' },
+            { inputName: 'boundary_tensor', inputElemType: 2, inputDims: [1, 3, 224, 224] }
+        );
+        const validation = validateMerge(upstream, downstream, [{ upstream: 'output_data', downstream: 'boundary_tensor' }]);
+        assert.equal(validation.ok, true);
     });
 
     it('validates type compatibility between checkpoint models', () => {
@@ -674,9 +715,18 @@ describe('amba-checkpoint-merge', () => {
             }
         ];
         
-        const upstream = makeCheckpointModel(upstreamPrims, { graph_input: 'input_data', graph_output: 'output_data' });
-        const downstreamCompatible = makeCheckpointModel(downstreamPrims1, { graph_input: 'input_features', graph_output: 'output_data' });
-        const downstreamIncompatible = makeCheckpointModel(downstreamPrims2, { graph_input: 'input_features', graph_output: 'output_data' });
+        const upstream = makeCheckpointModel(upstreamPrims, { graph_input: 'input_data', graph_output: 'output_data' }, {
+            outputElemType: 2,
+            outputDims: [1, 3, 224, 224]
+        });
+        const downstreamCompatible = makeCheckpointModel(downstreamPrims1, { graph_input: 'input_features', graph_output: 'output_data' }, {
+            inputElemType: 2,
+            inputDims: [1, 3, 224, 224]
+        });
+        const downstreamIncompatible = makeCheckpointModel(downstreamPrims2, { graph_input: 'input_features', graph_output: 'output_data' }, {
+            inputElemType: 2,
+            inputDims: [1, 3, 112, 112]
+        });
         
         const mapCompatible = buildAutomaticMapping(upstream, downstreamCompatible);
         assert.equal(mapCompatible.ok, true);
@@ -738,7 +788,10 @@ describe('amba-checkpoint-merge', () => {
             }
         ];
         
-        const upstream = makeCheckpointModel(upstreamPrims, { graph_input: 'input_data', graph_output: 'output_data' });
+        const upstream = makeCheckpointModel(upstreamPrims, { graph_input: 'input_data', graph_output: 'output_data' }, {
+            outputElemType: 3,
+            outputDims: [1, 32, 112, 112]
+        });
         const downstream = makeIdentityModel({
             name: 'downstream_shell',
             inputs: [{ name: 'input_features', elemType: 3, dims: [1, 32, 112, 112] }],
