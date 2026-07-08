@@ -535,28 +535,41 @@ view.View = class {
         }
     }
 
-    find() {
+   find() {
         if (this._target && this._sidebar.identifier !== 'find') {
-            this._target.select(null);
-            const sidebar = new view.FindSidebar(this, this._find, this.activeTarget, this.activeSignature);
+            const grapher = this._focusedPaneGrapher();
+            const searchTarget = this._focusedPaneSearchTarget();
+            const searchSignature = this._focusedPaneSearchSignature();
+            if (grapher) {
+                grapher.select(null);
+            }
+            const sidebar = new view.FindSidebar(this, this._find, searchTarget, searchSignature);
             sidebar.on('state-changed', (sender, state) => {
                 this._find = state;
             });
             sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value], 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.select([value], 'sidebar'));
+                }
             });
             sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
+                if (grapher) {
+                    grapher.focus([value]);
+                }
             });
             sidebar.on('blur', (sender, value) => {
-                this._target.blur([value]);
+                if (grapher) {
+                    grapher.blur([value]);
+                }
             });
             sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value, 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.activate(value, 'sidebar'));
+                }
             });
             this._sidebar.open(sidebar, 'Find');
         }
-    }
+    } 
 
     get model() {
         return this._model;
@@ -810,6 +823,29 @@ view.View = class {
             return this._rightPane.graph;
         }
         return this._target;
+    }
+
+    _focusedPaneIdOrDefault() {
+        return this._focusedPaneId || this._activePane || 'modified';
+    }
+
+    _focusedPaneGrapher() {
+        const paneId = this._focusedPaneIdOrDefault();
+        return this._paneGraph(paneId) || this._grapherForTarget(this.activeTarget) || this._target;
+    }
+
+    _focusedPaneSearchTarget() {
+        const grapher = this._focusedPaneGrapher();
+        if (grapher && grapher.target) {
+            return grapher.target;
+        }
+        const path = this._panePathArray(this._focusedPaneIdOrDefault());
+        return path && path.length > 0 ? path[0].target : this.activeTarget;
+    }
+
+    _focusedPaneSearchSignature() {
+        const path = this._panePathArray(this._focusedPaneIdOrDefault());
+        return path && path.length > 0 ? path[0].signature : this.activeSignature;
     }
 
     //Search order: merge panes, main editor panes (original modified)
