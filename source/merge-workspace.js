@@ -9,6 +9,10 @@
  */ 
 
 import * as base from './base.js';
+import { 
+    ensureBftNumbersForDisplayGraph,
+    formatTensorWithSourceNodeId
+} from './ambapb-bft-numbering.js';
 import { GraphPane } from './graph-pane.js';
 import { createMergeSession } from './merge-session.js';
 import {
@@ -342,20 +346,41 @@ export class MergeWorkspaceController {
         if (!this._session || !this._session.showSourceGraphs || !this._upstreamSourcePane || !this._downstreamSourcePane) {
             return;
         }
-        if (!this._session.bothSlotsLoaded() || !this._session.getUpstreamSlot()) {
+        if (!this._session.bothSlotsLoaded()) {
             this._clearSourcePanes();
             return;
         }
-        const upstream = this._session.getUpstream();
-        const downstream = this._session.getDownstream();
-        if (!upstream || !downstream || !upstream.target || !downstream.target) {
+
+        let left, right;
+        if (this._session.getUpstreamSlot()) {
+            left = this._session.getUpstream();
+            right = this._session.getDownstream();
+        }  else {
+            left = this._session.getSlot('A');
+            right = this._session.getSlot('B');
+        }
+
+        if (!left?.target || !right?.target) {
             this._clearSourcePanes();
             return;
         }
-        await this._upstreamSourcePane.render(upstream.target, null, null, upstream.model);
-        await this._downstreamSourcePane.render(downstream.target, null, null, downstream.model);
-        this._view._resetMergePanePath('merge-upstream', upstream.target);
-        this._view._resetMergePanePath('merge-downstream', downstream.target);
+
+        await this._upstreamSourcePane.render(left.target, null, null, left.model);
+        await this._downstreamSourcePane.render(right.target, null, null, right.model);
+        this._updateSourcePaneLabels(left, right);
+        this._refreshMappingTable();
+    }
+
+    _updateSourcePaneLabels(left, right) {
+        const rolesKnown = Boolean(this._session.getUpstreamSlot());
+        const leftLabel = this._upstreamSourcePane?.container?.querySelector('.graph-pane-label');
+        const rightLabel = this._downstreamSourcePane?.container?.querySelector('.graph-pane-label');
+        if (leftLabel) {
+            leftLabel.textContent = rolesKnown ? 'Upstream' : `Model A (${left.filename})`;
+        }
+        if (rightLabel) {
+            rightLabel.textContent = rolesKnown ? 'Downstream' : `Model B (${right.filename})`;
+        }
     }
 
     _clearSourcePanes() {
@@ -442,7 +467,17 @@ export class MergeWorkspaceController {
             return;
         }
         const enabled = this._session.bothSlotsLoaded() && Boolean(this._session.getUpstreamSlot());
-        toggle.disabled = !enabled;
+        const canShow = this._session.bothSlotsLoaded();
+        toggle.disabled = !canShow;
+        // disable show graph if slots not loaded
+
+        if (!canShow) {
+            toggle.checked = false;
+            this._session.showSourceGraphs = false;
+            this._updateSourceGraphLayout(false);
+            this._clearSourcePanes();
+        }
+
         if (!enabled) {
             toggle.checked = false;
             this._session.showSourceGraphs = false;
@@ -504,6 +539,22 @@ export class MergeWorkspaceController {
         return map;
     }
 
+    _resolveMergeDisplayGraph(slotEntry, pane) {
+        if (!slotEntry) {
+            return null;
+        }
+        const graph = pane?.graph?._bftDisplayGraph || slotEntry.target || null;
+        const layoutDirection = this._view._bftLayoutDirection
+            ? this._view._bftLayoutDirection()
+            : 'horizontal';
+        return ensureBftNumbersForDisplayGraph(graph, layoutDirection);
+    }
+
+    _formatMappingTensorLabel(tensorName, slotEntry, pane, role) {
+        const displayGraph = this._resolveMergeDisplayGraph(slotEntry, pane);
+        return formatTensorWithSourceNodeId(tensorName, displayGraph, role);
+    }
+
     _refreshMappingTable() {
         const body = this._element('merge-mapping-body');
         if (!body) {
@@ -524,7 +575,12 @@ export class MergeWorkspaceController {
         for (const input of extractGraphInputs(downstream.proto.graph)) {
             const row = this._view._host.document.createElement('tr');
             const downstreamCell = this._view._host.document.createElement('td');
-            downstreamCell.textContent = input.name;
+            downstreamCell.textContent = this._formatMappingTensorLabel(
+                input.name,
+                downstream,
+                this._downstreamSourcePane,
+                'input'
+            );
             row.appendChild(downstreamCell);
 
             const downstreamTypeCell = this._view._host.document.createElement('td');
@@ -541,7 +597,12 @@ export class MergeWorkspaceController {
             for (const output of upstreamOutputs) {
                 const option = this._view._host.document.createElement('option');
                 option.value = output.name;
-                option.textContent = output.name;
+                option.textContent = this._formatMappingTensorLabel(
+                    output.name,
+                    upstream,
+                    this._upstreamSourcePane,
+                    'output'
+                );
                 select.appendChild(option);
             }
             const selected = mapping.get(input.name) || '';
