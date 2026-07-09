@@ -2422,17 +2422,32 @@ view.View = class {
 
     _createRangeMarker(nodeView) {
         const node = nodeView && nodeView.value;
-        if (!node || !node.name) {
+        if (!node) {
             return null;
         }
         const entity = this._resolveNodeEntity(node);
-        const graphIndex = entity
-            ? entity.graphIndex
-            : (nodeView.context && nodeView.context.graphIndex !== undefined ? nodeView.context.graphIndex : 0);
+        if (entity) {
+            return {
+                graphIndex: entity.graphIndex,
+                nodeIndex: entity.nodeIndex,
+                nodeId: entity.nodeId,
+                nodeName: node.name || null
+            };
+        }
+        const graphIndex = nodeView.context && nodeView.context.graphIndex !== undefined ?
+            nodeView.context.graphIndex :
+            0;
+        const nodeId = nodeView._entityId || null;
+        const nodes = nodeView.context && nodeView.context.target && nodeView.context.target.nodes;
+        const nodeIndex = nodes ? nodes.indexOf(node) : -1;
+        if (!nodeId && nodeIndex < 0) {
+            return null;
+        }
         return {
             graphIndex,
-            nodeName: node.name,
-            nodeId: entity ? entity.nodeId : null
+            nodeIndex: nodeIndex >= 0 ? nodeIndex : undefined,
+            nodeId: nodeId || `graph:${graphIndex}/node:${nodeIndex}`,
+            nodeName: node.name || null
         };
     }
 
@@ -2440,20 +2455,26 @@ view.View = class {
         if (!entry || !marker || entry.graphIndex !== marker.graphIndex) {
             return false;
         }
+        if (entry.nodeId && marker.nodeId) {
+            return entry.nodeId === marker.nodeId;
+        }
+        if (entry.nodeIndex !== undefined && marker.nodeIndex !== undefined) {
+            return entry.nodeIndex === marker.nodeIndex;
+        }
         if (entry.nodeName && marker.nodeName) {
             return entry.nodeName === marker.nodeName;
         }
-        return Boolean(entry.nodeId && marker.nodeId && entry.nodeId === marker.nodeId);
+        return false;
     }
 
     _isRangeBeginForNode(nodeView) {
-        const marker = this._createRangeMarker(nodeView);
-        return Boolean(marker && this._rangeBegins.some((entry) => this._matchesRangeMarker(entry, marker)));
+        const entity = this._resolveNodeEntity(nodeView.value);
+        return this._isRangeBegin(entity);
     }
 
     _isRangeEndForNode(nodeView) {
-        const marker = this._createRangeMarker(nodeView);
-        return Boolean(marker && this._rangeEnds.some((entry) => this._matchesRangeMarker(entry, marker)));
+        const entity = this._resolveNodeEntity(nodeView.value);
+        return this._isRangeEnd(entity);
     }
 
     _subgraphContextMenuItems(nodeView) {
@@ -2765,22 +2786,18 @@ view.View = class {
     // mark begin node for graph extraction
     _markRangeBegin(nodeView) {
         const marker = this._createRangeMarker(nodeView);
-        if (!marker) {
+        if (!marker || !marker.nodeId) {
             return;
         }
         if (this._isRangeBeginForNode(nodeView)) {
-            this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
-            if (marker.nodeId) {
-                this._removeBorderLayer(marker.nodeId, 'range-begin');
-            }
+            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== marker.nodeId);
+            this._removeBorderLayer(marker.nodeId, 'range-begin');
         } else {
             this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
             this._rangeBegins.push(marker);
-            this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
-            if (marker.nodeId) {
-                this._removeBorderLayer(marker.nodeId, 'range-end');
-                this._pushBorderLayer(marker.nodeId, 'range-begin');
-            }
+            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== marker.nodeId);
+            this._removeBorderLayer(marker.nodeId, 'range-end');
+            this._pushBorderLayer(marker.nodeId, 'range-begin');
         }
         this._refreshRangeMarkerStyles();
     }
@@ -2788,22 +2805,18 @@ view.View = class {
     // mark end node for graph extraction
     _markRangeEnd(nodeView) {
         const marker = this._createRangeMarker(nodeView);
-        if (!marker) {
+        if (!marker || !marker.nodeId) {
             return;
         }
         if (this._isRangeEndForNode(nodeView)) {
-            this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
-            if (marker.nodeId) {
-                this._removeBorderLayer(marker.nodeId, 'range-end');
-            }
+            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== marker.nodeId);
+            this._removeBorderLayer(marker.nodeId, 'range-end');
         } else {
             this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
             this._rangeEnds.push(marker);
-            this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
-            if (marker.nodeId) {
-                this._removeBorderLayer(marker.nodeId, 'range-begin');
-                this._pushBorderLayer(marker.nodeId, 'range-end');
-            }
+            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== marker.nodeId);
+            this._removeBorderLayer(marker.nodeId, 'range-begin');
+            this._pushBorderLayer(marker.nodeId, 'range-end');
         }
         this._refreshRangeMarkerStyles();
     }
@@ -2824,17 +2837,11 @@ view.View = class {
     }
 
     _isRangeBegin(entity) {
-        return entity && this._rangeBegins.some((entry) =>
-            entry.nodeId === entity.nodeId ||
-            (entry.nodeName && entity.node && entry.nodeName === entity.node.name)
-        );
+        return entity && this._rangeBegins.some((entry) => entry.nodeId === entity.nodeId);
     }
 
     _isRangeEnd(entity) {
-        return entity && this._rangeEnds.some((entry) =>
-            entry.nodeId === entity.nodeId ||
-            (entry.nodeName && entity.node && entry.nodeName === entity.node.name)
-        );
+        return entity && this._rangeEnds.some((entry) => entry.nodeId === entity.nodeId);
     }
 
     _clearRangeMarkersOnOtherGraph(graphIndex) {
@@ -6881,14 +6888,12 @@ view.Node = class extends grapher.Node {
 
     // apply range marker style for graph extraction
     applyRangeMarkerStyle() {
-        if (!this.element || !this.context.view || !this.value || !this.value.name) {
+        if (!this.element || !this._entityId || !this.context.view) {
             return;
         }
         const view = this.context.view;
-        const graphIndex = this.context.graphIndex !== undefined ? this.context.graphIndex : 0;
-        const marker = { graphIndex, nodeName: this.value.name };
-        const isBegin = view._rangeBegins.some((entry) => view._matchesRangeMarker(entry, marker));
-        const isEnd = view._rangeEnds.some((entry) => view._matchesRangeMarker(entry, marker));
+        const isBegin = view._rangeBegins.some((entry) => entry.nodeId === this._entityId);
+        const isEnd = view._rangeEnds.some((entry) => entry.nodeId === this._entityId);
         this.element.classList.toggle('range-begin', Boolean(isBegin));
         this.element.classList.toggle('range-end', Boolean(isEnd));
     }

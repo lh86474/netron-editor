@@ -105,14 +105,38 @@ export const buildExtractWorkingGraph = (sourceGraph, batchInlineExpanded) => {
     return applyBatchInlineExpansions(sourceGraph, batchInlineExpanded);
 };
 
+const resolveNodeByEntityId = (graph, entityId) => {
+    if (!graph || !entityId) {
+        return null;
+    }
+    const topMatch = /^graph:\d+\/node:(\d+)$/.exec(entityId);
+    if (topMatch) {
+        const node = (graph.nodes || [])[Number(topMatch[1])];
+        if (node) {
+            return node;
+        }
+    }
+    for (const node of graph.nodes || []) {
+        if (node._sourceEntityId === entityId) {
+            return node;
+        }
+    }
+    return null;
+};
+
 export const resolveMarkedNodesByName = (graph, markers) => {
     const nodes = [];
     for (const marker of markers) {
-        const nodeName = marker.nodeName || null;
-        if (!nodeName) {
-            throw new SubgraphExtractError('Marked nodes are no longer available.');
+        let node = null;
+        if (marker.nodeId) {
+            node = resolveNodeByEntityId(graph, marker.nodeId);
         }
-        const node = (graph.nodes || []).find((entry) => entry.name === nodeName);
+        if (!node && marker.nodeIndex !== undefined && marker.nodeIndex >= 0) {
+            node = (graph.nodes || [])[marker.nodeIndex];
+        }
+        if (!node && marker.nodeName) {
+            node = (graph.nodes || []).find((entry) => entry.name === marker.nodeName);
+        }
         if (!node) {
             throw new SubgraphExtractError('Marked nodes are no longer available.');
         }
