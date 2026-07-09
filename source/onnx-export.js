@@ -33,12 +33,6 @@ export class OnnxExportError extends Error {
         this.name = 'ONNX Export Error';
     }
 }
-// Looks at the field numbers assigned in .proto3 and creates a map to store the field numbers for the data types
-const dataTypeByName = new Map([
-    ['undefined', 0], ['float32', 1], ['uint8', 2], ['int8', 3], ['uint16', 4], ['int16', 5],
-    ['int32', 6], ['int64', 7], ['string', 8], ['boolean', 9], ['float16', 10], ['float64', 11],
-    ['uint32', 12], ['uint64', 13], ['complex<float32>', 14], ['complex<float64>', 15], ['bfloat16', 16]
-]);
 // This is also a map, albeit not consistent with using the Map() oject
 // The key is the data type and the value is an object with the type and field properties
 const attributeTypeMap = {

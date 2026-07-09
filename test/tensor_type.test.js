@@ -11,6 +11,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     canonicalizeTensorTypeString,
+    tensorDataTypeByName,
     tensorTypeShapeDimensions,
     TensorTypeError
 } from '../source/tensor-type.js';
@@ -67,5 +68,26 @@ describe('tensor-type', () => {
         assert.equal(canonicalizeTensorTypeString('   '), '');
         assert.equal(canonicalizeTensorTypeString(null), '');
         assert.equal(canonicalizeTensorTypeString(undefined), '');
+    });
+
+    it('canonicalizes extended ONNX data types', () => {
+        const extendedTypes = [
+            ['float8e4m3fn', 17],
+            ['float8e4m3fnuz', 18],
+            ['float8e5m2', 19],
+            ['float8e5m2fnuz', 20],
+            ['uint4', 21],
+            ['int4', 22],
+            ['float4e2m1', 23],
+            ['float8e8m0', 24],
+            ['uint2', 25],
+            ['int2', 26]
+        ];
+        for (const [name, id] of extendedTypes) {
+            assert.equal(tensorDataTypeByName.get(name), id);
+            assert.equal(canonicalizeTensorTypeString(name), name);
+            assert.equal(canonicalizeTensorTypeString(`${name}[1,2]`), `${name}[1,2]`);
+            assert.equal(canonicalizeTensorTypeString(name.toUpperCase()), name);
+        }
     });
 });
