@@ -6300,11 +6300,10 @@ view.Graph = class extends grapher.Graph {
     }
 
     select(selection, source) {
-        if (selection && this.view.target && this.view.target !== this) {
+        if (this.view.target && this.view.target !== this) {
             this.view.target.clearSelection();
-        } else {
-            this.clearSelection();
         }
+        this.clearSelection();
         if (selection) {
             let array = [];
             for (const value of selection) {
