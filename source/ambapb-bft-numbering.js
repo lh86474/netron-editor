@@ -632,3 +632,74 @@ export const nodeIsInDisplayedGraph = (node, displayGraph) => {
     }
     return displayGraph.nodes.includes(node);
 };
+
+const pickLowestBftNode = (entries) => {
+    let best = null;
+    let bestOrder = Infinity;
+    for (const entry of entries) {
+        const node = entry && entry.node;
+        const order = resolveNodeBftNumber(node);
+        if (node && order != null && order < bestOrder) {
+            best = node;
+            bestOrder = order;
+        }
+    }
+    return best;
+};
+
+export const resolveTensorSourceNode = (displayGraph, tensorName, role) => {
+    if (!displayGraph || !tensorName) {
+        return null;
+    }
+    const value = { name: tensorName };
+    if (role === 'output') {
+        return pickLowestBftNode(
+            findValueProducers(displayGraph, value).filter((entry) => entry.node)
+        );
+    }
+    return pickLowestBftNode(
+        findValueConsumers(displayGraph, value).filter((entry) => entry.node)
+    );
+};
+
+export const formatTensorWithSourceNodeId = (tensorName, displayGraph, role) => {
+    if (!tensorName) {
+        return '';
+    }
+    const node = resolveTensorSourceNode(displayGraph, tensorName, role);
+    const nodeId = resolveNodeBftNumber(node);
+    if (nodeId == null) {
+        return tensorName;
+    }
+    return `${tensorName} | sourceNodeId: ${nodeId}`;
+};
+
+export const ensureBftNumbersForDisplayGraph = (displayGraph, layoutDirection = 'horizontal') => {
+    if (!displayGraph) {
+        return null;
+    }
+    const hasNumbers = (displayGraph.nodes || []).some((node) => node._bftNumber != null);
+    if (hasNumbers) {
+        return displayGraph;
+    }
+    const viewGraph = {
+        find(node) {
+            const index = (displayGraph.nodes || []).indexOf(node);
+            if (index < 0) {
+                return null;
+            }
+            if (layoutDirection === 'vertical') {
+                return { x: 0, y: index };
+            }
+            return { x: index, y: 0 };
+        },
+        edges: new Map()
+    };
+    assignBftNumbers({
+        displayGraph,
+        sourceGraph: displayGraph,
+        viewGraph,
+        layoutDirection
+    });
+    return displayGraph;
+};

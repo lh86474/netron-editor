@@ -11,6 +11,9 @@ import {
     BFT_HEADER_TITLE_MAJORITY
 } from '../source/grapher.js';
 import {
+    formatTensorWithSourceNodeId,
+    resolveTensorSourceNode,
+    ensureBftNumbersForDisplayGraph,
     assignBftNumbers,
     assignEdgeBftNumbers,
     clearBftMetadata,
@@ -891,5 +894,15 @@ describe('ambapb bft numbering', () => {
         assert.equal(nodeIsInDisplayedGraph(runtime.nodes[0], runtime), true);
         assert.equal(nodeIsInDisplayedGraph(inner, runtime), false);
         assert.equal(inner._bftNumber, 2);
+    });
+    it('formats tensor labels with producer/consumer sourceNodeId', () => {
+        const graph = buildLinearGraph();
+        ensureBftNumbersForDisplayGraph(graph, 'horizontal');
+        const inputNode = resolveTensorSourceNode(graph, 'graph_in', 'input');
+        const outputNode = resolveTensorSourceNode(graph, 'graph_out', 'output');
+        assert.equal(inputNode.name, 'a');
+        assert.equal(outputNode.name, 'c');
+        assert.equal(formatTensorWithSourceNodeId('graph_in', graph, 'input'), 'graph_in | sourceNodeId: 1');
+        assert.equal(formatTensorWithSourceNodeId('graph_out', graph, 'output'), 'graph_out | sourceNodeId: 3');
     });
 });

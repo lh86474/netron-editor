@@ -9,6 +9,10 @@
  */ 
 
 import * as base from './base.js';
+import { 
+    ensureBftNumbersForDisplayGraph,
+    formatTensorWithSourceNodeId
+} from './ambapb-bft-numbering.js';
 import { GraphPane } from './graph-pane.js';
 import { createMergeSession } from './merge-session.js';
 import {
@@ -363,6 +367,7 @@ export class MergeWorkspaceController {
         await this._upstreamSourcePane.render(left.target, null, null, left.model);
         await this._downstreamSourcePane.render(right.target, null, null, right.model);
         this._updateSourcePaneLabels(left, right);
+        this._refreshMappingTable();
     }
 
     _updateSourcePaneLabels(left, right) {
@@ -533,6 +538,22 @@ export class MergeWorkspaceController {
         return map;
     }
 
+    _resolveMergeDisplayGraph(slotEntry, pane) {
+        if (!slotEntry) {
+            return null;
+        }
+        const graph = pane?.graph?._bftDisplayGraph || slotEntry.target || null;
+        const layoutDirection = this._view._bftLayoutDirection
+            ? this._view._bftLayoutDirection()
+            : 'horizontal';
+        return ensureBftNumbersForDisplayGraph(graph, layoutDirection);
+    }
+
+    _formatMappingTensorLabel(tensorName, slotEntry, pane, role) {
+        const displayGraph = this._resolveMergeDisplayGraph(slotEntry, pane);
+        return formatTensorWithSourceNodeId(tensorName, displayGraph, role);
+    }
+
     _refreshMappingTable() {
         const body = this._element('merge-mapping-body');
         if (!body) {
@@ -553,7 +574,12 @@ export class MergeWorkspaceController {
         for (const input of extractGraphInputs(downstream.proto.graph)) {
             const row = this._view._host.document.createElement('tr');
             const downstreamCell = this._view._host.document.createElement('td');
-            downstreamCell.textContent = input.name;
+            downstreamCell.textContent = this._formatMappingTensorLabel(
+                input.name,
+                downstream,
+                this._downstreamSourcePane,
+                'input'
+            );
             row.appendChild(downstreamCell);
 
             const downstreamTypeCell = this._view._host.document.createElement('td');
@@ -570,7 +596,12 @@ export class MergeWorkspaceController {
             for (const output of upstreamOutputs) {
                 const option = this._view._host.document.createElement('option');
                 option.value = output.name;
-                option.textContent = output.name;
+                option.textContent = this._formatMappingTensorLabel(
+                    output.name,
+                    upstream,
+                    this._upstreamSourcePane,
+                    'output'
+                );
                 select.appendChild(option);
             }
             const selected = mapping.get(input.name) || '';
