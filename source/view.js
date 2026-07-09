@@ -8103,8 +8103,32 @@ view.ObjectSidebar = class extends view.Control {
 // base for inline editing of properties and attributes
 view.EditableObjectSidebar = class extends view.ObjectSidebar {
 
+    clearValidationError() {
+        if (this._validationError) {
+            this._validationError.textContent = '';
+        }
+    }
+
+    showValidationError(error) {
+        if (!this._validationError) {
+            this._validationError = this.createElement('div', 'sidebar-validation-error');
+            if (this.element.firstChild) {
+                this.element.insertBefore(this._validationError, this.element.firstChild);
+            } else {
+                this.element.appendChild(this._validationError);
+            }
+        }
+        this._validationError.textContent = error.message || String(error);
+        this._view.exception(error, true);
+    }
+
     addEditableProperty(name, value, onCommit, options = {}) {
-        const item = new view.EditableTextView(this._view, value, { ...options, onCommit });
+        const item = new view.EditableTextView(this._view, value, { 
+            ...options, 
+            onCommit,
+            onError: (error) => this.showValidationError(error),
+            onClearError: () => this.clearValidationError()
+        });
         this.addEntry(name, item);
         return item;
     }
@@ -8129,6 +8153,11 @@ view.EditableObjectSidebar = class extends view.ObjectSidebar {
         button.setAttribute('class', 'sidebar-add-button');
         button.setAttribute('type', 'button');
         button.textContent = options.buttonLabel || '+ Add Attribute';
+
+        const clearError = () => this.clearValidationError();
+        nameInput.addEventListener('input', clearError);
+        valueInput.addEventListener('input', clearError);
+
         button.addEventListener('click', (e) => {
             e.preventDefault();
             const name = nameInput.value.trim();
@@ -8137,11 +8166,12 @@ view.EditableObjectSidebar = class extends view.ObjectSidebar {
             }
             const validationError = options.validateName(name);
             if (validationError) {
-                this.error(new Error(validationError), true);
+                this.showValidationError(new Error(validationError));
                 return;
             }
             const attributeType = options.resolveType(name);
             const parsed = options.parseValue(valueInput.value, attributeType);
+            clearError();
             this._view.applyEditorPatch({
                 parentId,
                 entityType: 'attribute',
@@ -9054,6 +9084,8 @@ view.EditableTextView = class extends view.Control {
     constructor(context, value, options = {}) {
         super(context);
         this._onCommit = options.onCommit;
+        this._onError = options.onError;
+        this._onClearError = options.onClearError;
         this._parse = options.parse;
         this._committedValue = value;
         this.element = this.createElement('div', 'sidebar-item-value');
@@ -9065,6 +9097,7 @@ view.EditableTextView = class extends view.Control {
         input.setAttribute('type', 'text');
         input.setAttribute('class', 'sidebar-editable-input');
         input.value = view.EditableAttributeView.formatValue(value);
+
         const tryCommit = (showError) => {
             let parsed = input.value;
             try {
@@ -9072,9 +9105,16 @@ view.EditableTextView = class extends view.Control {
             } catch (error) {
                 if (showError) {
                     input.value = view.EditableAttributeView.formatValue(this._committedValue);
-                    this.error(error, true);
+                    if (this._onError) {
+                        this._onError(error);
+                    } else {
+                        this.error(error, true);
+                    }
                 }
                 return;
+            }
+            if (this._onClearError) {
+                this._onClearError();
             }
             if (!view.EditableAttributeView.valuesEqual(parsed, this._committedValue) && this._onCommit) {
                 this._committedValue = parsed;
@@ -9082,6 +9122,12 @@ view.EditableTextView = class extends view.Control {
                 this._onCommit(parsed);
             }
         };
+
+        input.addEventListener('input', () => {
+            if (this._onClearError) {
+                this._onClearError();
+            }
+        });
         input.addEventListener('blur', () => tryCommit(true));
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
