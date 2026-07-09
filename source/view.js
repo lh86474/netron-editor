@@ -117,7 +117,8 @@ view.View = class {
         this._danglingNodeNames = new Set();
         this._applyingHistory = false;
         this._exportBasenameOverride = null;
-        this._sidebar = new view.Sidebar(this._host);
+        this._sidebarStack = [];
+        this._initSidebars();
         this._find = null;
         this._findNodeByOrder = null;
         this._modelFactoryService = new view.ModelFactoryService(this._host);
@@ -180,11 +181,34 @@ view.View = class {
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget('original');
             });
-            this._element('sidebar').addEventListener('mousewheel', (e) => {
-                if (e.shiftKey || e.ctrlKey) {
-                    e.preventDefault();
+            for (const paneId of ['original', 'modified']) {
+                const sidebarEl = this._element(`sidebar-${paneId}`);
+                if (sidebarEl) {
+                    sidebarEl.addEventListener('mousewheel', (e) => {
+                        if (e.shiftKey || e.ctrlKey) {
+                            e.preventDefault();
+                        }
+                    }, { passive: false });
                 }
-            }, { passive: false });
+            }
+            const closeAllButton = this._element('sidebar-close-all-button');
+            if (closeAllButton) {
+                closeAllButton.addEventListener('click', () => {
+                    this._closeAllSidebars();
+                });
+            }
+            this._sidebarEscapeHandler = (e) => {
+                if (e.keyCode === 27 && this._sidebarStack.length > 0) {
+                    const active = this._host.document.activeElement;
+                    const tag = active ? active.tagName : '';
+                    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !(active && active.isContentEditable)) {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        this._closeTopSidebar();
+                    }
+                }
+            };
+            this._host.document.addEventListener('keydown', this._sidebarEscapeHandler);
             this._host.document.addEventListener('keydown', (e) => {
                 if (this._target && !e.metaKey && !e.ctrlKey) {
                     this._target.select(null);
@@ -441,9 +465,7 @@ view.View = class {
         this._host.event('screen_view', {
             screen_name: page,
         });
-        if (this._sidebar) {
-            this._sidebar.close();
-        }
+        this._closeAllSidebars();
         if (this._menu) {
             this._menu.close();
         }
@@ -669,7 +691,9 @@ view.View = class {
     }
 
    find() {
-        if (this._target && this._sidebar.identifier !== 'find') {
+        const paneId = this._focusedPaneIdOrDefault();
+        const paneSidebar = this._sidebarForPane(paneId);
+        if (this._target && paneSidebar.identifier !== 'find') {
             const grapher = this._focusedPaneGrapher();
             const searchTarget = this._focusedPaneSearchTarget();
             const searchSignature = this._focusedPaneSearchSignature();
@@ -700,12 +724,14 @@ view.View = class {
                     grapher.scrollTo(grapher.activate(value, 'sidebar'));
                 }
             });
-            this._sidebar.open(sidebar, 'Find');
+            paneSidebar.open(sidebar, 'Find');
         }
     }
 
     findNodeByOrder() {
-        if (this._target && this._sidebar.identifier !== 'find-node-by-order') {
+        const paneId = this._focusedPaneIdOrDefault();
+        const paneSidebar = this._sidebarForPane(paneId);
+        if (this._target && paneSidebar.identifier !== 'find-node-by-order') {
             const grapher = this._focusedPaneGrapher();
             const searchTarget = this._focusedPaneSearchTarget();
             if (grapher) {
@@ -721,7 +747,7 @@ view.View = class {
             sidebar.on('activate', async (sender, node) => {
                 await this._navigateAndActivateBftNode(node);
             });
-            this._sidebar.open(sidebar, 'Find Node by Order');
+            paneSidebar.open(sidebar, 'Find Node by Order');
         }
     }
 
@@ -1173,7 +1199,97 @@ view.View = class {
     _clearPaneFocusVisuals() {
         this._focusedPaneId = null;
         this._updatePaneFocusVisuals();
-    }  
+    }
+
+    _initSidebars() {
+        const options = { view: this };
+        this._sidebars = {
+            original: new view.Sidebar(this._host, { paneId: 'original', prefix: 'sidebar-original', ...options }),
+            modified: new view.Sidebar(this._host, { paneId: 'modified', prefix: 'sidebar-modified', ...options })
+        };
+        this._sidebar = this._sidebars.modified;
+    }
+
+    _sidebarForPane(paneId) {
+        return paneId === 'original' ? this._sidebars.original : this._sidebars.modified;
+    }
+
+    _grapherForPane(paneId) {
+        return this._paneGraph(paneId) || (paneId === 'modified' ? this._target : null);
+    }
+
+    _registerSidebarOpen(paneId) {
+        this._sidebarStack = this._sidebarStack.filter((id) => id !== paneId);
+        this._sidebarStack.push(paneId);
+        this._applySidebarStack();
+    }
+
+    _registerSidebarClose(paneId) {
+        this._sidebarStack = this._sidebarStack.filter((id) => id !== paneId);
+        this._applySidebarStack();
+    }
+
+    _applySidebarStack() {
+        const stack = this._sidebarStack;
+        const count = stack.length;
+        for (const paneId of ['original', 'modified']) {
+            const element = this._element(`sidebar-${paneId}`);
+            if (!element) {
+                continue;
+            }
+            const index = stack.indexOf(paneId);
+            const open = index >= 0 && this._sidebars[paneId].isOpen;
+            if (!open) {
+                element.classList.remove('sidebar-cascade', 'sidebar-full');
+                element.style.zIndex = '';
+                continue;
+            }
+            element.style.zIndex = String(10 + (count - 1 - index));
+            element.classList.toggle('sidebar-cascade', count > 1 && index === count - 1);
+            element.classList.toggle('sidebar-full', count === 1 || index < count - 1);
+        }
+        const stackElement = this._element('sidebar-stack');
+        const diffContainer = this._element('diff-container');
+        const closeAllButton = this._element('sidebar-close-all-button');
+        const anyOpen = count > 0;
+        if (stackElement) {
+            stackElement.classList.toggle('sidebar-stack-open', anyOpen);
+        }
+        if (diffContainer) {
+            diffContainer.style.width = anyOpen ? 'max(40vw, calc(100vw - 42em))' : '100%';
+        }
+        if (closeAllButton) {
+            closeAllButton.hidden = !anyOpen;
+        }
+    }
+
+    _closeTopSidebar() {
+        if (this._sidebarStack.length === 0) {
+            return;
+        }
+        const topPaneId = this._sidebarStack[0];
+        this._sidebars[topPaneId].close();
+    }
+
+    _closeSidebar(paneId) {
+        if (paneId && this._sidebars[paneId]) {
+            this._sidebars[paneId].close();
+        }
+    }
+
+    _closeAllSidebars() {
+        for (const paneId of ['original', 'modified']) {
+            if (this._sidebars[paneId].isOpen) {
+                this._sidebars[paneId].close();
+            }
+        }
+        this._sidebarStack = [];
+        this._applySidebarStack();
+    }
+
+    _isOriginalPane(paneId) {
+        return paneId === 'original';
+    }
 
     _isMergePane(pane) {
         return Boolean(pane && pane.id && pane.id.startsWith('merge-'));
@@ -1490,7 +1606,7 @@ view.View = class {
         if (!path || path.length <= 1) {
             return null;
         }
-        this._sidebar.close();
+        this._closeAllSidebars();
         const newPath = path.slice(1);
         this._mergePanePaths.set(paneId, newPath);
         const pane = this._paneById(paneId);
@@ -1661,7 +1777,11 @@ view.View = class {
         return isViewingCompiledAmbapbGraph(this._path, this.activeTarget);
     }
 
-    _createNodeSidebar(node) {
+    _createNodeSidebar(node, options = {}) {
+        const readOnly = this._isOriginalPane(options.paneId) || Boolean(options.readOnly);
+        if (readOnly) {
+            return new view.NodeSidebar(this, node);
+        }
         if (this._editSession && isAmbapbCheckpoint(this._model)) {
             if (this._canEditModelContent()) {
                 const entity = this._resolveNodeEntity(node);
@@ -1854,45 +1974,56 @@ view.View = class {
         return locateValueEntity(this._editSession.modified.model, modelValue);
     }
 
-    _bindNodeSidebarEvents(sidebar, node) {
+    _bindNodeSidebarEvents(sidebar, node, paneId) {
+        const grapher = this._grapherForPane(paneId) || this._target;
         sidebar.on('show-definition', async (/* sender, e */) => {
-            await this.showDefinition(node.type);
+            await this.showDefinition(node.type, paneId);
         });
         sidebar.on('focus', (sender, value) => {
-            this._target.focus([value]);
+            if (grapher) {
+                grapher.focus([value]);
+            }
         });
         sidebar.on('blur', (sender, value) => {
-            this._target.blur([value]);
+            if (grapher) {
+                grapher.blur([value]);
+            }
         });
         sidebar.on('select', (sender, value) => {
-            this._target.scrollTo(this._target.select([value], 'sidebar'));
+            if (grapher) {
+                grapher.scrollTo(grapher.select([value], 'sidebar'));
+            }
         });
         sidebar.on('activate', (sender, value) => {
-            this._target.scrollTo(this._target.activate(value, 'sidebar'));
+            if (grapher) {
+                grapher.scrollTo(grapher.activate(value, 'sidebar'));
+            }
         });
     }
 
     _refreshOpenNodeSidebar(lastChange) {
-        if (!this._editSession || this._sidebar.identifier !== 'node') {
+        const paneSidebar = this._sidebars.modified;
+        if (!this._editSession || paneSidebar.identifier !== 'node') {
             return;
         }
-        const entry = this._sidebar.entry;
+        const entry = paneSidebar.entry;
         const current = entry ? entry.content : null;
         if (!current || !current._node) {
             return;
         }
         const node = this._findModelNodeFromChange(lastChange) ||
             this._findModelNodeForSidebar(current._node);
-        const sidebar = this._createNodeSidebar(node);
-        this._bindNodeSidebarEvents(sidebar, node);
-        this._sidebar.open(sidebar, entry.title || 'Node Properties', 'sidebar');
+        const sidebar = this._createNodeSidebar(node, { paneId: 'modified' });
+        this._bindNodeSidebarEvents(sidebar, node, 'modified');
+        paneSidebar.open(sidebar, entry.title || 'Node Properties', 'sidebar');
     }
 
     _refreshOpenConnectionSidebar() {
-        if (!this._editSession || this._sidebar.identifier !== 'connection') {
+        const paneSidebar = this._sidebars.modified;
+        if (!this._editSession || paneSidebar.identifier !== 'connection') {
             return;
         }
-        const entry = this._sidebar.entry;
+        const entry = paneSidebar.entry;
         const current = entry ? entry.content : null;
         if (!current || !current._value) {
             return;
@@ -1901,8 +2032,8 @@ view.View = class {
         const sidebar = this._canEditModelContent() ?
             new view.EditableConnectionSidebar(this, value, current._from, current._to, this._editSession) :
             new view.ConnectionSidebar(this, value, current._from, current._to);
-        this._bindConnectionSidebarEvents(sidebar);
-        this._sidebar.open(sidebar, entry.title || 'Connection Properties');
+        this._bindConnectionSidebarEvents(sidebar, 'modified');
+        paneSidebar.open(sidebar, entry.title || 'Connection Properties');
     }
 
     _refreshOpenSidebars(lastChange) {
@@ -2039,7 +2170,7 @@ view.View = class {
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
-            this._sidebar.close();
+            this._closeAllSidebars();
             await this._refreshModifiedPane();
         } catch (error) {
             this.error(error, 'Error undoing edit.', null);
@@ -2061,7 +2192,7 @@ view.View = class {
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
-            this._sidebar.close();
+            this._closeAllSidebars();
             await this._refreshModifiedPane();
         } catch (error) {
             this.error(error, 'Error redoing edit.', null);
@@ -2781,7 +2912,7 @@ view.View = class {
             this._clearBorderLayerKind('range-end');
             this._batchInlineExpanded.clear();
             this._persistBatchInlineState();
-            this._sidebar.close();
+            this._closeAllSidebars();
             this._bindEditorSession();
             await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
         } catch (error) {
@@ -3136,7 +3267,7 @@ view.View = class {
 
             this._userDefSelectedMarkers.clear();
             this._clearBorderLayerKind('userdef-selected');
-            this._sidebar.close();
+            this._closeAllSidebars();
             this._bindEditorSession();
             await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
         } catch (error) {
@@ -3223,8 +3354,8 @@ view.View = class {
                 }
             }
             this._closeGraphOverlays();
-            if (this._sidebar.identifier === 'node') {
-                this._sidebar.close();
+            if (this._sidebars.modified.identifier === 'node') {
+                this._closeSidebar('modified');
             }
             await this.applyEditorPatch({
                 entityId: entity.nodeId,
@@ -3827,8 +3958,8 @@ view.View = class {
     }
 
     async error(error, name, screen) {
-        if (this._sidebar) {
-            this._sidebar.close();
+        if (this._sidebars) {
+            this._closeAllSidebars();
         }
         this.exception(error, false);
         const repository = this._host.environment('repository');
@@ -3867,7 +3998,7 @@ view.View = class {
     }
 
     async open(context) {
-        this._sidebar.close();
+        this._closeAllSidebars();
         this._leftPath = [];
         this._rightPath = [];
         this._activePane = 'modified';
@@ -3945,7 +4076,7 @@ view.View = class {
     }
 
     async _updateActiveTarget(stack) {
-        this._sidebar.close();
+        this._closeAllSidebars();
         if (this._model) {
             this.show('welcome spinner');
             try {
@@ -4068,7 +4199,7 @@ view.View = class {
         if (currentPaneGraph) {
             currentPaneGraph.select(null);
         }
-        this._sidebar.close();
+        this._closeAllSidebars();
 
         if (isMergePane) {
             await this._pushMergeTarget(graph, context, paneId, currentPaneGraph);
@@ -4124,7 +4255,7 @@ view.View = class {
             return null;
         }
 
-        this._sidebar.close();
+        this._closeAllSidebars();
         const newPath = path.slice(1);
         if (id === 'original') {
             this._leftPath = newPath;
@@ -4386,7 +4517,7 @@ view.View = class {
         }
         try {
             const sidebar = new view.ModelSidebar(this, this.model);
-            this._sidebar.open(sidebar, 'Model Properties');
+            this._sidebars.modified.open(sidebar, 'Model Properties');
         } catch (error) {
             this.error(error, 'Error showing model properties.', null);
         }
@@ -4396,8 +4527,10 @@ view.View = class {
     // we resolve the correct grapher and model for the specific target graph
     // pass the model to a target sidebar
     // and guard every sidebar if(grapher) so missing grapher doesn't throw
-    showTargetProperties(target) {
-        if (this._sidebar.identifier === 'target' && !target) {
+    showTargetProperties(target, paneId) {
+        paneId = paneId || this._focusedPaneIdOrDefault();
+        const paneSidebar = this._sidebarForPane(paneId);
+        if (paneSidebar.identifier === 'target' && !target) {
             this.showModelProperties();
             return;
         }
@@ -4406,10 +4539,10 @@ view.View = class {
             return;
         }
         try {
-            const grapher = this._grapherForTarget(target);
+            const grapher = this._grapherForTarget(target) || this._grapherForPane(paneId);
             const sidebar = new view.TargetSidebar(this, target, this.activeSignature, this._modelForTarget(target));
             sidebar.on('show-definition', async (/* sender, e */) => {
-                await this.showDefinition(target);
+                await this.showDefinition(target, paneId);
             });
             sidebar.on('focus', (sender, value) => {
                 if (grapher) {
@@ -4451,76 +4584,101 @@ view.View = class {
                 default:
                     throw new view.Error(`Unsupported graph type '${type}'.`);
             }
-            this._sidebar.open(sidebar, title);
+            paneSidebar.open(sidebar, title);
         } catch (error) {
             this.error(error, 'Error showing target properties.', null);
         }
     }
 
-    showNodeProperties(node, source) {
+    showNodeProperties(node, source, paneId) {
         if (node) {
             try {
                 if (this._menu) {
                     this._menu.close();
                 }
-                const sidebar = this._createNodeSidebar(node);
-                this._bindNodeSidebarEvents(sidebar, node);
-                this._sidebar.open(sidebar, 'Node Properties', source);
+                paneId = paneId || this._focusedPaneIdOrDefault();
+                const paneSidebar = this._sidebarForPane(paneId);
+                const sidebar = this._createNodeSidebar(node, { paneId });
+                this._bindNodeSidebarEvents(sidebar, node, paneId);
+                paneSidebar.open(sidebar, 'Node Properties', source);
             } catch (error) {
                 this.error(error, 'Error showing node properties.', null);
             }
         }
     }
 
-    _bindConnectionSidebarEvents(sidebar) {
+    _bindConnectionSidebarEvents(sidebar, paneId) {
+        const grapher = this._grapherForPane(paneId) || this._target;
         sidebar.on('focus', (sender, value) => {
-            this._target.focus([value]);
+            if (grapher) {
+                grapher.focus([value]);
+            }
         });
         sidebar.on('blur', (sender, value) => {
-            this._target.blur([value]);
+            if (grapher) {
+                grapher.blur([value]);
+            }
         });
         sidebar.on('select', (sender, value) => {
-            this._target.scrollTo(this._target.select([value], 'sidebar'));
+            if (grapher) {
+                grapher.scrollTo(grapher.select([value], 'sidebar'));
+            }
         });
         sidebar.on('activate', (sender, value) => {
-            this._target.scrollTo(this._target.activate(value, 'sidebar'));
+            if (grapher) {
+                grapher.scrollTo(grapher.activate(value, 'sidebar'));
+            }
         });
     }
 
-    showConnectionProperties(value, from, to, source) {
+    showConnectionProperties(value, from, to, source, paneId) {
         try {
             if (this._menu) {
                 this._menu.close();
             }
-            const sidebar = this._editSession && this._canEditModelContent() ?
+            paneId = paneId || this._focusedPaneIdOrDefault();
+            const paneSidebar = this._sidebarForPane(paneId);
+            const readOnly = this._isOriginalPane(paneId);
+            const sidebar = !readOnly && this._editSession && this._canEditModelContent() ?
                 new view.EditableConnectionSidebar(this, value, from, to, this._editSession) :
                 new view.ConnectionSidebar(this, value, from, to);
-            this._bindConnectionSidebarEvents(sidebar);
-            this._sidebar.open(sidebar, 'Connection Properties', source);
+            this._bindConnectionSidebarEvents(sidebar, paneId);
+            paneSidebar.open(sidebar, 'Connection Properties', source);
         } catch (error) {
             this.error(error, 'Error showing connection properties.', null);
         }
     }
 
-    showTensorProperties(value, source) {
+    showTensorProperties(value, source, paneId) {
         try {
             if (this._menu) {
                 this._menu.close();
             }
+            paneId = paneId || this._focusedPaneIdOrDefault();
+            const paneSidebar = this._sidebarForPane(paneId);
+            const grapher = this._grapherForPane(paneId) || this._target;
             const sidebar = new view.TensorSidebar(this, value);
             sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
+                if (grapher) {
+                    grapher.focus([value]);
+                }
             });
             sidebar.on('blur', () => {
-                this._target.blur(null);
+                if (grapher) {
+                    grapher.blur(null);
+                }
             });
             sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value], 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.select([value], 'sidebar'));
+                }
             });
             sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value, 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.activate(value, 'sidebar'));
+                }
             });
-            this._sidebar.open(sidebar, 'Tensor Properties', source);
+            paneSidebar.open(sidebar, 'Tensor Properties', source);
         } catch (error) {
             this.error(error, 'Error showing tensor properties.', null);
         }
@@ -4533,18 +4691,20 @@ view.View = class {
         this._host.exception(error, fatal);
     }
 
-    async showDefinition(type) {
+    async showDefinition(type, paneId) {
         if (type && (type.description || type.inputs || type.outputs || type.attributes)) {
             if (type.nodes && type.nodes.length > 0) {
                 await this.pushTarget(type);
             }
             if (type.type !== 'weights') {
+                paneId = paneId || this._focusedPaneIdOrDefault();
+                const paneSidebar = this._sidebarForPane(paneId);
                 const sidebar = new view.DocumentationSidebar(this, type);
                 sidebar.on('navigate', (sender, e) => {
                     this._host.openURL(e.link);
                 });
                 const title = type.type === 'function' ? 'Function Documentation' : 'Documentation';
-                this._sidebar.open(sidebar, title, 'sidebar');
+                paneSidebar.open(sidebar, title, 'sidebar');
             }
         }
     }
@@ -6168,12 +6328,13 @@ view.Graph = class extends grapher.Graph {
     }
 
     activate(value, source) {
-        if (this.readOnly) {
-            // eslint-disable-next-line no-console
-            console.log('[editor] activate blocked: readOnly');
-            return [];
-        }
         if (this._table.has(value)) {
+            if (this.readOnly) {
+                this.select(null, source);
+                const element = this._table.get(value);
+                element.activate(source);
+                return this.select([value], source);
+            }
             this.select(null, source);
             const element = this._table.get(value);
             element.activate(source);
@@ -6370,7 +6531,8 @@ view.Graph = class extends grapher.Graph {
             (e.target && e.target.classList && (e.target.classList.contains('node-block-background') || e.target.classList.contains('canvas'))) ||
             (e.target && e.target.parentNode && e.target.parentNode.classList && e.target.parentNode.classList.contains('cluster'));
         if (isBackground) {
-            this.view._sidebar.close();
+            const paneId = this._paneId || 'modified';
+            this.view._closeSidebar(paneId);
             if (this.view._leftPane && this.view._leftPane.graph) {
                 this.view._leftPane.graph.select(null);
             }
@@ -7240,12 +7402,8 @@ view.Node = class extends grapher.Node {
     }
 
     activate(source) {
-        if (this.context.readOnly) {
-            // eslint-disable-next-line no-console
-            console.log('[editor] activate blocked: readOnly');
-            return;
-        }
-        this.context.view.showNodeProperties(this.value, source);
+        const paneId = this.context.paneId || (this.context.readOnly ? 'original' : 'modified');
+        this.context.view.showNodeProperties(this.value, source, paneId);
     }
 
     edge(to) {
@@ -7500,17 +7658,13 @@ view.Value = class {
     }
 
     activate(source) {
-        if (this.context.readOnly) {
-            // eslint-disable-next-line no-console
-            console.log('[editor] activate blocked: readOnly');
-            return;
-        }
+        const paneId = this.context.paneId || (this.context.readOnly ? 'original' : 'modified');
         if (this.value && this.from && Array.isArray(this.to) && !this.value.initializer) {
             const from = this.from.value;
             const to = this.to.map((node) => node.value);
-            this.context.view.showConnectionProperties(this.value, from, to, source);
+            this.context.view.showConnectionProperties(this.value, from, to, source, paneId);
         } else if (this.value && this.value.initializer) {
-            this.context.view.showTensorProperties({ value: [this.value] }, source);
+            this.context.view.showTensorProperties({ value: [this.value] }, source, paneId);
         }
     }
 };
@@ -7547,7 +7701,8 @@ view.Argument = class extends grapher.Argument {
     }
 
     activate(source) {
-        this.context.view.showTensorProperties(this.value, source);
+        const paneId = this.context.paneId || 'modified';
+        this.context.view.showTensorProperties(this.value, source, paneId);
     }
 };
 
@@ -7581,36 +7736,52 @@ view.Edge = class extends grapher.Edge {
 
 view.Sidebar = class {
 
-    constructor(host) {
+    constructor(host, options = {}) {
         this._host = host;
+        this._paneId = options.paneId || 'modified';
+        this._prefix = options.prefix || 'sidebar-modified';
+        this._view = options.view || null;
         this._stack = [];
         this._closeSidebarHandler = () => this.close();
         this._closeSidebarKeyDownHandler = (e) => {
-            if (e.keyCode === 27) { // Escape
-                e.stopPropagation();
-                e.preventDefault();
-                this.close();
-            } else if (e.keyCode === 8 && this._stack.length > 1) { // Backspace
+            if (e.keyCode === 8 && this._stack.length > 1) { // Backspace
                 const active = this._host.document.activeElement;
                 const tag = active ? active.tagName : '';
                 if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !(active && active.isContentEditable)) {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    this._update(this._stack.slice(0, -1));
+                    if (!this._view || this._view._sidebarStack[0] === this._paneId) {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        this._update(this._stack.slice(0, -1));
+                    }
                 }
             }
         };
-        const sidebar = this._element('sidebar');
-        sidebar.addEventListener('transitionend', (event) => {
-            if (event.propertyName === 'opacity' && sidebar.style.opacity === '0') {
-                const content = this._element('sidebar-content');
-                content.replaceChildren();
-            }
-        });
+        const sidebar = this.rootElement;
+        if (sidebar) {
+            sidebar.addEventListener('transitionend', (event) => {
+                if (event.propertyName === 'opacity' && !this.isOpen) {
+                    const content = this._element('content');
+                    if (content) {
+                        content.replaceChildren();
+                    }
+                }
+            });
+        }
     }
 
-    _element(id) {
-        return this._host.document.getElementById(id);
+    get rootElement() {
+        return this._host.document.getElementById(this._prefix);
+    }
+
+    get isOpen() {
+        return this._stack.length > 0;
+    }
+
+    _element(suffix) {
+        if (!suffix) {
+            return this.rootElement;
+        }
+        return this._host.document.getElementById(`${this._prefix}-${suffix}`);
     }
 
     open(content, title, source) {
@@ -7653,11 +7824,13 @@ view.Sidebar = class {
     }
 
     _update(stack) {
-        const sidebar = this._element('sidebar');
-        const element = this._element('sidebar-content');
-        const container = this._element('diff-container') || this._element('target');
-        const closeButton = this._element('sidebar-closebutton');
-        closeButton.removeEventListener('click', this._closeSidebarHandler);
+        const sidebar = this.rootElement;
+        const element = this._element('content');
+        const closeButton = this._element('closebutton');
+        const wasOpen = this._stack.length > 0;
+        if (closeButton) {
+            closeButton.removeEventListener('click', this._closeSidebarHandler);
+        }
         this._host.document.removeEventListener('keydown', this._closeSidebarKeyDownHandler);
         if (this._stack.length > 0) {
             const entry = this._stack.pop();
@@ -7669,9 +7842,10 @@ view.Sidebar = class {
         if (stack) {
             this._stack = stack;
         }
-        if (this._stack.length > 0) {
+        const isOpen = this._stack.length > 0;
+        if (isOpen && sidebar && element && closeButton) {
             const entry = this._stack[this._stack.length - 1];
-            this._element('sidebar-title').innerHTML = entry.title || '';
+            this._element('title').innerHTML = entry.title || '';
             closeButton.addEventListener('click', this._closeSidebarHandler);
             if (typeof entry.content === 'string') {
                 element.innerHTML = entry.element;
@@ -7680,25 +7854,25 @@ view.Sidebar = class {
             } else {
                 element.replaceChildren(entry.element);
             }
-            sidebar.style.width = 'min(calc(100% * 0.6), 42em)';
-            sidebar.style.right = 0;
-            sidebar.style.opacity = 1;
+            sidebar.classList.add('sidebar-open');
             this._host.document.addEventListener('keydown', this._closeSidebarKeyDownHandler);
-            if (container) {
-                container.style.width = 'max(40vw, calc(100vw - 42em))';
-            }
             const content = entry.content;
             if (content && content.activate) {
                 content.activate();
             }
-        } else {
-            sidebar.style.right = 'calc(0px - min(calc(100% * 0.6), 42em))';
-            sidebar.style.opacity = 0;
-            const clone = element.cloneNode(true);
-            element.parentNode.replaceChild(clone, element);
-            if (container) {
-                container.style.width = '100%';
-                container.focus();
+            if (!wasOpen && this._view) {
+                this._view._registerSidebarOpen(this._paneId);
+            } else if (this._view) {
+                this._view._applySidebarStack();
+            }
+        } else if (sidebar) {
+            sidebar.classList.remove('sidebar-open', 'sidebar-cascade', 'sidebar-full');
+            if (element) {
+                const clone = element.cloneNode(true);
+                element.parentNode.replaceChild(clone, element);
+            }
+            if (wasOpen && this._view) {
+                this._view._registerSidebarClose(this._paneId);
             }
         }
     }

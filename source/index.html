@@ -389,7 +389,17 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .about .logo-github { top: 370px; }
 .merge-onnx-button { top: 280px; }
 }
-.sidebar { display: flex; flex-direction: column; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 12px; height: 100%; right: -100%; position: fixed; transition: 0.1s; top: 0; background-color: #ececec; color: #242424; overflow: hidden; border-left: 1px solid rgba(255, 255, 255, 0.5); opacity: 0; }
+.sidebar-stack { position: fixed; top: 0; right: 0; height: 100%; width: 0; z-index: 5; pointer-events: none; }
+.sidebar-stack.sidebar-stack-open { width: min(calc(100vw * 0.6), 42em); pointer-events: auto; }
+.sidebar-close-all-button { position: absolute; top: 8px; left: 8px; z-index: 20; width: 28px; height: 28px; padding: 0; border: 1px solid #ccc; border-radius: 6px; background: #f4f4f4; color: #555; font-size: 18px; line-height: 1; cursor: pointer; pointer-events: auto; }
+.sidebar-close-all-button:hover { background: #e8e8e8; color: #242424; }
+.sidebar-close-all-button[hidden] { display: none; }
+.sidebar { display: flex; flex-direction: column; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 12px; height: 100%; position: absolute; top: 0; right: 0; width: min(calc(100vw * 0.6), 42em); transition: transform 0.1s, opacity 0.1s; background-color: #ececec; color: #242424; overflow: hidden; border-left: 1px solid rgba(255, 255, 255, 0.5); opacity: 0; pointer-events: none; }
+.sidebar-pane { transform: translateX(100%); }
+.sidebar-pane.sidebar-open { opacity: 1; pointer-events: auto; transform: none; }
+.sidebar-pane.sidebar-cascade { transform: translateX(-16px); }
+.sidebar-pane.sidebar-full { transform: none; }
+.sidebar-pane-badge { position: absolute; top: 22px; left: 20px; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
 .sidebar-title { font-weight: bold; font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase; height: 20px; margin: 0; padding: 20px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .sidebar-closebutton { padding: 8px 8px 8px 32px; text-decoration: none; font-size: 25px; color: #777777; opacity: 1.0; display: block; transition: 0.2s; position: absolute; top: 0; right: 15px; margin-left: 50px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .sidebar-closebutton:hover { color: #242424; }
@@ -492,6 +502,9 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .sidebar-documentation ul { margin-top: 6px; margin-bottom: 6px; padding-left: 20px; }
 .sidebar-documentation blockquote { margin-left: 15px; margin-right: 15px; }
 @media (prefers-color-scheme: dark) {
+    .sidebar-close-all-button { border-color: #555; background: #383838; color: #aaa; }
+    .sidebar-close-all-button:hover { background: #444; color: #fff; }
+    .sidebar-pane-badge { color: #888; }
     .sidebar html { color: #dfdfdf; }
     .sidebar { background-color: #2d2d2d; color: #dfdfdf; border-left: 1px solid rgba(0, 0, 0, 0); }
     .sidebar-closebutton { padding: 8px 8px 8px 32px; text-decoration: none; font-size: 25px; color: #777777; opacity: 1.0; display: block; transition: 0.2s; position: absolute; top: 0; right: 15px; margin-left: 50px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
@@ -542,6 +555,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 @media screen and (prefers-reduced-motion: reduce) {
 .menu { transition: none; }
 .sidebar { transition: none; }
+.sidebar-stack { transition: none; }
 }
 </style>
 </head>
@@ -625,10 +639,20 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
     <input type="file" id="merge-slot-a-file-dialog" class="open-file-dialog" accept=".onnx">
     <input type="file" id="merge-slot-b-file-dialog" class="open-file-dialog" accept=".onnx">
 </div>
-<div id="sidebar" class="sidebar">
-    <h1 id="sidebar-title" class="sidebar-title"></h1>
-    <button type="button" id="sidebar-closebutton" class="sidebar-closebutton">&times;</button>
-    <div id="sidebar-content" class="sidebar-content"></div>
+<div id="sidebar-stack" class="sidebar-stack">
+    <button type="button" id="sidebar-close-all-button" class="sidebar-close-all-button" title="Close all sidebars" hidden>&times;</button>
+    <div id="sidebar-modified" class="sidebar sidebar-pane" data-pane="modified">
+        <span class="sidebar-pane-badge">Modified</span>
+        <h1 id="sidebar-modified-title" class="sidebar-title"></h1>
+        <button type="button" id="sidebar-modified-closebutton" class="sidebar-closebutton">&times;</button>
+        <div id="sidebar-modified-content" class="sidebar-content"></div>
+    </div>
+    <div id="sidebar-original" class="sidebar sidebar-pane" data-pane="original">
+        <span class="sidebar-pane-badge">Original</span>
+        <h1 id="sidebar-original-title" class="sidebar-title"></h1>
+        <button type="button" id="sidebar-original-closebutton" class="sidebar-closebutton">&times;</button>
+        <div id="sidebar-original-content" class="sidebar-content"></div>
+    </div>
     <svg width="0" height="0" display="none">
         <defs>
             <symbol id="sidebar-icon-node" viewBox="0 0 20 20">
