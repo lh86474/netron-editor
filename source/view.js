@@ -191,12 +191,6 @@ view.View = class {
                     }, { passive: false });
                 }
             }
-            const closeAllButton = this._element('sidebar-close-all-button');
-            if (closeAllButton) {
-                closeAllButton.addEventListener('click', () => {
-                    this._closeAllSidebars();
-                });
-            }
             this._sidebarEscapeHandler = (e) => {
                 if (e.keyCode === 27 && this._sidebarStack.length > 0) {
                     const active = this._host.document.activeElement;
@@ -1237,30 +1231,30 @@ view.View = class {
             if (!element) {
                 continue;
             }
-            const index = stack.indexOf(paneId);
-            const open = index >= 0 && this._sidebars[paneId].isOpen;
+            const open = this._sidebars[paneId].isOpen;
             if (!open) {
-                element.classList.remove('sidebar-cascade', 'sidebar-full');
-                element.style.zIndex = '';
+                element.style.order = '';
+                element.classList.remove('sidebar-split-divider');
                 continue;
             }
-            element.style.zIndex = String(10 + (count - 1 - index));
-            element.classList.toggle('sidebar-cascade', count > 1 && index === count - 1);
-            element.classList.toggle('sidebar-full', count === 1 || index < count - 1);
+            const stackIndex = stack.indexOf(paneId);
+            element.style.order = String(stackIndex);
+            element.classList.toggle('sidebar-split-divider', count > 1 && stackIndex > 0);
         }
         const stackElement = this._element('sidebar-stack');
         const diffContainer = this._element('diff-container');
-        const closeAllButton = this._element('sidebar-close-all-button');
         const anyOpen = count > 0;
         if (stackElement) {
             stackElement.classList.toggle('sidebar-stack-open', anyOpen);
+            stackElement.classList.remove('sidebar-count-0', 'sidebar-count-1', 'sidebar-count-2');
+            if (count > 0) {
+                stackElement.classList.add(`sidebar-count-${count}`);
+            }
         }
         if (diffContainer) {
             diffContainer.style.width = anyOpen ? 'max(40vw, calc(100vw - 42em))' : '100%';
         }
-        if (closeAllButton) {
-            closeAllButton.hidden = !anyOpen;
-        }
+        
     }
 
     _closeTopSidebar() {
@@ -7866,7 +7860,7 @@ view.Sidebar = class {
                 this._view._applySidebarStack();
             }
         } else if (sidebar) {
-            sidebar.classList.remove('sidebar-open', 'sidebar-cascade', 'sidebar-full');
+            sidebar.classList.remove('sidebar-open', 'sidebar-split-divider');
             if (element) {
                 const clone = element.cloneNode(true);
                 element.parentNode.replaceChild(clone, element);
