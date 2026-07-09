@@ -341,20 +341,40 @@ export class MergeWorkspaceController {
         if (!this._session || !this._session.showSourceGraphs || !this._upstreamSourcePane || !this._downstreamSourcePane) {
             return;
         }
-        if (!this._session.bothSlotsLoaded() || !this._session.getUpstreamSlot()) {
+        if (!this._session.bothSlotsLoaded()) {
             this._clearSourcePanes();
             return;
         }
-        const upstream = this._session.getUpstream();
-        const downstream = this._session.getDownstream();
-        if (!upstream || !downstream || !upstream.target || !downstream.target) {
+
+        let left, right;
+        if (this._session.getUpstreamSlot()) {
+            left = this._session.getUpstream();
+            right = this._session.getDownstream();
+        }  else {
+            left = this._session.getSlot('A');
+            right = this._session.getSlot('B');
+        }
+
+        if (!left?.target || !right?.target) {
             this._clearSourcePanes();
             return;
         }
-        await this._upstreamSourcePane.render(upstream.target, null, null, upstream.model);
-        await this._downstreamSourcePane.render(downstream.target, null, null, downstream.model);
-        this._view._resetMergePanePath('merge-upstream', upstream.target);
-        this._view._resetMergePanePath('merge-downstream', downstream.target);
+
+        await this._upstreamSourcePane.render(left.target, null, null, left.model);
+        await this._downstreamSourcePane.render(right.target, null, null, right.model);
+        this._updateSourcePaneLabels(left, right);
+    }
+
+    _updateSourcePaneLabels(left, right) {
+        const rolesKnown = Boolean(this._session.getUpstreamSlot());
+        const leftLabel = this._upstreamSourcePane?.container?.querySelector('.graph-pane-label');
+        const rightLabel = this._downstreamSourcePane?.container?.querySelector('.graph-pane-label');
+        if (leftLabel) {
+            leftLabel.textContent = rolesKnown ? 'Upstream' : `Model A (${left.filename})`;
+        }
+        if (rightLabel) {
+            rightLabel.textContent = rolesKnown ? 'Downstream' : `Model B (${right.filename})`;
+        }
     }
 
     _clearSourcePanes() {
@@ -441,7 +461,17 @@ export class MergeWorkspaceController {
             return;
         }
         const enabled = this._session.bothSlotsLoaded() && Boolean(this._session.getUpstreamSlot());
-        toggle.disabled = !enabled;
+        const canShow = this._session.bothSlotsLoaded();
+        toggle.disabled = !canShow;
+        // disable show graph if slots not loaded
+
+        if (!canShow) {
+            toggle.checked = false;
+            this._session.showSourceGraphs = false;
+            this._updateSourceGraphLayout(false);
+            this._clearSourcePanes();
+        }
+
         if (!enabled) {
             toggle.checked = false;
             this._session.showSourceGraphs = false;
