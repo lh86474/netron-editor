@@ -391,12 +391,13 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 }
 .sidebar-stack { position: fixed; top: 0; right: 0; height: 100%; width: 0; z-index: 5; pointer-events: none; overflow: hidden; border-left: 1px solid rgba(255, 255, 255, 0.5); background-color: #ececec;}
 .sidebar-stack.sidebar-stack-open { display: flex; flex-direction: column; width: min(calc(100vw * 0.6), 42em); pointer-events: auto; }
-sidebar { display: none; flex-direction: column; position: relative; flex: 1 1 0; min-height: 0; width: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 12px; background-color: #ececec; color: #242424; overflow: hidden; opacity: 0; pointer-events: none; transition: opacity 0.1s; }
+.sidebar { display: none; flex-direction: column; position: relative; flex: 1 1 0; min-height: 0; width: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 12px; background-color: #ececec; color: #242424; overflow: hidden; opacity: 0; pointer-events: none; transition: opacity 0.1s; }
+.sidebar-pane:not(.sidebar-open) .sidebar-pane-badge { display: none;}
 .sidebar-pane.sidebar-open { display: flex; opacity: 1; pointer-events: auto; }
 .sidebar-stack.sidebar-count-1 .sidebar-pane.sidebar-open { flex: 1 1 100%; max-height: 100%; }
 .sidebar-stack.sidebar-count-2 .sidebar-pane.sidebar-open { flex: 1 1 50%; max-height: 50%; }
 .sidebar-pane.sidebar-split-divider { border-top: 1px solid #ccc; }
-.sidebar-pane-badge { position: absolute; top: 22px; left: 20px; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
+.sidebar-pane-badge { position: absolute; top: 40px; left: 20px; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
 .sidebar-title { font-weight: bold; font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase; height: 20px; margin: 0; padding: 20px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .sidebar-closebutton { padding: 8px 8px 8px 32px; text-decoration: none; font-size: 25px; color: #777777; opacity: 1.0; display: block; transition: 0.2s; position: absolute; top: 0; right: 15px; margin-left: 50px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .sidebar-closebutton:hover { color: #242424; }
