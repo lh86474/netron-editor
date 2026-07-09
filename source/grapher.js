@@ -6,8 +6,8 @@ const grapher = {};
 grapher.BFT_RIGHT_LABEL_MIN_WIDTH = 75;
 // Extra width reserved on the left for compact nodes (gap + label).
 grapher.BFT_RIGHT_LABEL_GUTTER = 28;
-// guarantee 20 px for the albel
-grapher.BFT_LABEL_RESERVE = 20;
+// guarantee 25 px for the label
+grapher.BFT_LABEL_RESERVE = 25;
 // title text uses this much of header before we widen
 grapher.BFT_HEADER_TITLE_MAJORITY = 0.55;
 
