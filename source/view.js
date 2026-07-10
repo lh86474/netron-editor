@@ -11216,14 +11216,18 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
         while (this._scopeSelect.firstChild) {
             this._scopeSelect.removeChild(this._scopeSelect.firstChild);
         }
-        const selectedScope = this._selectedScope();
+        let selectedScope = this._selectedScope();
+        if (selectedScope && !selectedScope.viewGraph) {
+            const fallback = this._scopes.find((scope) => scope.viewGraph)
+            if (fallback) {
+                this._state.scopeId = fallback.id;
+                selectedScope = fallback;
+            }
+        }
         for (const scope of this._scopes) {
             const option = this.createElement('option');
             option.value = scope.id;
             option.textContent = scope.label;
-            if (!scope.viewGraph) {
-                option.setAttribute('disabled', 'true');
-            }
             if (selectedScope && scope.id === selectedScope.id) {
                 option.setAttribute('selected', 'true');
             }
@@ -11318,10 +11322,10 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
         this._result.setAttribute('tabindex', '-1');
 
         this._scopeSelect.addEventListener('change', (e) => {
-            const index = e.target.selectedIndex;
-            if (index >= 0 && index < this._scopes.length) {
-                this._state.scopeId = this._scopes[index].id;
-                this._scopeSelect.setAttribute('title', this._scopes[index].label);
+            const scope = this._scopes.find((entry) => entry.id === e.target.value);
+            if (scope) {
+                this._state.scopeId = scope.id;
+                this._scopeSelect.setAttribute('title', scope.label);
                 this.emit('state-changed', this._state);
                 this._updateHint();
                 this._validate();
@@ -11362,7 +11366,7 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
     }
 
     activate() {
-        this._paneViewGraph = this.context._focusedPaneGrapher();
+        this._paneViewGraph = this._view._focusedPaneGrapher() || this._paneViewGraph;
         this._populateScopeSelect();
         this._query.value = this._state.query || '';
         this._updateHint();
