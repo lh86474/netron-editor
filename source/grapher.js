@@ -1050,7 +1050,9 @@ grapher.Edge = class {
             return;
         }
         const tensorValue = this.value && this.value.value;
-        const bftNumber = tensorValue && tensorValue._bftEdgeNumber;
+        const bftNumber = this._bftEdgeNumber != null ?
+            this._bftEdgeNumber :
+            (tensorValue && tensorValue._bftEdgeNumber);
         if (bftNumber == null) {
             this.bftOrderElement.style.opacity = 0;
             return;

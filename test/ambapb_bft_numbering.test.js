@@ -51,12 +51,119 @@ const buildLinearGraph = () => ({
     ]
 });
 
-const mockViewGraph = (positions) => ({
+const mockViewGraph = (positions, edges = new Map()) => ({
     find(node) {
         return positions.get(node) || null;
     },
-    edges: new Map()
+    edges
 });
+
+const mockNodeView = (model, x, y, className = 'graph-node') => ({
+    value: model,
+    class: className,
+    x,
+    y,
+    name: model.name || `${x}:${y}`
+});
+
+const mockInputView = (inputArg, x, y) => ({
+    value: inputArg,
+    class: 'graph-input',
+    x,
+    y,
+    name: `input-${inputArg.name}`
+});
+
+const mockOutputView = (outputArg, x, y) => ({
+    value: outputArg,
+    class: 'graph-output',
+    x,
+    y,
+    name: `output-${outputArg.name}`
+});
+
+const mockEdge = (from, to, tensorValue) => ({
+    from,
+    to,
+    value: tensorValue ? { value: tensorValue } : null
+});
+
+const registerEdge = (edgesMap, edge) => {
+    const key = `${edge.from.name}:${edge.to.name}`;
+    edgesMap.set(key, { v: edge.from, w: edge.to, label: edge });
+    return edge;
+};
+
+const buildLinearViewEdges = (graph, positions) => {
+    const edges = new Map();
+    const graphIn = graph.inputs[0].value[0];
+    const graphOut = graph.outputs[0].value[0];
+    const nodeA = graph.nodes[0];
+    const nodeB = graph.nodes[1];
+    const nodeC = graph.nodes[2];
+    const posA = positions.get(nodeA);
+    const posB = positions.get(nodeB);
+    const posC = positions.get(nodeC);
+    const inputView = mockInputView(graph.inputs[0], -1, posA.y);
+    const outputView = mockOutputView(graph.outputs[0], 3, posC.y);
+    registerEdge(edges, mockEdge(
+        inputView,
+        mockNodeView(nodeA, posA.x, posA.y),
+        graphIn
+    ));
+    registerEdge(edges, mockEdge(
+        mockNodeView(nodeA, posA.x, posA.y),
+        mockNodeView(nodeB, posB.x, posB.y),
+        nodeA.outputs[0].value[0]
+    ));
+    registerEdge(edges, mockEdge(
+        mockNodeView(nodeB, posB.x, posB.y),
+        mockNodeView(nodeC, posC.x, posC.y),
+        nodeB.outputs[0].value[0]
+    ));
+    registerEdge(edges, mockEdge(
+        mockNodeView(nodeC, posC.x, posC.y),
+        outputView,
+        nodeC.outputs[0].value[0]
+    ));
+    return edges;
+};
+
+const buildDiamondViewEdges = (graph, positions, layoutDirection = 'horizontal') => {
+    const edges = new Map();
+    const root = graph.nodes[0];
+    const left = graph.nodes[1];
+    const right = graph.nodes[2];
+    const merge = graph.nodes[3];
+    const rootView = mockNodeView(root, positions.get(root).x, positions.get(root).y);
+    const leftView = mockNodeView(left, positions.get(left).x, positions.get(left).y);
+    const rightView = mockNodeView(right, positions.get(right).x, positions.get(right).y);
+    const mergeView = mockNodeView(merge, positions.get(merge).x, positions.get(merge).y);
+    registerEdge(edges, mockEdge(rootView, rightView, root.outputs[0].value[0]));
+    registerEdge(edges, mockEdge(rootView, leftView, root.outputs[0].value[0]));
+    registerEdge(edges, mockEdge(rightView, mergeView, right.outputs[0].value[0]));
+    registerEdge(edges, mockEdge(leftView, mergeView, left.outputs[0].value[0]));
+    return edges;
+};
+
+const buildDualInputViewEdges = (graph, positions) => {
+    const edges = new Map();
+    const leftInputArg = graph.inputs.find((input) => input.value[0].name === 'left_in');
+    const rightInputArg = graph.inputs.find((input) => input.value[0].name === 'right_in');
+    const leftEntry = graph.nodes.find((node) => node.name === 'left_entry');
+    const rightEntry = graph.nodes.find((node) => node.name === 'right_entry');
+    registerEdge(edges, mockEdge(
+        mockInputView(leftInputArg, positions.get(leftInputArg).x, positions.get(leftInputArg).y),
+        mockNodeView(leftEntry, positions.get(leftEntry).x, positions.get(leftEntry).y),
+        leftInputArg.value[0]
+    ));
+    registerEdge(edges, mockEdge(
+        mockInputView(rightInputArg, positions.get(rightInputArg).x, positions.get(rightInputArg).y),
+        mockNodeView(rightEntry, positions.get(rightEntry).x, positions.get(rightEntry).y),
+        rightInputArg.value[0]
+    ));
+    return edges;
+};
 
 describe('ambapb bft numbering', () => {
     it('numbers a linear graph in breadth-first order', () => {
@@ -157,20 +264,28 @@ describe('ambapb bft numbering', () => {
                 }
             ]
         };
+        const innerEdges = new Map();
+        registerEdge(innerEdges, mockEdge(
+            mockNodeView(innerA, 0, 0),
+            mockNodeView(innerB, 1, 0),
+            innerA.outputs[0].value[0]
+        ));
         assignBftNumbers({
             displayGraph: graph,
             sourceGraph: graph,
             viewGraph: mockViewGraph(new Map([
                 [graph.nodes[0], { x: 0, y: 0 }],
-                [graph.nodes[1], { x: 1, y: 0 }]
-            ])),
+                [graph.nodes[1], { x: 1, y: 0 }],
+                [innerA, { x: 0, y: 0 }],
+                [innerB, { x: 1, y: 0 }]
+            ]), innerEdges),
             layoutDirection: 'horizontal'
         });
         assert.equal(graph.nodes[1]._bftNumber, undefined);
         assert.equal(innerA._bftNumber, 2);
         assert.equal(innerB._bftNumber, 3);
         assert.equal(compiled.inputs[0].value[0]._bftEdgeNumber, undefined);
-        assert.equal(innerA.outputs[0].value[0]._bftEdgeNumber, 2);
+        assert.equal(innerA.outputs[0].value[0]._bftEdgeNumber, 1);
         assert.equal(compiled.outputs[0].value[0]._bftEdgeNumber, undefined);
         assert.equal(getCompiledGraphFromNode(graph.nodes[1]), compiled);
     });
@@ -271,22 +386,25 @@ describe('ambapb bft numbering', () => {
         assert.equal(fragInner._bftNumber, 3);
     });
 
-    it('numbers edges during BFS before each node', () => {
+    it('numbers visible edges in traversal order', () => {
         const graph = buildLinearGraph();
+        const positions = new Map([
+            [graph.nodes[0], { x: 0, y: 0 }],
+            [graph.nodes[1], { x: 1, y: 0 }],
+            [graph.nodes[2], { x: 2, y: 0 }]
+        ]);
         assignBftNumbers({
             displayGraph: graph,
             sourceGraph: graph,
-            viewGraph: mockViewGraph(new Map([
-                [graph.nodes[0], { x: 0, y: 0 }],
-                [graph.nodes[1], { x: 1, y: 0 }],
-                [graph.nodes[2], { x: 2, y: 0 }]
-            ])),
+            viewGraph: mockViewGraph(positions, buildLinearViewEdges(graph, positions)),
             layoutDirection: 'horizontal'
         });
         const value1 = graph.nodes[0].outputs[0].value[0];
         const value2 = graph.nodes[1].outputs[0].value[0];
-        assert.equal(value1._bftEdgeNumber, 1);
-        assert.equal(value2._bftEdgeNumber, 2);
+        assert.equal(graph.inputs[0].value[0]._bftEdgeNumber, 1);
+        assert.equal(value1._bftEdgeNumber, 2);
+        assert.equal(value2._bftEdgeNumber, 3);
+        assert.equal(graph.nodes[2].outputs[0].value[0]._bftEdgeNumber, 4);
         assert.equal(graph.nodes[0]._bftNumber, 1);
         assert.equal(graph.nodes[1]._bftNumber, 2);
     });
@@ -335,15 +453,15 @@ describe('ambapb bft numbering', () => {
         assignBftNumbers({
             displayGraph: graph,
             sourceGraph: graph,
-            viewGraph: mockViewGraph(positions),
+            viewGraph: mockViewGraph(positions, buildDiamondViewEdges(graph, positions)),
             layoutDirection: 'horizontal'
         });
         const leftOut = graph.nodes[1].outputs[0].value[0];
         const rightOut = graph.nodes[2].outputs[0].value[0];
         const rootOut = graph.nodes[0].outputs[0].value[0];
-        assert.equal(rootOut._bftEdgeNumber, 1);
-        assert.equal(rightOut._bftEdgeNumber, 2);
-        assert.equal(leftOut._bftEdgeNumber, 3);
+        assert.equal(rootOut._bftEdgeNumber, 2);
+        assert.equal(rightOut._bftEdgeNumber, 3);
+        assert.equal(leftOut._bftEdgeNumber, 4);
     });
 
     it('sorts same-level edges top to bottom in vertical layout', () => {
@@ -390,53 +508,55 @@ describe('ambapb bft numbering', () => {
         assignBftNumbers({
             displayGraph: graph,
             sourceGraph: graph,
-            viewGraph: mockViewGraph(positions),
+            viewGraph: mockViewGraph(positions, buildDiamondViewEdges(graph, positions, 'vertical')),
             layoutDirection: 'vertical'
         });
         const topOut = graph.nodes[1].outputs[0].value[0];
         const bottomOut = graph.nodes[2].outputs[0].value[0];
         const rootOut = graph.nodes[0].outputs[0].value[0];
-        assert.equal(rootOut._bftEdgeNumber, 1);
-        assert.equal(topOut._bftEdgeNumber, 2);
-        assert.equal(bottomOut._bftEdgeNumber, 3);
+        assert.equal(rootOut._bftEdgeNumber, 2);
+        assert.equal(topOut._bftEdgeNumber, 3);
+        assert.equal(bottomOut._bftEdgeNumber, 4);
     });
 
-    it('skips graph input and output terminal edges', () => {
+    it('numbers graph input and output terminal edges', () => {
         const graph = buildLinearGraph();
+        const positions = new Map([
+            [graph.nodes[0], { x: 0, y: 0 }],
+            [graph.nodes[1], { x: 1, y: 0 }],
+            [graph.nodes[2], { x: 2, y: 0 }]
+        ]);
         assignBftNumbers({
             displayGraph: graph,
             sourceGraph: graph,
-            viewGraph: mockViewGraph(new Map([
-                [graph.nodes[0], { x: 0, y: 0 }],
-                [graph.nodes[1], { x: 1, y: 0 }],
-                [graph.nodes[2], { x: 2, y: 0 }]
-            ])),
+            viewGraph: mockViewGraph(positions, buildLinearViewEdges(graph, positions)),
             layoutDirection: 'horizontal'
         });
         const graphIn = graph.inputs[0].value[0];
-        const graphOut = graph.outputs[0].value[0];
         const internalValue = graph.nodes[0].outputs[0].value[0];
-        assert.equal(graphIn._bftEdgeNumber, undefined);
-        assert.equal(graphOut._bftEdgeNumber, undefined);
-        assert.equal(internalValue._bftEdgeNumber, 1);
+        const outputEdgeValue = graph.nodes[2].outputs[0].value[0];
+        assert.equal(graphIn._bftEdgeNumber, 1);
+        assert.equal(internalValue._bftEdgeNumber, 2);
+        assert.equal(outputEdgeValue._bftEdgeNumber, 4);
     });
 
     it('resolves sidebar connection order from numbered display graph roots', () => {
         const graph = buildLinearGraph();
+        const positions = new Map([
+            [graph.nodes[0], { x: 0, y: 0 }],
+            [graph.nodes[1], { x: 1, y: 0 }],
+            [graph.nodes[2], { x: 2, y: 0 }]
+        ]);
         assignBftNumbers({
             displayGraph: graph,
             sourceGraph: graph,
-            viewGraph: mockViewGraph(new Map([
-                [graph.nodes[0], { x: 0, y: 0 }],
-                [graph.nodes[1], { x: 1, y: 0 }],
-                [graph.nodes[2], { x: 2, y: 0 }]
-            ])),
+            viewGraph: mockViewGraph(positions, buildLinearViewEdges(graph, positions)),
             layoutDirection: 'horizontal'
         });
         const value = graph.nodes[0].outputs[0].value[0];
         const alias = { name: value.name };
         const resolved = resolveSidebarBftValue(alias, [graph]);
-        assert.equal(resolved._bftEdgeNumber, 1);
+        assert.equal(resolved._bftEdgeNumber, 2);
     });
 
     it('detects when header title fills majority of header width', () => {
@@ -487,15 +607,13 @@ describe('ambapb bft numbering', () => {
         assignBftNumbers({
             displayGraph: graph,
             sourceGraph: graph,
-            viewGraph: mockViewGraph(positions),
+            viewGraph: mockViewGraph(positions, buildDualInputViewEdges(graph, positions)),
             layoutDirection: 'horizontal'
         });
         assert.equal(leftEntry._bftNumber, 1);
         assert.equal(rightEntry._bftNumber, 2);
-        assert.equal(leftEntry.outputs[0].value[0]._bftEdgeNumber, 1);
-        assert.equal(rightEntry.outputs[0].value[0]._bftEdgeNumber, 2);
-        assert.equal(graph.inputs[0].value[0]._bftEdgeNumber, undefined);
-        assert.equal(graph.inputs[1].value[0]._bftEdgeNumber, undefined);
+        assert.equal(graph.inputs.find((input) => input.value[0].name === 'left_in').value[0]._bftEdgeNumber, 1);
+        assert.equal(graph.inputs.find((input) => input.value[0].name === 'right_in').value[0]._bftEdgeNumber, 2);
     });
 
     it('numbers multi-output nodes from left to right by consumer position', () => {
@@ -532,16 +650,73 @@ describe('ambapb bft numbering', () => {
             [graph.nodes[1], { x: 1, y: 0 }],
             [graph.nodes[2], { x: 1, y: 10 }]
         ]);
+        const split = graph.nodes[0];
+        const top = graph.nodes[1];
+        const bottom = graph.nodes[2];
+        const multiEdges = new Map();
+        registerEdge(multiEdges, mockEdge(
+            mockNodeView(split, 0, 0),
+            mockNodeView(top, 1, 0),
+            split.outputs[0].value[0]
+        ));
+        registerEdge(multiEdges, mockEdge(
+            mockNodeView(split, 0, 0),
+            mockNodeView(bottom, 1, 10),
+            split.outputs[1].value[0]
+        ));
         assignBftNumbers({
             displayGraph: graph,
             sourceGraph: graph,
-            viewGraph: mockViewGraph(positions),
+            viewGraph: mockViewGraph(positions, multiEdges),
             layoutDirection: 'horizontal'
         });
         const outTop = graph.nodes[0].outputs[0].value[0];
         const outBottom = graph.nodes[0].outputs[1].value[0];
         assert.equal(outTop._bftEdgeNumber, 1);
         assert.equal(outBottom._bftEdgeNumber, 2);
+    });
+
+    it('does not leave gaps when a node has unused output slots', () => {
+        const graph = {
+            name: 'unused_output',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'producer',
+                    type: { name: 'Split' },
+                    inputs: [],
+                    outputs: [
+                        { name: 'used', value: [tensor('used_out')] },
+                        { name: 'unused', value: [tensor('unused_out')] }
+                    ]
+                },
+                {
+                    name: 'consumer',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('used_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('done')] }]
+                }
+            ]
+        };
+        const positions = new Map([
+            [graph.nodes[0], { x: 0, y: 0 }],
+            [graph.nodes[1], { x: 1, y: 0 }]
+        ]);
+        const edges = new Map();
+        registerEdge(edges, mockEdge(
+            mockNodeView(graph.nodes[0], 0, 0),
+            mockNodeView(graph.nodes[1], 1, 0),
+            graph.nodes[0].outputs[0].value[0]
+        ));
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(positions, edges),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(graph.nodes[0].outputs[0].value[0]._bftEdgeNumber, 1);
+        assert.equal(graph.nodes[0].outputs[1].value[0]._bftEdgeNumber, undefined);
     });
 
     it('detects compact nodes by measured width', () => {

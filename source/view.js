@@ -585,11 +585,31 @@ view.View = class {
         }
     }
 
-    _addBftConnectionSidebarProperty(sidebar, value) {
+    _addBftConnectionSidebarProperty(sidebar, value, from, to) {
+        const bftNumber = this._resolveConnectionBftNumber(value, from, to);
+        if (bftNumber != null) {
+            sidebar.addProperty('order', String(bftNumber), 'nowrap');
+        }
+    }
+
+    _resolveConnectionBftNumber(value, from, to) {
+        const graph = this._target;
+        if (graph && graph._table && from) {
+            const fromView = graph._table.get(from);
+            const toModel = Array.isArray(to) && to.length > 0 ? to[0] : null;
+            const toView = toModel ? graph._table.get(toModel) : null;
+            if (fromView && toView && fromView._edges) {
+                const edge = fromView._edges.get(toView);
+                if (edge && edge._bftEdgeNumber != null) {
+                    return edge._bftEdgeNumber;
+                }
+            }
+        }
         const displayValue = resolveSidebarBftValue(value, this._bftDisplayGraphRoots());
         if (displayValue && displayValue._bftEdgeNumber != null) {
-            sidebar.addProperty('order', String(displayValue._bftEdgeNumber), 'nowrap');
+            return displayValue._bftEdgeNumber;
         }
+        return null;
     }
 
     _graphBusyElement() {
@@ -7202,6 +7222,10 @@ view.Output = class extends grapher.Node {
         return this.context.target === this.context.view.activeTarget ? null : this.context.target;
     }
 
+    get class() {
+        return 'graph-output';
+    }
+
     get inputs() {
         return [this.value];
     }
@@ -9420,7 +9444,7 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
                 item.toggle();
             }
         }
-        this._view._addBftConnectionSidebarProperty(this, displayValue);
+        this._view._addBftConnectionSidebarProperty(this, displayValue, from, to);
         if (from) {
             this.addSection('Inputs');
             this.addNodeList('from', [from]);
@@ -9497,7 +9521,7 @@ view.ConnectionSidebar = class extends view.ObjectSidebar {
         const to = this._to;
         const [name] = value.name.split('\n');
         this.addProperty('name', name);
-        this._view._addBftConnectionSidebarProperty(this, value);
+        this._view._addBftConnectionSidebarProperty(this, value, from, to);
         if (value.type) {
             const item = new view.ValueView(this._view, value);
             this.addEntry('type', item);
