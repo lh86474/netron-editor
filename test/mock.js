@@ -302,10 +302,20 @@ mock.Host = class {
         if (!mock.Host.window) {
             mock.Host.window = new Window();
             const document = mock.Host.window.document;
-            for (const id of ['target', 'sidebar']) {
+            for (const id of ['target', 'sidebar-stack', 'sidebar-modified', 'sidebar-original', 'diff-container']) {
                 const element = document.createElement('div');
                 element.setAttribute('id', id);
+                if (id.startsWith('sidebar-') && id !== 'sidebar-stack') {
+                    element.className = 'sidebar sidebar-pane';
+                }
                 document.body.appendChild(element);
+            }
+            for (const suffix of ['title', 'content', 'closebutton']) {
+                for (const prefix of ['sidebar-modified', 'sidebar-original']) {
+                    const child = document.createElement('div');
+                    child.setAttribute('id', `${prefix}-${suffix}`);
+                    document.getElementById(prefix).appendChild(child);
+                }
             }
         }
     }

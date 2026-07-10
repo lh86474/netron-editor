@@ -223,6 +223,9 @@ desktop.Host = class {
         electron.ipcRenderer.on('find', () => {
             this._view.find();
         });
+        electron.ipcRenderer.on('find-node-by-order', () => {
+            this._view.findNodeByOrder();
+        });
         electron.ipcRenderer.on('about', () => {
             this._view.about();
         });
@@ -242,8 +245,21 @@ desktop.Host = class {
                     graphContainer.style.marginTop = '32px';
                     graphContainer.style.height = 'calc(100% - 32px)';
                 }
-                this._element('sidebar-title').style.marginTop = '24px';
-                this._element('sidebar-closebutton').style.marginTop = '24px';
+                const stackElement = this._element('sidebar-stack');
+                if (stackElement) {
+                    stackElement.style.marginTop = '32px';
+                    stackElement.style.height = 'calc(100% - 32px)';
+                }
+                for (const prefix of ['sidebar-modified', 'sidebar-original']) {
+                    const title = this._element(`${prefix}-title`);
+                    const closeButton = this._element(`${prefix}-closebutton`);
+                    if (title) {
+                        title.style.marginTop = '24px';
+                    }
+                    if (closeButton) {
+                        closeButton.style.marginTop = '24px';
+                    }
+                }
                 this._element('titlebar').classList.add('titlebar-visible');
             }
             if (this._environment.titlebar && this._environment.platform !== 'darwin' && !data.fullscreen) {

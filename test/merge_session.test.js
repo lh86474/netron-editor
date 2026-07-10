@@ -294,4 +294,53 @@ describe('MergeSession', () => {
         assert.equal(session.getUpstreamSlot(), null);
         assert.equal(session.mapping.length, 0);
     });
+
+    it('swapRoles remains stable across repeated flips', () => {
+        const producer = makeIdentityModel({
+            name: 'producer',
+            inputs: [{ name: 'x', elemType: 1, dims: [1, 768] }],
+            outputs: [{ name: 'hidden', elemType: 1, dims: [1, 768] }],
+            nodes: [{ name: 'up', input: ['x'], output: ['hidden'] }]
+        });
+        const consumer = makeIdentityModel({
+            name: 'consumer',
+            inputs: [{ name: 'features', elemType: 1, dims: [1, 768] }],
+            outputs: [{ name: 'y', elemType: 1, dims: [1, 10] }],
+            nodes: [{ name: 'down', input: ['features'], output: ['y'] }]
+        });
+        const session = createMergeSession();
+        session.setSlotModel('A', slotEntry(producer, 'producer.onnx'));
+        session.setSlotModel('B', slotEntry(consumer, 'consumer.onnx'));
+        assert.equal(session.getUpstreamSlot(), 'A');
+
+        for (let i = 0; i < 10; i++) {
+            assert.equal(session.swapRoles(), true);
+            assert.equal(session.getUpstreamSlot(), i % 2 === 0 ? 'B' : 'A');
+            assert.equal(session.roleDetection.userOverridden, true);
+            assert.equal(session.mapping.length, 0);
+            assert.equal(session.validation.ok, false);
+        }
+    });
+
+    it('updateMappingRow surfaces unknown upstream tensor names', () => {
+        const producer = makeIdentityModel({
+            name: 'producer',
+            inputs: [{ name: 'x', elemType: 1, dims: [1, 3] }],
+            outputs: [{ name: 'hidden', elemType: 1, dims: [1, 3] }],
+            nodes: [{ name: 'up', input: ['x'], output: ['hidden'] }]
+        });
+        const consumer = makeIdentityModel({
+            name: 'consumer',
+            inputs: [{ name: 'features', elemType: 1, dims: [1, 3] }],
+            outputs: [{ name: 'y', elemType: 1, dims: [1, 3] }],
+            nodes: [{ name: 'down', input: ['features'], output: ['y'] }]
+        });
+        const session = createMergeSession();
+        session.setSlotModel('A', slotEntry(producer, 'producer.onnx'));
+        session.setSlotModel('B', slotEntry(consumer, 'consumer.onnx'));
+        session.updateMappingRow('features', 'deleted_tensor');
+        assert.equal(session.mappingSource, 'manual');
+        assert.equal(session.validation.ok, false);
+        assert.ok(session.validation.errors.some((entry) => entry.code === 'UNKNOWN_UPSTREAM_OUTPUT'));
+    });
 });

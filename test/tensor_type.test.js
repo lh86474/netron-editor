@@ -11,6 +11,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     canonicalizeTensorTypeString,
+    tensorDataTypeByName,
     tensorTypeShapeDimensions,
     TensorTypeError
 } from '../source/tensor-type.js';
@@ -32,5 +33,61 @@ describe('tensor-type', () => {
         assert.deepEqual(tensorTypeShapeDimensions('float32[1,2]'), [1n, 2n]);
         assert.deepEqual(tensorTypeShapeDimensions('int64[batch]'), ['batch']);
         assert.equal(tensorTypeShapeDimensions('float32'), null);
+    });
+
+    it('rejects nested bracket shapes', () => {
+        assert.throws(() => canonicalizeTensorTypeString('float32[][]'), TensorTypeError);
+    });
+
+    it('canonicalizes long rank shapes', () => {
+        assert.equal(
+            canonicalizeTensorTypeString('float32[1,2,3,4,5,6,7,8,9,10]'),
+            'float32[1,2,3,4,5,6,7,8,9,10]'
+        );
+        assert.deepEqual(
+            tensorTypeShapeDimensions('float32[1,2,3,4,5,6,7,8,9,10]'),
+            [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 10n]
+        );
+    });
+
+    it('canonicalizes whitespace around type names and dimensions', () => {
+        assert.equal(canonicalizeTensorTypeString(' float32 [ 1 , 2 ] '), 'float32[1,2]');
+    });
+
+    it('rejects unknown symbolic dimensions during canonicalization', () => {
+        assert.throws(() => canonicalizeTensorTypeString('float32[?]'), TensorTypeError);
+        assert.deepEqual(tensorTypeShapeDimensions('float32[?]'), ['?']);
+    });
+
+    it('rejects fullwidth bracket characters', () => {
+        assert.throws(() => canonicalizeTensorTypeString('float32［1］'), TensorTypeError);
+    });
+
+    it('returns empty string for blank input values', () => {
+        assert.equal(canonicalizeTensorTypeString(''), '');
+        assert.equal(canonicalizeTensorTypeString('   '), '');
+        assert.equal(canonicalizeTensorTypeString(null), '');
+        assert.equal(canonicalizeTensorTypeString(undefined), '');
+    });
+
+    it('canonicalizes extended ONNX data types', () => {
+        const extendedTypes = [
+            ['float8e4m3fn', 17],
+            ['float8e4m3fnuz', 18],
+            ['float8e5m2', 19],
+            ['float8e5m2fnuz', 20],
+            ['uint4', 21],
+            ['int4', 22],
+            ['float4e2m1', 23],
+            ['float8e8m0', 24],
+            ['uint2', 25],
+            ['int2', 26]
+        ];
+        for (const [name, id] of extendedTypes) {
+            assert.equal(tensorDataTypeByName.get(name), id);
+            assert.equal(canonicalizeTensorTypeString(name), name);
+            assert.equal(canonicalizeTensorTypeString(`${name}[1,2]`), `${name}[1,2]`);
+            assert.equal(canonicalizeTensorTypeString(name.toUpperCase()), name);
+        }
     });
 });

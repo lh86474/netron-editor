@@ -204,4 +204,46 @@ describe('ambapb subgraph extract', () => {
         assert.equal(result.nodes.length, 2);
         assert.ok(result.nodes.some((node) => node.name === 'frag'));
     });
+
+    it('stripInlineExpansionPrefixes is idempotent', () => {
+        const extracted = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [{
+                name: 'inline::batch_call::inner_nvp',
+                type: { name: 'CVFlowNVP' },
+                attributes: [],
+                inputs: [{ name: 'input0', value: [{ name: 'inline::batch_call::sub_input_0' }] }],
+                outputs: [{ name: 'output', value: [{ name: 'inline::batch_call::sub_output_0' }] }],
+                _inlineExpanded: true
+            }]
+        };
+        const once = stripInlineExpansionPrefixes(extracted);
+        const twice = stripInlineExpansionPrefixes(once);
+        assert.deepEqual(twice, once);
+        assert.equal(twice.nodes[0].name, 'inner_nvp');
+        assert.equal(twice.nodes[0].inputs[0].value[0].name, 'sub_input_0');
+    });
+
+    it('stripInlineExpansionName preserves names that only contain inline:: as a substring', () => {
+        assert.equal(stripInlineExpansionName('tensor_inline::suffix'), 'tensor_inline::suffix');
+        assert.equal(stripInlineExpansionName('prefix::inline::batch_call::inner'), 'prefix::inline::batch_call::inner');
+    });
+
+    it('re-extract from a stripped graph does not accumulate inline prefixes', () => {
+        const source = buildRuntimeGraph();
+        const working = buildExtractWorkingGraph(source, new Set(['batch_call']));
+        const producer = working.nodes.find((node) => node.name === 'producer');
+        const inner = working.nodes.find((node) => node.name === 'inline::batch_call::inner_nvp');
+        let extracted = extractSubgraph(working, [producer], [inner]);
+        extracted = stripInlineExpansionPrefixes(extracted);
+
+        const model = { format: 'Mock', modules: [extracted] };
+        const editor = ModelEditor.createSession(model);
+        const reworking = buildExtractWorkingGraph(editor.modified.getGraph(0), new Set());
+        const renamedInner = reworking.nodes.find((node) => node.name === 'inner_nvp');
+        assert.ok(renamedInner);
+        assert.ok(!reworking.nodes.some((node) => node.name.includes('inline::')));
+    });
 });

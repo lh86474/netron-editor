@@ -12,6 +12,7 @@ import { mockChainModel } from './fixtures/mock-graph.js';
 import {
     ModelEditor,
     collectNodesBetween,
+    collectNodesBetweenMulti,
     extractSubgraph,
     findValueConsumers,
     promoteVisibleGraphOutputs,
@@ -298,5 +299,107 @@ describe('subgraph extract', () => {
         const inner = graph.nodes[0].attributes[0].value;
         assert.equal(inner.outputs.length, 2);
         assert.ok(inner.outputs.some((entry) => entry.value[0].name === 'sub_out_b'));
+    });
+
+    it('collectNodesBetweenMulti unions nodes across parallel paths in a diamond', () => {
+        const rootOut = tensor('root_out');
+        const leftOut = tensor('left_out');
+        const rightOut = tensor('right_out');
+        const mergeOut = tensor('merge_out');
+        const graph = {
+            name: 'diamond',
+            inputs: [{ name: 'input', value: [tensor('graph_in')] }],
+            outputs: [{ name: 'output', value: [mergeOut] }],
+            nodes: [
+                {
+                    name: 'root',
+                    type: { name: 'Conv' },
+                    inputs: [{ name: 'x', value: [tensor('graph_in')] }],
+                    outputs: [{ name: 'y', value: [rootOut] }]
+                },
+                {
+                    name: 'left',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [rootOut] }],
+                    outputs: [{ name: 'y', value: [leftOut] }]
+                },
+                {
+                    name: 'right',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [rootOut] }],
+                    outputs: [{ name: 'y', value: [rightOut] }]
+                },
+                {
+                    name: 'merge',
+                    type: { name: 'Add' },
+                    inputs: [
+                        { name: 'a', value: [leftOut] },
+                        { name: 'b', value: [rightOut] }
+                    ],
+                    outputs: [{ name: 'y', value: [mergeOut] }]
+                }
+            ]
+        };
+        const nodes = collectNodesBetweenMulti(graph, [graph.nodes[0]], [graph.nodes[3]]);
+        assert.equal(nodes.size, 4);
+        assert.ok(nodes.has(graph.nodes[2]));
+    });
+
+    it('findBoundaryNodes returns empty boundaries for an empty selection', () => {
+        const graph = mockChainModel.modules[0];
+        const { beginNodes, endNodes } = findBoundaryNodes(graph, []);
+        assert.equal(beginNodes.length, 0);
+        assert.equal(endNodes.length, 0);
+    });
+
+    it('promoteNestedGraphOutputs ignores non-graph node attributes', () => {
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [{
+                name: 'nvp',
+                type: { name: 'CVFlowNVP' },
+                attributes: [{ name: 'note', type: 'string', value: 'not-a-graph' }],
+                inputs: [],
+                outputs: []
+            }]
+        };
+        promoteNestedGraphOutputs(graph);
+        assert.equal(graph.outputs.length, 0);
+        assert.equal(graph.nodes[0].attributes[0].value, 'not-a-graph');
+    });
+
+    it('extractSubgraph promotes boundary inputs consumed outside the selection', () => {
+        const shared = tensor('shared');
+        const branch = tensor('branch');
+        const graph = {
+            name: 'fork',
+            inputs: [{ name: 'input', value: [tensor('graph_in')] }],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'producer',
+                    type: { name: 'Conv' },
+                    inputs: [{ name: 'x', value: [tensor('graph_in')] }],
+                    outputs: [{ name: 'y', value: [shared] }]
+                },
+                {
+                    name: 'selected',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [shared] }],
+                    outputs: [{ name: 'y', value: [branch] }]
+                },
+                {
+                    name: 'consumer',
+                    type: { name: 'Softmax' },
+                    inputs: [{ name: 'x', value: [shared] }],
+                    outputs: [{ name: 'y', value: [tensor('out')] }]
+                }
+            ]
+        };
+        const extracted = extractSubgraph(graph, [graph.nodes[1]], [graph.nodes[1]]);
+        assert.ok(extracted.inputs.some((entry) => entry.value[0].name === 'shared'));
+        assert.ok(extracted.outputs.some((entry) => entry.value[0].name === 'branch'));
     });
 });

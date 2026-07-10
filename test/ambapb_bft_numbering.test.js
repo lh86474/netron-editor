@@ -16,8 +16,13 @@ import {
     ensureBftNumbersForDisplayGraph,
     assignBftNumbers,
     clearBftMetadata,
+    findNodeByBftOrder,
+    formatBftNodeLocation,
+    getBftOrderRange,
     getCompiledGraphFromNode,
+    locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
+    parseBftOrderQuery,
     resolveAmbapbNumberingMode,
     resolveSidebarBftValue
 } from '../source/ambapb-bft-numbering.js';
@@ -338,8 +343,47 @@ describe('ambapb bft numbering', () => {
         assert.equal(compiled.outputs[0].value[0]._bftEdgeNumber, undefined);
         assert.equal(getCompiledGraphFromNode(graph.nodes[1]), compiled);
     });
+    it('leaves freestanding constants unnumbered when graph has inputs', () => {
+        const constant = {
+            name: 'const_3',
+            type: { name: 'Constant' },
+            inputs: [],
+            outputs: [{ name: 'y', value: [tensor('const_out')] }]
+        };
+        const conv = {
+            name: 'conv',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('x_in')] }],
+            outputs: [{ name: 'y', value: [tensor('conv_out')] }]
+        };
+        const constantOfShape = {
+            name: 'cos',
+            type: { name: 'ConstantOfShape' },
+            inputs: [{ name: 'x', value: [tensor('conv_out')] }],
+            outputs: [{ name: 'y', value: [tensor('cos_out')] }]
+        };
+        const graph = {
+            name: 'main',
+            inputs: [{ name: 'x', value: [tensor('x_in')] }],
+            outputs: [],
+            nodes: [constant, conv, constantOfShape]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [constant, { x: 0, y: 0 }],
+                [conv, { x: 1, y: 0 }],
+                [constantOfShape, { x: 2, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(conv._bftNumber, 1);
+        assert.equal(constantOfShape._bftNumber, 2);
+        assert.equal(constant._bftNumber, undefined);
+    });
 
-    it('assigns unreachable frag nodes at the end left to right', () => {
+    it('leaves unreachable frag nodes unnumbered', () => {
         const orphan = {
             name: 'orphan',
             type: { name: 'Conv' },
@@ -369,7 +413,7 @@ describe('ambapb bft numbering', () => {
             layoutDirection: 'horizontal'
         });
         assert.equal(connected._bftNumber, 1);
-        assert.equal(orphan._bftNumber, 2);
+        assert.equal(orphan._bftNumber, undefined);
     });
 
     it('sets wrapper numbers for inlined batch call nodes', () => {

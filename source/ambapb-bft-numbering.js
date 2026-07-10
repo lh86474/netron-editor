@@ -37,6 +37,20 @@ export const getCompiledGraphFromNode = (node) => {
     return null;
 };
 
+export const getCompiledGraphAttrName = (node) => {
+    if (!node) {
+        return null;
+    }
+    for (const name of COMPILED_GRAPH_ATTRS) {
+        for (const entry of graphArguments(node)) {
+            if (entry.name === name && entry.type === 'graph' && entry.value) {
+                return name;
+            }
+        }
+    }
+    return null;
+};
+
 const isShellNode = (node, skipTypes = FRAG_SHELL_TYPES) => {
     return Boolean(node && node.type && skipTypes.has(node.type.name));
 };
@@ -327,13 +341,11 @@ const mirrorEdgeNumberToTensor = (edge, number) => {
 };
 
 const isEntryNode = (graph, node, inputNames) => {
-    let hasNonInitializerInput = false;
     for (const input of node.inputs || []) {
         for (const value of argumentValues(input)) {
             if (!value || !value.name || value.initializer) {
                 continue;
             }
-            hasNonInitializerInput = true;
             if (inputNames.has(value.name)) {
                 return true;
             }
@@ -344,7 +356,10 @@ const isEntryNode = (graph, node, inputNames) => {
             }
         }
     }
-    return hasNonInitializerInput ? false : !hasInGraphProducer(graph, node);
+    if (inputNames.size === 0) {
+        return !hasInGraphProducer(graph, node);
+    }
+    return false;
 };
 
 const computeBftLevels = (graph, skipTypes, options = {}) => {
@@ -494,6 +509,7 @@ const buildBatchCallNumberMap = (sourceGraph, layoutDirection, viewGraph) => {
     let counter = 1;
     for (const entry of orderedGraphNodes(sourceGraph, viewGraph, {
         assignUnreachableAtEnd: false,
+        entryOnlySources: true,
         layoutDirection
     })) {
         if (entry.node.type?.name === 'BatchCall' || entry.node.type?.name === 'UserDefCall') {
@@ -544,6 +560,20 @@ const applyPersistedInlineBftNumbers = (displayGraph, sourceBftByNode) => {
             continue;
         }
         node._bftNumber = persisted;
+    }
+};
+
+const applyPersistedBftNumbersToGraph = (graph, sourceBftByNode) => {
+    if (!graph || !sourceBftByNode || sourceBftByNode.size === 0) {
+        return;
+    }
+    for (const nested of collectNestedGraphs(graph)) {
+        for (const node of nested.nodes || []) {
+            const persisted = sourceBftByNode.get(node);
+            if (persisted != null) {
+                node._bftNumber = persisted;
+            }
+        }
     }
 };
 
@@ -669,6 +699,7 @@ export const assignBftNumbers = (ctx) => {
     const mode = resolveAmbapbNumberingMode({ displayGraph, navigationHost });
     const compiledLike = mode === 'compiledFrag';
     const runtimeLike = mode === 'runtime';
+    const drilledView = compiledLike && sourceGraph && sourceGraph !== displayGraph;
 
     let sourceBftByNode = new Map();
     if (sourceGraph && runtimeLike) {
@@ -682,15 +713,19 @@ export const assignBftNumbers = (ctx) => {
         clearBftMetadata(sourceGraph);
     }
 
-    let nodeCounter = assignNumbersToGraphNodes(displayGraph, viewGraph, 1, {
-        assignUnreachableAtEnd: compiledLike,
-        entryOnlySources: resolveEntryOnlySources(displayGraph, compiledLike),
-        layoutDirection
-    });
+   if (drilledView && sourceBftByNode.size > 0) {
+        applyPersistedBftNumbersToGraph(displayGraph, sourceBftByNode);
+    } else {
+        let nodeCounter = assignNumbersToGraphNodes(displayGraph, viewGraph, 1, {
+            assignUnreachableAtEnd: compiledLike,
+            entryOnlySources: resolveEntryOnlySources(displayGraph, compiledLike),
+            layoutDirection
+        });
 
-    if (mode === 'runtime' || mode === 'compiledFrag') {
-        nodeCounter = assignNestedCompiledHosts(displayGraph, viewGraph, nodeCounter, layoutDirection);
-    }
+        if (mode === 'runtime' || mode === 'compiledFrag') {
+            nodeCounter = assignNestedCompiledHosts(displayGraph, viewGraph, nodeCounter, layoutDirection);
+        }
+    } 
 
     const displayTraversalByNode = new Map();
     for (const node of displayGraph.nodes || []) {
@@ -789,6 +824,93 @@ export const assignEdgeBftNumbers = (ctx) => {
 
 export const resolveNodeBftNumber = (node) => {
     return node && node._bftNumber != null ? node._bftNumber : null;
+};
+
+export const locateBftNodeInGraph = (rootGraph, targetNode) => {
+    if (!rootGraph || !targetNode) {
+        return null;
+    }
+    const walk = (graph, ancestors) => {
+        if ((graph.nodes || []).includes(targetNode)) {
+            return { graph, ancestors };
+        }
+        for (const shell of graph.nodes || []) {
+            const compiled = getCompiledGraphFromNode(shell);
+            if (!compiled) {
+                continue;
+            }
+            const found = walk(compiled, ancestors.concat({ shell, graph: compiled }));
+            if (found) {
+                return found;
+            }
+        }
+        return null;
+    };
+    return walk(rootGraph, []);
+};
+
+export const formatBftNodeLocation = (rootGraph, node) => {
+    const location = locateBftNodeInGraph(rootGraph, node);
+    if (!location || location.ancestors.length === 0) {
+        return null;
+    }
+    return location.ancestors
+        .map((entry) => entry.shell.name || entry.shell.type?.name || 'subgraph')
+        .join(' / ');
+};
+
+export const getBftOrderRange = (graph) => {
+    if (!graph) {
+        return null;
+    }
+    let max = 0;
+    for (const nested of collectNestedGraphs(graph)) {
+        for (const node of nested.nodes || []) {
+            if (node._bftNumber != null) {
+                max = Math.max(max, node._bftNumber);
+            }
+        }
+    }
+    return max > 0 ? { min: 1, max } : null;
+};
+
+export const findNodeByBftOrder = (graph, order) => {
+    if (!graph || !Number.isInteger(order) || order <= 0) {
+        return null;
+    }
+    for (const nested of collectNestedGraphs(graph)) {
+        const node = (nested.nodes || []).find((entry) => entry._bftNumber === order);
+        if (node) {
+            return node;
+        }
+    }
+    return null;
+};
+
+export const parseBftOrderQuery = (text, graph) => {
+    const trimmed = (text || '').trim();
+    if (!trimmed) {
+        return { ok: false, error: 'Enter an order number.' };
+    }
+    if (!/^\d+$/.test(trimmed)) {
+        return { ok: false, error: 'Enter a positive whole number.' };
+    }
+    const value = Number(trimmed);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        return { ok: false, error: 'Enter a positive whole number.' };
+    }
+    const range = getBftOrderRange(graph);
+    if (!range) {
+        return { ok: false, error: 'No order numbers in this graph.' };
+    }
+    if (value < range.min || value > range.max) {
+        return { ok: false, error: `Order must be between ${range.min} and ${range.max}.` };
+    }
+    const node = findNodeByBftOrder(graph, value);
+    if (!node) {
+        return { ok: false, error: `No node with order ${value}.` };
+    }
+    return { ok: true, value, node };
 };
 
 export const resolveEdgeBftNumber = (value) => {

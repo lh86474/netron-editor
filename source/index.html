@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Security-Policy" content="script-src 'self'">
 <meta name="version" content="0.0.0">
 <meta name="date" content="">
-<title>Netron</title>
+<title>Netron Editor</title>
 <link rel="stylesheet" type="text/css" href="grapher.css">
 <link rel="shortcut icon" type="image/x-icon" href="favicon.ico">
 <link rel="icon" type="image/png" href="icon.png">
@@ -19,7 +19,6 @@
 html { touch-action: none; overflow: hidden; width: 100%; height: 100%; -ms-text-size-adjust: 100%; -webkit-text-size-adjust: 100%; text-rendering: optimizeLegibility; -webkit-text-rendering: optimizeLegibility; -moz-text-rendering: optimizeLegibility; -ms-text-rendering: optimizeLegibility; -o-text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-font-smoothing: antialiased; -ms-font-smoothing: antialiased; -o-font-smoothing: antialiased; }
 body { touch-action: none; overflow: hidden; width: 100%; height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 12px; text-rendering: geometricPrecision; }
 button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; }
-:root { --chrome-height: 32px; --chrome-inset: 8px; --chrome-width: 32px; }
 :root { --chrome-height: 32px; --chrome-inset: 8px; --chrome-width: 32px; }
 .center { position: absolute; margin: auto; top: 0; right: 0; bottom: 0; left: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .select { user-select: text; -webkit-user-select: text; -moz-user-select: text; }
@@ -46,6 +45,10 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .graph-pane-original .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-modified .graph-pane-label { left: calc(var(--chrome-inset) + var(--chrome-width)); }
 .graph-pane-readonly { cursor: default; }
+.graph-pane.graph-pane-focused .graph-pane-label {
+    color: #333;
+    font-weight: 700;
+}
 .pane-divider { width: 6px; cursor: col-resize; z-index: 10; flex-shrink: 0; margin: 0 -3px; background-color: #ccc; background-clip: padding-box; border-left: 2px solid transparent; border-right: 3px solid transparent; }
 .pane-divider-vertical { display: none; height: 6px; cursor: row-resize; z-index: 10; flex-shrink: 0; margin: -3px 0; background-color: #ccc; background-clip: padding-box; border-top: 2px solid transparent; border-bottom: 3px solid transparent; }
 .merge-container { display: none; flex-direction: column; height: 100%; width: 100%; overflow: hidden; }
@@ -269,6 +272,10 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .welcome .notification .logo-name { display: none; }
 .welcome .toolbar { display: none; }
 @media (prefers-color-scheme: dark) {
+.graph-pane.graph-pane-focused .graph-pane-label {
+    color: #f0f0f0;
+    font-weight: 700;
+}
 .default { background-color: #404040; }
 .diff-container { background-color: #404040; }
 .graph-pane { background-color: #404040; }
@@ -382,11 +389,19 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .about .logo-github { top: 370px; }
 .merge-onnx-button { top: 280px; }
 }
-.sidebar { display: flex; flex-direction: column; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 12px; height: 100%; right: -100%; position: fixed; transition: 0.1s; top: 0; background-color: #ececec; color: #242424; overflow: hidden; border-left: 1px solid rgba(255, 255, 255, 0.5); opacity: 0; }
+.sidebar-stack { position: fixed; top: 0; right: 0; height: 100%; width: 0; z-index: 5; pointer-events: none; overflow: hidden; border-left: 1px solid rgba(255, 255, 255, 0.5); background-color: #ececec;}
+.sidebar-stack.sidebar-stack-open { display: flex; flex-direction: column; width: min(calc(100vw * 0.6), 42em); pointer-events: auto; }
+.sidebar { display: none; flex-direction: column; position: relative; flex: 1 1 0; min-height: 0; width: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif; font-size: 12px; background-color: #ececec; color: #242424; overflow: hidden; opacity: 0; pointer-events: none; transition: opacity 0.1s; }
+.sidebar-pane:not(.sidebar-open) .sidebar-pane-badge { display: none;}
+.sidebar-pane.sidebar-open { display: flex; opacity: 1; pointer-events: auto; }
+.sidebar-stack.sidebar-count-1 .sidebar-pane.sidebar-open { flex: 1 1 100%; max-height: 100%; }
+.sidebar-stack.sidebar-count-2 .sidebar-pane.sidebar-open { flex: 1 1 50%; max-height: 50%; }
+.sidebar-pane.sidebar-split-divider { border-top: 1px solid #ccc; }
+.sidebar-pane-badge { position: absolute; top: 40px; left: 20px; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #888; pointer-events: none; user-select: none; }
 .sidebar-title { font-weight: bold; font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase; height: 20px; margin: 0; padding: 20px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .sidebar-closebutton { padding: 8px 8px 8px 32px; text-decoration: none; font-size: 25px; color: #777777; opacity: 1.0; display: block; transition: 0.2s; position: absolute; top: 0; right: 15px; margin-left: 50px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .sidebar-closebutton:hover { color: #242424; }
-.sidebar-content { display: flex; flex-direction: column; flex-grow: 1; height: 0; }
+.sidebar-content { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .sidebar-header { font-weight: bold; font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase; height: 20px; margin: 0; margin-top: 30px; padding-top: 10px; padding-bottom: 10px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .sidebar-section { font-weight: bold; font-size: 11px; text-transform: uppercase; line-height: 1.25; margin-top: 16px; margin-bottom: 16px; display: block; user-select: none; -webkit-user-select: none; -moz-user-select: none; cursor: default; }
 .sidebar-object { flex-grow: 1; padding: 0px 20px 20px 20px; overflow-y: auto; }
@@ -468,6 +483,9 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .sidebar-find-content li { color: #666; font-size: 13px; height: 22px; line-height: 22px; padding: 0 12px 0 12px; outline: 0; white-space: nowrap; border-radius: 3px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .sidebar-find-content li.focus { background: #e5e5e5; color: #000; }
 .sidebar-find-content-icon { stroke: #555; fill: #555; float: left; width: 16px; height: 16px; padding: 3px; pointer-events: none; }
+.sidebar-find-order-hint { margin: 0 20px 4px 20px; color: #888; font-size: 12px; }
+.sidebar-find-order-error { margin: 0 20px 8px 20px; color: #b00020; font-size: 12px; min-height: 16px; }
+.sidebar-validation-error { margin: 0 20px 8px 20px; color: #b00020; font-size: 12px; min-height: 16px; }
 .sidebar-documentation { flex-grow: 1; padding: 0px 20px 20px 20px; overflow-y: auto; font-size: 13px; line-height: 1.5; margin: 0; }
 .sidebar-documentation h1 { font-weight: bold; font-size: 13px; line-height: 1.25; border-bottom: 1px solid #e8e8e8; padding-bottom: 0.3em; margin-top: 0; margin-bottom: 16px; }
 .sidebar-documentation h2 { font-weight: bold; font-size: 13px; line-height: 1.25; margin-top: 20px; margin-bottom: 16px; text-transform: uppercase; border: 0; }
@@ -483,6 +501,9 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .sidebar-documentation ul { margin-top: 6px; margin-bottom: 6px; padding-left: 20px; }
 .sidebar-documentation blockquote { margin-left: 15px; margin-right: 15px; }
 @media (prefers-color-scheme: dark) {
+    .sidebar-stack { background-color: #2d2d2d; border-left-color: rgba(0, 0, 0, 0); }
+    .sidebar-pane.sidebar-split-divider { border-top-color: #555; }
+    .sidebar-pane-badge { color: #888; }
     .sidebar html { color: #dfdfdf; }
     .sidebar { background-color: #2d2d2d; color: #dfdfdf; border-left: 1px solid rgba(0, 0, 0, 0); }
     .sidebar-closebutton { padding: 8px 8px 8px 32px; text-decoration: none; font-size: 25px; color: #777777; opacity: 1.0; display: block; transition: 0.2s; position: absolute; top: 0; right: 15px; margin-left: 50px; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
@@ -522,6 +543,9 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
     .sidebar-find-content li { color: #aaaaaa; }
     .sidebar-find-content li.focus { background: #383838; color: #dfdfdf; }
     .sidebar-find-content-icon { stroke: #888888; fill: #888888; }
+    .sidebar-find-order-hint { color: #888888; }
+    .sidebar-find-order-error { color: #ff8a80; }
+    .sidebar-validation-error { color: #ff8a80;}
     .sidebar-item-value-expander { color: #888; }
     .sidebar-item-value-expander:hover { color: #e5e5e5; }
     .sidebar-item-value-button { color: #888; }
@@ -531,12 +555,13 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 @media screen and (prefers-reduced-motion: reduce) {
 .menu { transition: none; }
 .sidebar { transition: none; }
+.sidebar-stack { transition: none; }
 }
 </style>
 </head>
 <body class="welcome spinner">
 <div id="diff-container" class="diff-container">
-    <div id="target-original" class="graph-pane graph-pane-original graph-pane-readonly target" tabindex="0">
+    <div id="target-original" class="graph-pane graph-pane-original graph-pane-readonly" tabindex="0">
         <div class="graph-pane-label">Original</div>
     </div>
     <div id="pane-divider" class="pane-divider"></div>
@@ -614,10 +639,19 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
     <input type="file" id="merge-slot-a-file-dialog" class="open-file-dialog" accept=".onnx">
     <input type="file" id="merge-slot-b-file-dialog" class="open-file-dialog" accept=".onnx">
 </div>
-<div id="sidebar" class="sidebar">
-    <h1 id="sidebar-title" class="sidebar-title"></h1>
-    <button type="button" id="sidebar-closebutton" class="sidebar-closebutton">&times;</button>
-    <div id="sidebar-content" class="sidebar-content"></div>
+<div id="sidebar-stack" class="sidebar-stack">
+    <div id="sidebar-original" class="sidebar sidebar-pane" data-pane="original">
+        <span class="sidebar-pane-badge">Original</span>
+        <h1 id="sidebar-original-title" class="sidebar-title"></h1>
+        <button type="button" id="sidebar-original-closebutton" class="sidebar-closebutton">&times;</button>
+        <div id="sidebar-original-content" class="sidebar-content"></div>
+    </div>
+    <div id="sidebar-modified" class="sidebar sidebar-pane" data-pane="modified">
+        <span class="sidebar-pane-badge">Modified</span>
+        <h1 id="sidebar-modified-title" class="sidebar-title"></h1>
+        <button type="button" id="sidebar-modified-closebutton" class="sidebar-closebutton">&times;</button>
+        <div id="sidebar-modified-content" class="sidebar-content"></div>
+    </div>
     <svg width="0" height="0" display="none">
         <defs>
             <symbol id="sidebar-icon-node" viewBox="0 0 20 20">

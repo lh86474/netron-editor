@@ -52,4 +52,32 @@ describe('graph block expansion keys', () => {
         assert.equal(ctx.isBlockExpanded(keyB), false);
         assert.equal(ctx.blocks.has(sharedSubgraph), false);
     });
+
+    it('blockKey returns null when host entity id is missing', () => {
+        const ctx = new GraphBlockExpansion();
+        assert.equal(ctx.blockKey(null, 'compiled_prim_graph'), null);
+        assert.equal(ctx.toggleBlockExpanded(null), false);
+        assert.equal(ctx.isBlockExpanded(null), false);
+        assert.equal(ctx.blocks.size, 0);
+    });
+
+    it('toggleBlockExpanded collapses after an even number of toggles', () => {
+        const ctx = new GraphBlockExpansion();
+        const key = ctx.blockKey('graph:0/node:1', 'compiled_prim_graph');
+        for (let i = 0; i < 100; i++) {
+            ctx.toggleBlockExpanded(key);
+        }
+        assert.equal(ctx.isBlockExpanded(key), false);
+        assert.equal(ctx.blocks.size, 0);
+    });
+
+    it('blockKey distinguishes entity ids that differ only by path separators', () => {
+        const ctx = new GraphBlockExpansion();
+        const keyA = ctx.blockKey('graph:0/node:3', 'compiled_prim_graph');
+        const keyB = ctx.blockKey('graph:0/node:3/compiled_prim_graph/node:2', 'compiled_prim_graph');
+        assert.notEqual(keyA, keyB);
+        ctx.toggleBlockExpanded(keyA);
+        assert.equal(ctx.isBlockExpanded(keyA), true);
+        assert.equal(ctx.isBlockExpanded(keyB), false);
+    });
 });

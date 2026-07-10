@@ -28,8 +28,14 @@ import { GraphPane } from './graph-pane.js';
 import { MergeWorkspaceController } from './merge-workspace.js';
 import {
     assignBftNumbers,
+    assignEdgeBftNumbers,
+    formatBftNodeLocation,
+    getBftOrderRange,
+    getCompiledGraphAttrName,
     getCompiledGraphFromNode,
+    locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
+    parseBftOrderQuery,
     resolveSidebarBftValue
 } from './ambapb-bft-numbering.js';
 import {
@@ -89,6 +95,7 @@ view.View = class {
         this._leftPane = null;
         this._rightPane = null;
         this.__activePane = 'modified';
+        this._focusedPaneId = null;
         this._leftPath = [];
         this._rightPath = [];
         this._mergePanePaths = new Map();
@@ -110,8 +117,10 @@ view.View = class {
         this._danglingNodeNames = new Set();
         this._applyingHistory = false;
         this._exportBasenameOverride = null;
-        this._sidebar = new view.Sidebar(this._host);
+        this._sidebarStack = [];
+        this._initSidebars();
         this._find = null;
+        this._findNodeByOrder = null;
         this._modelFactoryService = new view.ModelFactoryService(this._host);
         this._modelFactoryService.import();
         this._worker = this._host.environment('serial') ? null : new view.Worker(this._host);
@@ -172,11 +181,28 @@ view.View = class {
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget('original');
             });
-            this._element('sidebar').addEventListener('mousewheel', (e) => {
-                if (e.shiftKey || e.ctrlKey) {
-                    e.preventDefault();
+            for (const paneId of ['original', 'modified']) {
+                const sidebarEl = this._element(`sidebar-${paneId}`);
+                if (sidebarEl) {
+                    sidebarEl.addEventListener('mousewheel', (e) => {
+                        if (e.shiftKey || e.ctrlKey) {
+                            e.preventDefault();
+                        }
+                    }, { passive: false });
                 }
-            }, { passive: false });
+            }
+            this._sidebarEscapeHandler = (e) => {
+                if (e.keyCode === 27 && this._sidebarStack.length > 0) {
+                    const active = this._host.document.activeElement;
+                    const tag = active ? active.tagName : '';
+                    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !(active && active.isContentEditable)) {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        this._closeTopSidebar();
+                    }
+                }
+            };
+            this._host.document.addEventListener('keydown', this._sidebarEscapeHandler);
             this._host.document.addEventListener('keydown', (e) => {
                 if (this._target && !e.metaKey && !e.ctrlKey) {
                     this._target.select(null);
@@ -315,6 +341,12 @@ view.View = class {
                     execute: () => this.find(),
                     enabled: () => this.activeTarget
                 });
+                edit.add({
+                    label: 'Find Node by &Order...',
+                    accelerator: 'CmdOrCtrl+G',
+                    execute: () => this.findNodeByOrder(),
+                    enabled: () => this.activeTarget
+                });
                 const view = this._menu.group('&View');
                 view.add({
                     label: () => this.options.attributes ? 'Hide &Attributes' : 'Show &Attributes',
@@ -427,9 +459,7 @@ view.View = class {
         this._host.event('screen_view', {
             screen_name: page,
         });
-        if (this._sidebar) {
-            this._sidebar.close();
-        }
+        this._closeAllSidebars();
         if (this._menu) {
             this._menu.close();
         }
@@ -502,17 +532,27 @@ view.View = class {
 
     _bftNavigationHost(pane) {
         const path = pane ? this._panePathArray(pane.id) : null;
-        if (!Array.isArray(path) || path.length === 0) {
+        if (!Array.isArray(path) || path.length < 2) {
             return null;
         }
-        const state = path[0].state;
+        const state = path[1].state;
         return state && state.context ? state.context : null;
     }
 
+    _resolveRootPaneSourceGraph(pane, currentSourceGraph) {
+        const path = pane ? this._panePathArray(pane.id) : null;
+        if (!path || path.length <= 1) {
+            return currentSourceGraph;
+        }
+        const rootTarget = path[path.length -1].target;
+        return this._resolvePaneSourceGraph(pane, rootTarget) || currentSourceGraph;
+    }
+
     _applyBftNumbering(pane, displayGraph, sourceGraph, viewGraph) {
+        const rootSourceGraph = this._resolveRootPaneSourceGraph(pane, sourceGraph);
         assignBftNumbers({
             displayGraph,
-            sourceGraph: sourceGraph || displayGraph,
+            sourceGraph: rootSourceGraph || sourceGraph || displayGraph,
             viewGraph,
             layoutDirection: this._bftLayoutDirection(),
             navigationHost: this._bftNavigationHost(pane)
@@ -660,26 +700,64 @@ view.View = class {
         }
     }
 
-    find() {
-        if (this._target && this._sidebar.identifier !== 'find') {
-            this._target.select(null);
-            const sidebar = new view.FindSidebar(this, this._find, this.activeTarget, this.activeSignature);
+   find() {
+        const paneId = this._focusedPaneIdOrDefault();
+        const paneSidebar = this._sidebarForPane(paneId);
+        if (this._target && paneSidebar.identifier !== 'find') {
+            const grapher = this._focusedPaneGrapher();
+            const searchTarget = this._focusedPaneSearchTarget();
+            const searchSignature = this._focusedPaneSearchSignature();
+            if (grapher) {
+                grapher.select(null);
+            }
+            const sidebar = new view.FindSidebar(this, this._find, searchTarget, searchSignature);
             sidebar.on('state-changed', (sender, state) => {
                 this._find = state;
             });
             sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value], 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.select([value], 'sidebar'));
+                }
             });
             sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
+                if (grapher) {
+                    grapher.focus([value]);
+                }
             });
             sidebar.on('blur', (sender, value) => {
-                this._target.blur([value]);
+                if (grapher) {
+                    grapher.blur([value]);
+                }
             });
             sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value, 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.activate(value, 'sidebar'));
+                }
             });
-            this._sidebar.open(sidebar, 'Find');
+            paneSidebar.open(sidebar, 'Find');
+        }
+    }
+
+    findNodeByOrder() {
+        const paneId = this._focusedPaneIdOrDefault();
+        const paneSidebar = this._sidebarForPane(paneId);
+        if (this._target && paneSidebar.identifier !== 'find-node-by-order') {
+            const grapher = this._focusedPaneGrapher();
+            const searchTarget = this._focusedPaneSearchTarget();
+            if (grapher) {
+                grapher.select(null);
+            }
+            const sidebar = new view.FindNodeByOrderSidebar(this, this._findNodeByOrder, searchTarget);
+            sidebar.on('state-changed', (sender, state) => {
+                this._findNodeByOrder = state;
+            });
+            sidebar.on('select', async (sender, node) => {
+                await this._navigateAndSelectBftNode(node);
+            });
+            sidebar.on('activate', async (sender, node) => {
+                await this._navigateAndActivateBftNode(node);
+            });
+            paneSidebar.open(sidebar, 'Find Node by Order');
         }
     }
 
@@ -937,6 +1015,121 @@ view.View = class {
         return this._target;
     }
 
+    _focusedPaneIdOrDefault() {
+        return this._focusedPaneId || this._activePane || 'modified';
+    }
+
+    _focusedPaneGrapher() {
+        const paneId = this._focusedPaneIdOrDefault();
+        return this._paneGraph(paneId) || this._grapherForTarget(this.activeTarget) || this._target;
+    }
+
+    _focusedPaneSearchTarget() {
+        const grapher = this._focusedPaneGrapher();
+        if (grapher && grapher.target) {
+            return grapher.target;
+        }
+        const path = this._panePathArray(this._focusedPaneIdOrDefault());
+        return path && path.length > 0 ? path[0].target : this.activeTarget;
+    }
+
+    _focusedPaneSearchSignature() {
+        const path = this._panePathArray(this._focusedPaneIdOrDefault());
+        return path && path.length > 0 ? path[0].signature : this.activeSignature;
+    }
+
+    _resolveShellGraphBlockKey(shellNode) {
+        if (!shellNode || !this._editSession) {
+            return null;
+        }
+        const entity = locateNodeEntity(this._editSession.modified.model, shellNode);
+        if (!entity || !entity.nodeId) {
+            return null;
+        }
+        const attrName = getCompiledGraphAttrName(shellNode);
+        if (!attrName) {
+            return null;
+        }
+        return `${entity.nodeId}/${attrName}`;
+    }
+
+    async _expandBlocksForBftLocation(location, paneId) {
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher || !location || !Array.isArray(location.ancestors)) {
+            return false;
+        }
+        let changed = false;
+        for (const ancestor of location.ancestors) {
+            const blockKey = this._resolveShellGraphBlockKey(ancestor.shell);
+            if (blockKey && !grapher.blocks.has(blockKey)) {
+                grapher.blocks.add(blockKey);
+                changed = true;
+            }
+        }
+        if (!changed) {
+            return true;
+        }
+        await this.refresh(null, { paneId, busy: false });
+        return true;
+    }
+
+    async _navigateAndActivateBftNode(modelNode, source = 'sidebar') {
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher || !modelNode) {
+            return false;
+        }
+        if (grapher._table && grapher._table.has(modelNode)) {
+            return this._scrollToNodeInFocusedPane(modelNode, source);
+        }
+        const searchRoot = this._focusedPaneSearchTarget();
+        const location = locateBftNodeInGraph(searchRoot, modelNode);
+        if (!location || location.ancestors.length === 0) {
+            return false;
+        }
+        const paneId = this._focusedPaneIdOrDefault();
+        if (!await this._expandBlocksForBftLocation(location, paneId)) {
+            return false;
+        }
+        return this._scrollToNodeInFocusedPane(modelNode, source);
+    }
+
+    async _navigateAndSelectBftNode(modelNode, source = 'sidebar') {
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher || !modelNode) {
+            return;
+        }
+        if (grapher._table && grapher._table.has(modelNode)) {
+            grapher.scrollTo(grapher.select([modelNode], source));
+            return;
+        }
+        const searchRoot = this._focusedPaneSearchTarget();
+        const location = locateBftNodeInGraph(searchRoot, modelNode);
+        if (!location || location.ancestors.length === 0) {
+            return;
+        }
+        const paneId = this._focusedPaneIdOrDefault();
+        if (!await this._expandBlocksForBftLocation(location, paneId)) {
+            return;
+        }
+        const refreshed = this._focusedPaneGrapher();
+        if (refreshed) {
+            refreshed.scrollTo(refreshed.select([modelNode], source));
+        }
+    }
+
+    _scrollToNodeInFocusedPane(modelNode, source = 'sidebar') {
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher || !modelNode) {
+            return false;
+        }
+        const elements = grapher.activate(modelNode, source);
+        if (elements && elements.length > 0) {
+            grapher.scrollTo(elements, source);
+            return true;
+        }
+        return false;
+    }
+
     //Search order: merge panes, main editor panes (original modified)
     // If we can't find the panes, we just return this._target, the original single-grapher behavior
     _grapherForTarget(target) {
@@ -988,6 +1181,124 @@ view.View = class {
             return ws._downstreamSourcePane;
         }
         return null;
+    }
+
+    _setFocusedPane(paneId) {
+        if (!paneId || this._focusedPaneId === paneId) {
+            return;
+        }
+        this._focusedPaneId = paneId;
+        if (paneId === 'original' || paneId === 'modified') {
+            this._activePane = paneId;
+        }
+        this._updatePaneFocusVisuals();
+    }
+
+    _updatePaneFocusVisuals() {
+        for (const id of ['original', 'modified', 'merge-upstream', 'merge-downstream', 'merge-preview']) {
+            const pane = this._paneById(id);
+            if (pane && pane.container) {
+                pane.container.classList.toggle(
+                    'graph-pane-focused',
+                    this._focusedPaneId !== null && id === this._focusedPaneId
+                );
+            }
+        }
+    }
+
+    _clearPaneFocusVisuals() {
+        this._focusedPaneId = null;
+        this._updatePaneFocusVisuals();
+    }
+
+    _initSidebars() {
+        const options = { view: this };
+        this._sidebars = {
+            original: new view.Sidebar(this._host, { paneId: 'original', prefix: 'sidebar-original', ...options }),
+            modified: new view.Sidebar(this._host, { paneId: 'modified', prefix: 'sidebar-modified', ...options })
+        };
+        this._sidebar = this._sidebars.modified;
+    }
+
+    _sidebarForPane(paneId) {
+        return paneId === 'original' ? this._sidebars.original : this._sidebars.modified;
+    }
+
+    _grapherForPane(paneId) {
+        return this._paneGraph(paneId) || (paneId === 'modified' ? this._target : null);
+    }
+
+    _registerSidebarOpen(paneId) {
+        this._sidebarStack = this._sidebarStack.filter((id) => id !== paneId);
+        this._sidebarStack.push(paneId);
+        this._applySidebarStack();
+    }
+
+    _registerSidebarClose(paneId) {
+        this._sidebarStack = this._sidebarStack.filter((id) => id !== paneId);
+        this._applySidebarStack();
+    }
+
+    _applySidebarStack() {
+        const stack = this._sidebarStack;
+        const count = stack.length;
+        for (const paneId of ['original', 'modified']) {
+            const element = this._element(`sidebar-${paneId}`);
+            if (!element) {
+                continue;
+            }
+            const open = this._sidebars[paneId].isOpen;
+            if (!open) {
+                element.style.order = '';
+                element.classList.remove('sidebar-split-divider');
+                continue;
+            }
+            const stackIndex = stack.indexOf(paneId);
+            element.style.order = String(stackIndex);
+            element.classList.toggle('sidebar-split-divider', count > 1 && stackIndex > 0);
+        }
+        const stackElement = this._element('sidebar-stack');
+        const diffContainer = this._element('diff-container');
+        const anyOpen = count > 0;
+        if (stackElement) {
+            stackElement.classList.toggle('sidebar-stack-open', anyOpen);
+            stackElement.classList.remove('sidebar-count-0', 'sidebar-count-1', 'sidebar-count-2');
+            if (count > 0) {
+                stackElement.classList.add(`sidebar-count-${count}`);
+            }
+        }
+        if (diffContainer) {
+            diffContainer.style.width = anyOpen ? 'max(40vw, calc(100vw - 42em))' : '100%';
+        }
+        
+    }
+
+    _closeTopSidebar() {
+        if (this._sidebarStack.length === 0) {
+            return;
+        }
+        const topPaneId = this._sidebarStack[0];
+        this._sidebars[topPaneId].close();
+    }
+
+    _closeSidebar(paneId) {
+        if (paneId && this._sidebars[paneId]) {
+            this._sidebars[paneId].close();
+        }
+    }
+
+    _closeAllSidebars() {
+        for (const paneId of ['original', 'modified']) {
+            if (this._sidebars[paneId].isOpen) {
+                this._sidebars[paneId].close();
+            }
+        }
+        this._sidebarStack = [];
+        this._applySidebarStack();
+    }
+
+    _isOriginalPane(paneId) {
+        return paneId === 'original';
     }
 
     _isMergePane(pane) {
@@ -1081,15 +1392,12 @@ view.View = class {
         if (!pane || !pane.container) {
             return null;
         }
-        if (pane.id === 'original') {
-            return pane.container;
-        }
-        return this._ensurePaneScroll(pane.container);
+       return this._ensurePaneScroll(pane.container);
     }
 
     _clearPaneGraphContent(pane) {
         const container = pane.container;
-        const scroll = pane.id === 'original' ? null : container.querySelector(':scope > .graph-pane-scroll');
+        const scroll = container.querySelector(':scope > .graph-pane-scroll');
         if (scroll) {
             while (scroll.lastChild) {
                 scroll.removeChild(scroll.lastChild);
@@ -1169,9 +1477,7 @@ view.View = class {
                 if (i > 0) {
                     await this._popPanePathTo(paneId, i);
                 } else {
-                    if (paneId === 'original' || paneId === 'modified') {
-                        this._activePane = paneId;
-                    }
+                    this._setFocusedPane(paneId); 
                     await this.showTargetProperties(target);
                 }
             });
@@ -1310,7 +1616,7 @@ view.View = class {
         if (!path || path.length <= 1) {
             return null;
         }
-        this._sidebar.close();
+        this._closeAllSidebars();
         const newPath = path.slice(1);
         this._mergePanePaths.set(paneId, newPath);
         const pane = this._paneById(paneId);
@@ -1481,7 +1787,11 @@ view.View = class {
         return isViewingCompiledAmbapbGraph(this._path, this.activeTarget);
     }
 
-    _createNodeSidebar(node) {
+    _createNodeSidebar(node, options = {}) {
+        const readOnly = this._isOriginalPane(options.paneId) || Boolean(options.readOnly);
+        if (readOnly) {
+            return new view.NodeSidebar(this, node);
+        }
         if (this._editSession && isAmbapbCheckpoint(this._model)) {
             if (this._canEditModelContent()) {
                 const entity = this._resolveNodeEntity(node);
@@ -1674,45 +1984,56 @@ view.View = class {
         return locateValueEntity(this._editSession.modified.model, modelValue);
     }
 
-    _bindNodeSidebarEvents(sidebar, node) {
+    _bindNodeSidebarEvents(sidebar, node, paneId) {
+        const grapher = this._grapherForPane(paneId) || this._target;
         sidebar.on('show-definition', async (/* sender, e */) => {
-            await this.showDefinition(node.type);
+            await this.showDefinition(node.type, paneId);
         });
         sidebar.on('focus', (sender, value) => {
-            this._target.focus([value]);
+            if (grapher) {
+                grapher.focus([value]);
+            }
         });
         sidebar.on('blur', (sender, value) => {
-            this._target.blur([value]);
+            if (grapher) {
+                grapher.blur([value]);
+            }
         });
         sidebar.on('select', (sender, value) => {
-            this._target.scrollTo(this._target.select([value], 'sidebar'));
+            if (grapher) {
+                grapher.scrollTo(grapher.select([value], 'sidebar'));
+            }
         });
         sidebar.on('activate', (sender, value) => {
-            this._target.scrollTo(this._target.activate(value, 'sidebar'));
+            if (grapher) {
+                grapher.scrollTo(grapher.activate(value, 'sidebar'));
+            }
         });
     }
 
     _refreshOpenNodeSidebar(lastChange) {
-        if (!this._editSession || this._sidebar.identifier !== 'node') {
+        const paneSidebar = this._sidebars.modified;
+        if (!this._editSession || paneSidebar.identifier !== 'node') {
             return;
         }
-        const entry = this._sidebar.entry;
+        const entry = paneSidebar.entry;
         const current = entry ? entry.content : null;
         if (!current || !current._node) {
             return;
         }
         const node = this._findModelNodeFromChange(lastChange) ||
             this._findModelNodeForSidebar(current._node);
-        const sidebar = this._createNodeSidebar(node);
-        this._bindNodeSidebarEvents(sidebar, node);
-        this._sidebar.open(sidebar, entry.title || 'Node Properties', 'sidebar');
+        const sidebar = this._createNodeSidebar(node, { paneId: 'modified' });
+        this._bindNodeSidebarEvents(sidebar, node, 'modified');
+        paneSidebar.open(sidebar, entry.title || 'Node Properties', 'sidebar');
     }
 
     _refreshOpenConnectionSidebar() {
-        if (!this._editSession || this._sidebar.identifier !== 'connection') {
+        const paneSidebar = this._sidebars.modified;
+        if (!this._editSession || paneSidebar.identifier !== 'connection') {
             return;
         }
-        const entry = this._sidebar.entry;
+        const entry = paneSidebar.entry;
         const current = entry ? entry.content : null;
         if (!current || !current._value) {
             return;
@@ -1721,8 +2042,8 @@ view.View = class {
         const sidebar = this._canEditModelContent() ?
             new view.EditableConnectionSidebar(this, value, current._from, current._to, this._editSession) :
             new view.ConnectionSidebar(this, value, current._from, current._to);
-        this._bindConnectionSidebarEvents(sidebar);
-        this._sidebar.open(sidebar, entry.title || 'Connection Properties');
+        this._bindConnectionSidebarEvents(sidebar, 'modified');
+        paneSidebar.open(sidebar, entry.title || 'Connection Properties');
     }
 
     _refreshOpenSidebars(lastChange) {
@@ -1859,7 +2180,7 @@ view.View = class {
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
-            this._sidebar.close();
+            this._closeAllSidebars();
             await this._refreshModifiedPane();
         } catch (error) {
             this.error(error, 'Error undoing edit.', null);
@@ -1881,7 +2202,7 @@ view.View = class {
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
             this._closeGraphOverlays();
-            this._sidebar.close();
+            this._closeAllSidebars();
             await this._refreshModifiedPane();
         } catch (error) {
             this.error(error, 'Error redoing edit.', null);
@@ -2117,17 +2438,32 @@ view.View = class {
 
     _createRangeMarker(nodeView) {
         const node = nodeView && nodeView.value;
-        if (!node || !node.name) {
+        if (!node) {
             return null;
         }
         const entity = this._resolveNodeEntity(node);
-        const graphIndex = entity
-            ? entity.graphIndex
-            : (nodeView.context && nodeView.context.graphIndex !== undefined ? nodeView.context.graphIndex : 0);
+        if (entity) {
+            return {
+                graphIndex: entity.graphIndex,
+                nodeIndex: entity.nodeIndex,
+                nodeId: entity.nodeId,
+                nodeName: node.name || null
+            };
+        }
+        const graphIndex = nodeView.context && nodeView.context.graphIndex !== undefined ?
+            nodeView.context.graphIndex :
+            0;
+        const nodeId = nodeView._entityId || null;
+        const nodes = nodeView.context && nodeView.context.target && nodeView.context.target.nodes;
+        const nodeIndex = nodes ? nodes.indexOf(node) : -1;
+        if (!nodeId && nodeIndex < 0) {
+            return null;
+        }
         return {
             graphIndex,
-            nodeName: node.name,
-            nodeId: entity ? entity.nodeId : null
+            nodeIndex: nodeIndex >= 0 ? nodeIndex : undefined,
+            nodeId: nodeId || `graph:${graphIndex}/node:${nodeIndex}`,
+            nodeName: node.name || null
         };
     }
 
@@ -2135,20 +2471,26 @@ view.View = class {
         if (!entry || !marker || entry.graphIndex !== marker.graphIndex) {
             return false;
         }
+        if (entry.nodeId && marker.nodeId) {
+            return entry.nodeId === marker.nodeId;
+        }
+        if (entry.nodeIndex !== undefined && marker.nodeIndex !== undefined) {
+            return entry.nodeIndex === marker.nodeIndex;
+        }
         if (entry.nodeName && marker.nodeName) {
             return entry.nodeName === marker.nodeName;
         }
-        return Boolean(entry.nodeId && marker.nodeId && entry.nodeId === marker.nodeId);
+        return false;
     }
 
     _isRangeBeginForNode(nodeView) {
-        const marker = this._createRangeMarker(nodeView);
-        return Boolean(marker && this._rangeBegins.some((entry) => this._matchesRangeMarker(entry, marker)));
+        const entity = this._resolveNodeEntity(nodeView.value);
+        return this._isRangeBegin(entity);
     }
 
     _isRangeEndForNode(nodeView) {
-        const marker = this._createRangeMarker(nodeView);
-        return Boolean(marker && this._rangeEnds.some((entry) => this._matchesRangeMarker(entry, marker)));
+        const entity = this._resolveNodeEntity(nodeView.value);
+        return this._isRangeEnd(entity);
     }
 
     _subgraphContextMenuItems(nodeView) {
@@ -2460,22 +2802,18 @@ view.View = class {
     // mark begin node for graph extraction
     _markRangeBegin(nodeView) {
         const marker = this._createRangeMarker(nodeView);
-        if (!marker) {
+        if (!marker || !marker.nodeId) {
             return;
         }
         if (this._isRangeBeginForNode(nodeView)) {
-            this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
-            if (marker.nodeId) {
-                this._removeBorderLayer(marker.nodeId, 'range-begin');
-            }
+            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== marker.nodeId);
+            this._removeBorderLayer(marker.nodeId, 'range-begin');
         } else {
             this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
             this._rangeBegins.push(marker);
-            this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
-            if (marker.nodeId) {
-                this._removeBorderLayer(marker.nodeId, 'range-end');
-                this._pushBorderLayer(marker.nodeId, 'range-begin');
-            }
+            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== marker.nodeId);
+            this._removeBorderLayer(marker.nodeId, 'range-end');
+            this._pushBorderLayer(marker.nodeId, 'range-begin');
         }
         this._refreshRangeMarkerStyles();
     }
@@ -2483,22 +2821,18 @@ view.View = class {
     // mark end node for graph extraction
     _markRangeEnd(nodeView) {
         const marker = this._createRangeMarker(nodeView);
-        if (!marker) {
+        if (!marker || !marker.nodeId) {
             return;
         }
         if (this._isRangeEndForNode(nodeView)) {
-            this._rangeEnds = this._rangeEnds.filter((entry) => !this._matchesRangeMarker(entry, marker));
-            if (marker.nodeId) {
-                this._removeBorderLayer(marker.nodeId, 'range-end');
-            }
+            this._rangeEnds = this._rangeEnds.filter((entry) => entry.nodeId !== marker.nodeId);
+            this._removeBorderLayer(marker.nodeId, 'range-end');
         } else {
             this._clearRangeMarkersOnOtherGraph(marker.graphIndex);
             this._rangeEnds.push(marker);
-            this._rangeBegins = this._rangeBegins.filter((entry) => !this._matchesRangeMarker(entry, marker));
-            if (marker.nodeId) {
-                this._removeBorderLayer(marker.nodeId, 'range-begin');
-                this._pushBorderLayer(marker.nodeId, 'range-end');
-            }
+            this._rangeBegins = this._rangeBegins.filter((entry) => entry.nodeId !== marker.nodeId);
+            this._removeBorderLayer(marker.nodeId, 'range-begin');
+            this._pushBorderLayer(marker.nodeId, 'range-end');
         }
         this._refreshRangeMarkerStyles();
     }
@@ -2519,17 +2853,11 @@ view.View = class {
     }
 
     _isRangeBegin(entity) {
-        return entity && this._rangeBegins.some((entry) =>
-            entry.nodeId === entity.nodeId ||
-            (entry.nodeName && entity.node && entry.nodeName === entity.node.name)
-        );
+        return entity && this._rangeBegins.some((entry) => entry.nodeId === entity.nodeId);
     }
 
     _isRangeEnd(entity) {
-        return entity && this._rangeEnds.some((entry) =>
-            entry.nodeId === entity.nodeId ||
-            (entry.nodeName && entity.node && entry.nodeName === entity.node.name)
-        );
+        return entity && this._rangeEnds.some((entry) => entry.nodeId === entity.nodeId);
     }
 
     _clearRangeMarkersOnOtherGraph(graphIndex) {
@@ -2601,7 +2929,7 @@ view.View = class {
             this._clearBorderLayerKind('range-end');
             this._batchInlineExpanded.clear();
             this._persistBatchInlineState();
-            this._sidebar.close();
+            this._closeAllSidebars();
             this._bindEditorSession();
             await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
         } catch (error) {
@@ -2956,7 +3284,7 @@ view.View = class {
 
             this._userDefSelectedMarkers.clear();
             this._clearBorderLayerKind('userdef-selected');
-            this._sidebar.close();
+            this._closeAllSidebars();
             this._bindEditorSession();
             await this._refreshGraphPanesAfterStructuralEdit(graphIndex);
         } catch (error) {
@@ -3043,8 +3371,8 @@ view.View = class {
                 }
             }
             this._closeGraphOverlays();
-            if (this._sidebar.identifier === 'node') {
-                this._sidebar.close();
+            if (this._sidebars.modified.identifier === 'node') {
+                this._closeSidebar('modified');
             }
             await this.applyEditorPatch({
                 entityId: entity.nodeId,
@@ -3272,10 +3600,8 @@ view.View = class {
     // render the graph in the pane
     async _renderGraphInPane(pane, target, signature, state, model) {
         const container = pane.container;
-        if (pane.id !== 'original') {
-            this._ensurePaneScroll(container);
-            this._ensurePanePath(container, pane.id);
-        }
+        this._ensurePaneScroll(container);
+        this._ensurePanePath(container, pane.id); 
         this._clearPaneGraphContent(pane);
         let status = '';
         if (target) {
@@ -3649,8 +3975,8 @@ view.View = class {
     }
 
     async error(error, name, screen) {
-        if (this._sidebar) {
-            this._sidebar.close();
+        if (this._sidebars) {
+            this._closeAllSidebars();
         }
         this.exception(error, false);
         const repository = this._host.environment('repository');
@@ -3689,7 +4015,7 @@ view.View = class {
     }
 
     async open(context) {
-        this._sidebar.close();
+        this._closeAllSidebars();
         this._leftPath = [];
         this._rightPath = [];
         this._activePane = 'modified';
@@ -3767,7 +4093,7 @@ view.View = class {
     }
 
     async _updateActiveTarget(stack) {
-        this._sidebar.close();
+        this._closeAllSidebars();
         if (this._model) {
             this.show('welcome spinner');
             try {
@@ -3890,7 +4216,7 @@ view.View = class {
         if (currentPaneGraph) {
             currentPaneGraph.select(null);
         }
-        this._sidebar.close();
+        this._closeAllSidebars();
 
         if (isMergePane) {
             await this._pushMergeTarget(graph, context, paneId, currentPaneGraph);
@@ -3946,7 +4272,7 @@ view.View = class {
             return null;
         }
 
-        this._sidebar.close();
+        this._closeAllSidebars();
         const newPath = path.slice(1);
         if (id === 'original') {
             this._leftPath = newPath;
@@ -4208,7 +4534,7 @@ view.View = class {
         }
         try {
             const sidebar = new view.ModelSidebar(this, this.model);
-            this._sidebar.open(sidebar, 'Model Properties');
+            this._sidebars.modified.open(sidebar, 'Model Properties');
         } catch (error) {
             this.error(error, 'Error showing model properties.', null);
         }
@@ -4218,8 +4544,10 @@ view.View = class {
     // we resolve the correct grapher and model for the specific target graph
     // pass the model to a target sidebar
     // and guard every sidebar if(grapher) so missing grapher doesn't throw
-    showTargetProperties(target) {
-        if (this._sidebar.identifier === 'target' && !target) {
+    showTargetProperties(target, paneId) {
+        paneId = paneId || this._focusedPaneIdOrDefault();
+        const paneSidebar = this._sidebarForPane(paneId);
+        if (paneSidebar.identifier === 'target' && !target) {
             this.showModelProperties();
             return;
         }
@@ -4228,10 +4556,10 @@ view.View = class {
             return;
         }
         try {
-            const grapher = this._grapherForTarget(target);
+            const grapher = this._grapherForTarget(target) || this._grapherForPane(paneId);
             const sidebar = new view.TargetSidebar(this, target, this.activeSignature, this._modelForTarget(target));
             sidebar.on('show-definition', async (/* sender, e */) => {
-                await this.showDefinition(target);
+                await this.showDefinition(target, paneId);
             });
             sidebar.on('focus', (sender, value) => {
                 if (grapher) {
@@ -4273,76 +4601,101 @@ view.View = class {
                 default:
                     throw new view.Error(`Unsupported graph type '${type}'.`);
             }
-            this._sidebar.open(sidebar, title);
+            paneSidebar.open(sidebar, title);
         } catch (error) {
             this.error(error, 'Error showing target properties.', null);
         }
     }
 
-    showNodeProperties(node, source) {
+    showNodeProperties(node, source, paneId) {
         if (node) {
             try {
                 if (this._menu) {
                     this._menu.close();
                 }
-                const sidebar = this._createNodeSidebar(node);
-                this._bindNodeSidebarEvents(sidebar, node);
-                this._sidebar.open(sidebar, 'Node Properties', source);
+                paneId = paneId || this._focusedPaneIdOrDefault();
+                const paneSidebar = this._sidebarForPane(paneId);
+                const sidebar = this._createNodeSidebar(node, { paneId });
+                this._bindNodeSidebarEvents(sidebar, node, paneId);
+                paneSidebar.open(sidebar, 'Node Properties', source);
             } catch (error) {
                 this.error(error, 'Error showing node properties.', null);
             }
         }
     }
 
-    _bindConnectionSidebarEvents(sidebar) {
+    _bindConnectionSidebarEvents(sidebar, paneId) {
+        const grapher = this._grapherForPane(paneId) || this._target;
         sidebar.on('focus', (sender, value) => {
-            this._target.focus([value]);
+            if (grapher) {
+                grapher.focus([value]);
+            }
         });
         sidebar.on('blur', (sender, value) => {
-            this._target.blur([value]);
+            if (grapher) {
+                grapher.blur([value]);
+            }
         });
         sidebar.on('select', (sender, value) => {
-            this._target.scrollTo(this._target.select([value], 'sidebar'));
+            if (grapher) {
+                grapher.scrollTo(grapher.select([value], 'sidebar'));
+            }
         });
         sidebar.on('activate', (sender, value) => {
-            this._target.scrollTo(this._target.activate(value, 'sidebar'));
+            if (grapher) {
+                grapher.scrollTo(grapher.activate(value, 'sidebar'));
+            }
         });
     }
 
-    showConnectionProperties(value, from, to, source) {
+    showConnectionProperties(value, from, to, source, paneId) {
         try {
             if (this._menu) {
                 this._menu.close();
             }
-            const sidebar = this._editSession && this._canEditModelContent() ?
+            paneId = paneId || this._focusedPaneIdOrDefault();
+            const paneSidebar = this._sidebarForPane(paneId);
+            const readOnly = this._isOriginalPane(paneId);
+            const sidebar = !readOnly && this._editSession && this._canEditModelContent() ?
                 new view.EditableConnectionSidebar(this, value, from, to, this._editSession) :
                 new view.ConnectionSidebar(this, value, from, to);
-            this._bindConnectionSidebarEvents(sidebar);
-            this._sidebar.open(sidebar, 'Connection Properties', source);
+            this._bindConnectionSidebarEvents(sidebar, paneId);
+            paneSidebar.open(sidebar, 'Connection Properties', source);
         } catch (error) {
             this.error(error, 'Error showing connection properties.', null);
         }
     }
 
-    showTensorProperties(value, source) {
+    showTensorProperties(value, source, paneId) {
         try {
             if (this._menu) {
                 this._menu.close();
             }
+            paneId = paneId || this._focusedPaneIdOrDefault();
+            const paneSidebar = this._sidebarForPane(paneId);
+            const grapher = this._grapherForPane(paneId) || this._target;
             const sidebar = new view.TensorSidebar(this, value);
             sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
+                if (grapher) {
+                    grapher.focus([value]);
+                }
             });
             sidebar.on('blur', () => {
-                this._target.blur(null);
+                if (grapher) {
+                    grapher.blur(null);
+                }
             });
             sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value], 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.select([value], 'sidebar'));
+                }
             });
             sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value, 'sidebar'));
+                if (grapher) {
+                    grapher.scrollTo(grapher.activate(value, 'sidebar'));
+                }
             });
-            this._sidebar.open(sidebar, 'Tensor Properties', source);
+            paneSidebar.open(sidebar, 'Tensor Properties', source);
         } catch (error) {
             this.error(error, 'Error showing tensor properties.', null);
         }
@@ -4355,18 +4708,20 @@ view.View = class {
         this._host.exception(error, fatal);
     }
 
-    async showDefinition(type) {
+    async showDefinition(type, paneId) {
         if (type && (type.description || type.inputs || type.outputs || type.attributes)) {
             if (type.nodes && type.nodes.length > 0) {
                 await this.pushTarget(type);
             }
             if (type.type !== 'weights') {
+                paneId = paneId || this._focusedPaneIdOrDefault();
+                const paneSidebar = this._sidebarForPane(paneId);
                 const sidebar = new view.DocumentationSidebar(this, type);
                 sidebar.on('navigate', (sender, e) => {
                     this._host.openURL(e.link);
                 });
                 const title = type.type === 'function' ? 'Function Documentation' : 'Documentation';
-                this._sidebar.open(sidebar, title, 'sidebar');
+                paneSidebar.open(sidebar, title, 'sidebar');
             }
         }
     }
@@ -5968,11 +6323,10 @@ view.Graph = class extends grapher.Graph {
     }
 
     select(selection, source) {
-        if (selection && this.view.target && this.view.target !== this) {
+        if (this.view.target && this.view.target !== this) {
             this.view.target.clearSelection();
-        } else {
-            this.clearSelection();
         }
+        this.clearSelection();
         if (selection) {
             let array = [];
             for (const value of selection) {
@@ -5990,12 +6344,13 @@ view.Graph = class extends grapher.Graph {
     }
 
     activate(value, source) {
-        if (this.readOnly) {
-            // eslint-disable-next-line no-console
-            console.log('[editor] activate blocked: readOnly');
-            return [];
-        }
         if (this._table.has(value)) {
+            if (this.readOnly) {
+                this.select(null, source);
+                const element = this._table.get(value);
+                element.activate(source);
+                return this.select([value], source);
+            }
             this.select(null, source);
             const element = this._table.get(value);
             element.activate(source);
@@ -6105,8 +6460,8 @@ view.Graph = class extends grapher.Graph {
             this._events.pointerdown = (e) => this._pointerDownHandler(e);
             this._events.touchstart = (e) => this._touchStartHandler(e);
             this._events.focuspane = () => {
-                if (this._paneId === 'original' || this._paneId === 'modified') {
-                    this.view._activePane = this._paneId;
+                if (this._paneId) {
+                    this.view._setFocusedPane(this._paneId);
                 }
             };
             const element = this._containerElement();
@@ -6192,7 +6547,8 @@ view.Graph = class extends grapher.Graph {
             (e.target && e.target.classList && (e.target.classList.contains('node-block-background') || e.target.classList.contains('canvas'))) ||
             (e.target && e.target.parentNode && e.target.parentNode.classList && e.target.parentNode.classList.contains('cluster'));
         if (isBackground) {
-            this.view._sidebar.close();
+            const paneId = this._paneId || 'modified';
+            this.view._closeSidebar(paneId);
             if (this.view._leftPane && this.view._leftPane.graph) {
                 this.view._leftPane.graph.select(null);
             }
@@ -6548,14 +6904,12 @@ view.Node = class extends grapher.Node {
 
     // apply range marker style for graph extraction
     applyRangeMarkerStyle() {
-        if (!this.element || !this.context.view || !this.value || !this.value.name) {
+        if (!this.element || !this._entityId || !this.context.view) {
             return;
         }
         const view = this.context.view;
-        const graphIndex = this.context.graphIndex !== undefined ? this.context.graphIndex : 0;
-        const marker = { graphIndex, nodeName: this.value.name };
-        const isBegin = view._rangeBegins.some((entry) => view._matchesRangeMarker(entry, marker));
-        const isEnd = view._rangeEnds.some((entry) => view._matchesRangeMarker(entry, marker));
+        const isBegin = view._rangeBegins.some((entry) => entry.nodeId === this._entityId);
+        const isEnd = view._rangeEnds.some((entry) => entry.nodeId === this._entityId);
         this.element.classList.toggle('range-begin', Boolean(isBegin));
         this.element.classList.toggle('range-end', Boolean(isEnd));
     }
@@ -7062,12 +7416,8 @@ view.Node = class extends grapher.Node {
     }
 
     activate(source) {
-        if (this.context.readOnly) {
-            // eslint-disable-next-line no-console
-            console.log('[editor] activate blocked: readOnly');
-            return;
-        }
-        this.context.view.showNodeProperties(this.value, source);
+        const paneId = this.context.paneId || (this.context.readOnly ? 'original' : 'modified');
+        this.context.view.showNodeProperties(this.value, source, paneId);
     }
 
     edge(to) {
@@ -7326,17 +7676,13 @@ view.Value = class {
     }
 
     activate(source) {
-        if (this.context.readOnly) {
-            // eslint-disable-next-line no-console
-            console.log('[editor] activate blocked: readOnly');
-            return;
-        }
+        const paneId = this.context.paneId || (this.context.readOnly ? 'original' : 'modified');
         if (this.value && this.from && Array.isArray(this.to) && !this.value.initializer) {
             const from = this.from.value;
             const to = this.to.map((node) => node.value);
-            this.context.view.showConnectionProperties(this.value, from, to, source);
+            this.context.view.showConnectionProperties(this.value, from, to, source, paneId);
         } else if (this.value && this.value.initializer) {
-            this.context.view.showTensorProperties({ value: [this.value] }, source);
+            this.context.view.showTensorProperties({ value: [this.value] }, source, paneId);
         }
     }
 };
@@ -7373,7 +7719,8 @@ view.Argument = class extends grapher.Argument {
     }
 
     activate(source) {
-        this.context.view.showTensorProperties(this.value, source);
+        const paneId = this.context.paneId || 'modified';
+        this.context.view.showTensorProperties(this.value, source, paneId);
     }
 };
 
@@ -7407,36 +7754,52 @@ view.Edge = class extends grapher.Edge {
 
 view.Sidebar = class {
 
-    constructor(host) {
+    constructor(host, options = {}) {
         this._host = host;
+        this._paneId = options.paneId || 'modified';
+        this._prefix = options.prefix || 'sidebar-modified';
+        this._view = options.view || null;
         this._stack = [];
         this._closeSidebarHandler = () => this.close();
         this._closeSidebarKeyDownHandler = (e) => {
-            if (e.keyCode === 27) { // Escape
-                e.stopPropagation();
-                e.preventDefault();
-                this.close();
-            } else if (e.keyCode === 8 && this._stack.length > 1) { // Backspace
+            if (e.keyCode === 8 && this._stack.length > 1) { // Backspace
                 const active = this._host.document.activeElement;
                 const tag = active ? active.tagName : '';
                 if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !(active && active.isContentEditable)) {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    this._update(this._stack.slice(0, -1));
+                    if (!this._view || this._view._sidebarStack[0] === this._paneId) {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        this._update(this._stack.slice(0, -1));
+                    }
                 }
             }
         };
-        const sidebar = this._element('sidebar');
-        sidebar.addEventListener('transitionend', (event) => {
-            if (event.propertyName === 'opacity' && sidebar.style.opacity === '0') {
-                const content = this._element('sidebar-content');
-                content.replaceChildren();
-            }
-        });
+        const sidebar = this.rootElement;
+        if (sidebar) {
+            sidebar.addEventListener('transitionend', (event) => {
+                if (event.propertyName === 'opacity' && !this.isOpen) {
+                    const content = this._element('content');
+                    if (content) {
+                        content.replaceChildren();
+                    }
+                }
+            });
+        }
     }
 
-    _element(id) {
-        return this._host.document.getElementById(id);
+    get rootElement() {
+        return this._host.document.getElementById(this._prefix);
+    }
+
+    get isOpen() {
+        return this._stack.length > 0;
+    }
+
+    _element(suffix) {
+        if (!suffix) {
+            return this.rootElement;
+        }
+        return this._host.document.getElementById(`${this._prefix}-${suffix}`);
     }
 
     open(content, title, source) {
@@ -7479,11 +7842,13 @@ view.Sidebar = class {
     }
 
     _update(stack) {
-        const sidebar = this._element('sidebar');
-        const element = this._element('sidebar-content');
-        const container = this._element('diff-container') || this._element('target');
-        const closeButton = this._element('sidebar-closebutton');
-        closeButton.removeEventListener('click', this._closeSidebarHandler);
+        const sidebar = this.rootElement;
+        const element = this._element('content');
+        const closeButton = this._element('closebutton');
+        const wasOpen = this._stack.length > 0;
+        if (closeButton) {
+            closeButton.removeEventListener('click', this._closeSidebarHandler);
+        }
         this._host.document.removeEventListener('keydown', this._closeSidebarKeyDownHandler);
         if (this._stack.length > 0) {
             const entry = this._stack.pop();
@@ -7495,9 +7860,10 @@ view.Sidebar = class {
         if (stack) {
             this._stack = stack;
         }
-        if (this._stack.length > 0) {
+        const isOpen = this._stack.length > 0;
+        if (isOpen && sidebar && element && closeButton) {
             const entry = this._stack[this._stack.length - 1];
-            this._element('sidebar-title').innerHTML = entry.title || '';
+            this._element('title').innerHTML = entry.title || '';
             closeButton.addEventListener('click', this._closeSidebarHandler);
             if (typeof entry.content === 'string') {
                 element.innerHTML = entry.element;
@@ -7506,25 +7872,25 @@ view.Sidebar = class {
             } else {
                 element.replaceChildren(entry.element);
             }
-            sidebar.style.width = 'min(calc(100% * 0.6), 42em)';
-            sidebar.style.right = 0;
-            sidebar.style.opacity = 1;
+            sidebar.classList.add('sidebar-open');
             this._host.document.addEventListener('keydown', this._closeSidebarKeyDownHandler);
-            if (container) {
-                container.style.width = 'max(40vw, calc(100vw - 42em))';
-            }
             const content = entry.content;
             if (content && content.activate) {
                 content.activate();
             }
-        } else {
-            sidebar.style.right = 'calc(0px - min(calc(100% * 0.6), 42em))';
-            sidebar.style.opacity = 0;
-            const clone = element.cloneNode(true);
-            element.parentNode.replaceChild(clone, element);
-            if (container) {
-                container.style.width = '100%';
-                container.focus();
+            if (!wasOpen && this._view) {
+                this._view._registerSidebarOpen(this._paneId);
+            } else if (this._view) {
+                this._view._applySidebarStack();
+            }
+        } else if (sidebar) {
+            sidebar.classList.remove('sidebar-open', 'sidebar-split-divider');
+            if (element) {
+                const clone = element.cloneNode(true);
+                element.parentNode.replaceChild(clone, element);
+            }
+            if (wasOpen && this._view) {
+                this._view._registerSidebarClose(this._paneId);
             }
         }
     }
@@ -7757,8 +8123,32 @@ view.ObjectSidebar = class extends view.Control {
 // base for inline editing of properties and attributes
 view.EditableObjectSidebar = class extends view.ObjectSidebar {
 
+    clearValidationError() {
+        if (this._validationError) {
+            this._validationError.textContent = '';
+        }
+    }
+
+    showValidationError(error) {
+        if (!this._validationError) {
+            this._validationError = this.createElement('div', 'sidebar-validation-error');
+            if (this.element.firstChild) {
+                this.element.insertBefore(this._validationError, this.element.firstChild);
+            } else {
+                this.element.appendChild(this._validationError);
+            }
+        }
+        this._validationError.textContent = error.message || String(error);
+        this._view.exception(error, true);
+    }
+
     addEditableProperty(name, value, onCommit, options = {}) {
-        const item = new view.EditableTextView(this._view, value, { ...options, onCommit });
+        const item = new view.EditableTextView(this._view, value, { 
+            ...options, 
+            onCommit,
+            onError: (error) => this.showValidationError(error),
+            onClearError: () => this.clearValidationError()
+        });
         this.addEntry(name, item);
         return item;
     }
@@ -7783,6 +8173,11 @@ view.EditableObjectSidebar = class extends view.ObjectSidebar {
         button.setAttribute('class', 'sidebar-add-button');
         button.setAttribute('type', 'button');
         button.textContent = options.buttonLabel || '+ Add Attribute';
+
+        const clearError = () => this.clearValidationError();
+        nameInput.addEventListener('input', clearError);
+        valueInput.addEventListener('input', clearError);
+
         button.addEventListener('click', (e) => {
             e.preventDefault();
             const name = nameInput.value.trim();
@@ -7791,11 +8186,12 @@ view.EditableObjectSidebar = class extends view.ObjectSidebar {
             }
             const validationError = options.validateName(name);
             if (validationError) {
-                this.error(new Error(validationError), true);
+                this.showValidationError(new Error(validationError));
                 return;
             }
             const attributeType = options.resolveType(name);
             const parsed = options.parseValue(valueInput.value, attributeType);
+            clearError();
             this._view.applyEditorPatch({
                 parentId,
                 entityType: 'attribute',
@@ -8383,49 +8779,91 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
         return 'node';
     }
 
+    _usesCheckpointPrimGraph(node) {
+        if (this._entity && this._entity.nested) {
+            return false;
+        }
+        const graphIndex = this._entity ? this._entity.graphIndex : 0;
+        const graph = this._editSession && this._editSession.modified ?
+            this._editSession.modified.getGraph(graphIndex) :
+            null;
+        const nodes = graph && graph.nodes ? graph.nodes : [];
+        if (nodes.length !== 1 || !isAmbapbShellNode(nodes[0])) {
+            return false;
+        }
+        const sourceNode = sourceNodeForEntity(node) || node;
+        return sourceNode === nodes[0];
+    }
+
+    _ambapbFromNodePrimGraph(node, modelAmbapb) {
+        const primGraphAttr = (node.attributes || []).find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
+        if (!primGraphAttr || primGraphAttr.value == null) {
+            return null;
+        }
+        try {
+            return {
+                primGraph: parsePrimGraphJson(primGraphAttr.value),
+                canEdit: modelAmbapb && modelAmbapb.canEdit !== undefined ? modelAmbapb.canEdit : true,
+                canExport: modelAmbapb ? modelAmbapb.canExport : undefined,
+                metadata: modelAmbapb && modelAmbapb.metadata ? modelAmbapb.metadata : {}
+            };
+        } catch {
+            return null;
+        }
+    }
+
     _resolveShellAmbapb(node) {
         const modelAmbapb = this._editSession && this._editSession.modified &&
             this._editSession.modified.model ?
             this._editSession.modified.model._ambapb :
             null;
-        if (modelAmbapb && modelAmbapb.primGraph) {
-            if (node._ambapb && node._ambapb !== modelAmbapb && node._ambapb._uiState) {
-                Object.assign(ensureAmbapbUiState(modelAmbapb), node._ambapb._uiState);
+
+        if (this._usesCheckpointPrimGraph(node)) {
+            if (modelAmbapb && modelAmbapb.primGraph) {
+                if (node._ambapb && node._ambapb !== modelAmbapb && node._ambapb._uiState) {
+                    Object.assign(ensureAmbapbUiState(modelAmbapb), node._ambapb._uiState);
+                }
+                node._ambapb = modelAmbapb;
+                return modelAmbapb;
             }
-            node._ambapb = modelAmbapb;
             return modelAmbapb;
         }
-        if (node._ambapb) {
+
+        if (node._ambapb && node._ambapb.primGraph) {
             return node._ambapb;
         }
-        const primGraphAttr = (node.attributes || []).find((attr) => attr.name === PRIM_GRAPH_ATTRIBUTE);
-        if (primGraphAttr && primGraphAttr.value) {
-            try {
-                const ambapb = {
-                    primGraph: parsePrimGraphJson(primGraphAttr.value),
-                    canEdit: modelAmbapb?.canEdit ?? true,
-                    metadata: modelAmbapb?.metadata ?? {}
-                };
-                node._ambapb = ambapb;
-                return ambapb;
-            } catch {
-                // Ignore
-            }
+
+        const nodeAmbapb = this._ambapbFromNodePrimGraph(node, modelAmbapb);
+        if (nodeAmbapb) {
+            node._ambapb = nodeAmbapb;
+            return nodeAmbapb;
         }
+
         return modelAmbapb;
     }
 
     _syncShellAmbapbFromJson(node, jsonText) {
-        const modelAmbapb = this._editSession && this._editSession.modified &&
-            this._editSession.modified.model ?
-            this._editSession.modified.model._ambapb :
-            null;
+        if (this._usesCheckpointPrimGraph(node)) {
+            const modelAmbapb = this._editSession && this._editSession.modified &&
+                this._editSession.modified.model ?
+                this._editSession.modified.model._ambapb :
+                null;
+            try {
+                if (modelAmbapb) {
+                    syncPrimGraphFromJson(modelAmbapb, jsonText);
+                    node._ambapb = modelAmbapb;
+                }
+            } catch {
+                // validation happens when the patch is applied
+            }
+            return;
+        }
+
+        const ambapb = this._resolveShellAmbapb(node);
         try {
-            if (modelAmbapb) {
-                syncPrimGraphFromJson(modelAmbapb, jsonText);
-                node._ambapb = modelAmbapb;
-            } else if (node._ambapb) {
-                syncPrimGraphFromJson(node._ambapb, jsonText);
+            if (ambapb) {
+                syncPrimGraphFromJson(ambapb, jsonText);
+                node._ambapb = ambapb;
             }
         } catch {
             // validation happens when the patch is applied
@@ -8666,6 +9104,8 @@ view.EditableTextView = class extends view.Control {
     constructor(context, value, options = {}) {
         super(context);
         this._onCommit = options.onCommit;
+        this._onError = options.onError;
+        this._onClearError = options.onClearError;
         this._parse = options.parse;
         this._committedValue = value;
         this.element = this.createElement('div', 'sidebar-item-value');
@@ -8677,6 +9117,7 @@ view.EditableTextView = class extends view.Control {
         input.setAttribute('type', 'text');
         input.setAttribute('class', 'sidebar-editable-input');
         input.value = view.EditableAttributeView.formatValue(value);
+
         const tryCommit = (showError) => {
             let parsed = input.value;
             try {
@@ -8684,9 +9125,16 @@ view.EditableTextView = class extends view.Control {
             } catch (error) {
                 if (showError) {
                     input.value = view.EditableAttributeView.formatValue(this._committedValue);
-                    this.error(error, true);
+                    if (this._onError) {
+                        this._onError(error);
+                    } else {
+                        this.error(error, true);
+                    }
                 }
                 return;
+            }
+            if (this._onClearError) {
+                this._onClearError();
             }
             if (!view.EditableAttributeView.valuesEqual(parsed, this._committedValue) && this._onCommit) {
                 this._committedValue = parsed;
@@ -8694,6 +9142,12 @@ view.EditableTextView = class extends view.Control {
                 this._onCommit(parsed);
             }
         };
+
+        input.addEventListener('input', () => {
+            if (this._onClearError) {
+                this._onClearError();
+            }
+        });
         input.addEventListener('blur', () => tryCommit(true));
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
@@ -10388,6 +10842,138 @@ view.FindSidebar = class extends view.Control {
         const message = this.createTextNode(` ${error.message}`);
         element.appendChild(message);
         this._content.appendChild(element);
+    }
+};
+
+view.FindNodeByOrderSidebar = class extends view.Control {
+
+    constructor(context, state, graph) {
+        super(context);
+        this._target = graph;
+        this._state = state || { query: '' };
+    }
+
+    get identifier() {
+        return 'find-node-by-order';
+    }
+
+    _updateHint() {
+        const range = getBftOrderRange(this._target);
+        this._hint.textContent = range ?
+            `Valid orders: ${range.min}–${range.max}` :
+            'No order numbers in this graph.';
+    }
+
+    _validate() {
+        const trimmed = this._query.value.trim();
+        this._table.clear();
+        if (!trimmed) {
+            this._error.textContent = '';
+            this._result.replaceChildren();
+            return null;
+        }
+        const result = parseBftOrderQuery(trimmed, this._target);
+        if (!result.ok) {
+            this._error.textContent = result.error;
+            this._result.replaceChildren();
+            return null;
+        }
+        this._error.textContent = '';
+        const name = result.node.name || `[${result.node.type?.name || 'node'}]`;
+        const location = formatBftNodeLocation(this._target, result.node);
+        const label = location ? `${result.value}: ${name} (in ${location})` : `${result.value} : ${name}`;
+        this._result.replaceChildren();
+
+        const item = this.createElement('li');
+        item.innerHTML = `<svg class='sidebar-find-content-icon'><use href="#sidebar-icon-node"></use></svg>`;
+        item.appendChild(this._host.document.createTextNode(`${result.value}: ${name}`));
+        this._table.set(item, result.node);
+        this._result.appendChild(item);
+        return result.node;
+    }
+
+    _submit() {
+        const node = this._validate();
+        if (node) {
+            this.emit('activate', node);
+        }
+    }
+
+    render() {
+        this._table = new Map();
+
+        this._search = this.createElement('div', 'sidebar-find-search');
+        this._query = this.createElement('input', 'sidebar-find-query');
+        this._query.setAttribute('id', 'find-node-by-order');
+        this._query.setAttribute('type', 'text');
+        this._query.setAttribute('inputmode', 'numeric');
+        this._query.setAttribute('spellcheck', 'false');
+        this._query.setAttribute('placeholder', 'Order');
+        this._search.appendChild(this._query);
+
+        this._hint = this.createElement('div', 'sidebar-find-order-hint');
+        this._error = this.createElement('div', 'sidebar-find-order-error');
+        this._result = this.createElement('ol', 'sidebar-find-content');
+        this._result.setAttribute('tabindex', '-1');
+
+        this._query.addEventListener('input', (e) => {
+            this._state.query = e.target.value;
+            this.emit('state-changed', this._state);
+            this._validate();
+        });
+        this._query.addEventListener('keydown', (e) => {
+            if (e.keyCode === 0x08 && !e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey) {
+                e.stopPropagation();
+            } else if (e.keyCode === 0x0D) { // Enter
+                e.preventDefault();
+                e.stopPropagation();
+                this._submit();
+            }
+        });
+
+        this._result.addEventListener('click', (e) => {
+            if (this._table.has(e.target)) {
+                this.emit('select', this._table.get(e.target));
+            }
+        });
+        this._result.addEventListener('dblclick', (e) => {
+            if (this._table.has(e.target)) {
+                this.emit('activate', this._table.get(e.target));
+            }
+        });
+
+        this._updateHint();
+    }
+
+    get element() {
+        return [this._search, this._hint, this._error, this._result];
+    }
+
+    activate() {
+        this._query.value = this._state.query || '';
+        this._updateHint();
+        this._validate();
+        this._query.focus();
+        this._host.event('open_sidebar', {
+            sidebar_identifier: this.identifier,
+            sidebar_size: this._table.size
+        });
+    }
+
+    deactivate() {
+        this._table.clear();
+        this._result.replaceChildren();
+        this._error.textContent = '';
+    }
+
+    error(error, fatal) {
+        super.error(error, fatal);
+        const element = this.createElement('li');
+        const title = this.createElement('b');
+        title.textContent = 'ERROR: ';
+        element.appendChild(title);
+        element.appendChild(this.createTextNode(` ${error.message}`));
+        this._result.appendChild(element);
     }
 };
 

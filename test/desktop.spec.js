@@ -61,7 +61,7 @@ playwright.test('desktop', async () => {
     await item.dblclick();
 
     // Expand the 'value' field
-    const valueEntry = await page.waitForSelector('#sidebar-content .sidebar-item:has(.sidebar-item-name input[value="value"])');
+    const valueEntry = await page.waitForSelector('#sidebar-modified-content .sidebar-item:has(.sidebar-item-name input[value="value"])');
     const valueButton = await valueEntry.waitForSelector('.sidebar-item-value-button');
     await valueButton.click();
 

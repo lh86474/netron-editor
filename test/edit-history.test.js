@@ -111,4 +111,70 @@ describe('EditHistory', () => {
         assert.equal(editor.history.undo(editor), true);
         assert.deepEqual(editor.batchInlineExpanded, []);
     });
+
+    it('new edit after undo clears redo stack', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        editor.history.checkpoint(editor);
+        editor.applyPatch({
+            entityId: 'graph:0/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'FirstRename'
+        });
+        editor.history.undo(editor);
+        assert.equal(editor.modified.getGraph().nodes[0].name, 'Conv1');
+        assert.equal(editor.history.canRedo, true);
+
+        editor.history.checkpoint(editor);
+        editor.applyPatch({
+            entityId: 'graph:0/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'SecondRename'
+        });
+        assert.equal(editor.modified.getGraph().nodes[0].name, 'SecondRename');
+        assert.equal(editor.history.canRedo, false);
+        assert.equal(editor.history.redo(editor), false);
+        assert.equal(editor.modified.getGraph().nodes[0].name, 'SecondRename');
+    });
+
+    it('survives many undo redo alternations without drift', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        const originalName = editor.modified.getGraph().nodes[0].name;
+        editor.history.checkpoint(editor);
+        editor.applyPatch({
+            entityId: 'graph:0/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'ToggledName'
+        });
+
+        for (let i = 0; i < 50; i++) {
+            assert.equal(editor.history.undo(editor), true);
+            assert.equal(editor.modified.getGraph().nodes[0].name, originalName);
+            assert.equal(editor.history.redo(editor), true);
+            assert.equal(editor.modified.getGraph().nodes[0].name, 'ToggledName');
+        }
+        assert.equal(editor.delta.getChanges().length, 1);
+    });
+
+    it('redo reapplies delete after undo', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        editor.history.checkpoint(editor);
+        editor.applyPatch({
+            entityId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'delete',
+            property: 'remove'
+        });
+        assert.equal(editor.modified.getGraph().nodes.length, 2);
+        editor.history.undo(editor);
+        assert.equal(editor.modified.getGraph().nodes.length, 3);
+        assert.equal(editor.history.redo(editor), true);
+        assert.equal(editor.modified.getGraph().nodes.length, 2);
+        assert.equal(editor.delta.getState('graph:0/node:1'), 'deleted');
+    });
 });

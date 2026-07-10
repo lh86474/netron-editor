@@ -9,7 +9,9 @@ export class TensorTypeError extends Error {
 export const tensorDataTypeByName = new Map([
     ['undefined', 0], ['float32', 1], ['uint8', 2], ['int8', 3], ['uint16', 4], ['int16', 5],
     ['int32', 6], ['int64', 7], ['string', 8], ['boolean', 9], ['float16', 10], ['float64', 11],
-    ['uint32', 12], ['uint64', 13], ['complex<float32>', 14], ['complex<float64>', 15], ['bfloat16', 16]
+    ['uint32', 12], ['uint64', 13], ['complex<float32>', 14], ['complex<float64>', 15], ['bfloat16', 16],
+    ['float8e4m3fn', 17], ['float8e4m3fnuz', 18], ['float8e5m2', 19], ['float8e5m2fnuz', 20],
+    ['uint4', 21], ['int4', 22], ['float4e2m1', 23], ['float8e8m0', 24], ['uint2', 25], ['int2', 26]
 ]);
 
 export const formatConnectionType = (type) => {
