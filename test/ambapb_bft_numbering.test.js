@@ -16,15 +16,20 @@ import {
     ensureBftNumbersForDisplayGraph,
     assignBftNumbers,
     clearBftMetadata,
+    collectBftConnectionSearchScopes,
+    collectBftSearchScopes,
+    findEdgeByBftOrderInViewGraph,
     findNodeByBftOrder,
     findNodeByBftOrderInGraph,
+    formatBftEdgeLabel,
     formatBftNodeLocation,
+    getBftEdgeOrderRangeForViewGraph,
     getBftOrderRange,
     getBftOrderRangeForGraph,
-    collectBftSearchScopes,
     getCompiledGraphFromNode,
     locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
+    parseBftEdgeOrderQuery,
     parseBftOrderQuery,
     resolveAmbapbNumberingMode,
     resolveSidebarBftValue
@@ -1771,5 +1776,150 @@ describe('scoped find node by order', () => {
         assert.equal(parseBftOrderQuery('3', graph, graph).ok, true);
         assert.equal(parseBftOrderQuery('3', graph, nvpCompiled).ok, false);
         assert.match(parseBftOrderQuery('3', graph, nvpCompiled).error, /between 1 and 2/);
+    });
+});
+
+describe('scoped find connection by order', () => {
+    const buildNumberedNvpConnectionFixture = () => {
+        const innerA = {
+            name: 'inner_a',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'y', value: [tensor('inner_a_out')] }]
+        };
+        const innerB = {
+            name: 'inner_b',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('inner_a_out')] }],
+            outputs: [{ name: 'y', value: [tensor('nvp_out')] }]
+        };
+        const nvpCompiled = {
+            name: 'nvp_compiled',
+            inputs: [{ name: 'input', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'output', value: [tensor('nvp_out')] }],
+            nodes: [innerA, innerB]
+        };
+        const nvpNode = {
+            name: 'nvp0',
+            type: { name: 'CVFlowNVP' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: nvpCompiled }],
+            inputs: [{ name: 'x', value: [tensor('conv_out')] }],
+            outputs: [{ name: 'y', value: [tensor('nvp_shell_out')] }]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'conv',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('conv_out')] }]
+                },
+                nvpNode,
+                {
+                    name: 'relu',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('nvp_shell_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('relu_out')] }]
+                }
+            ]
+        };
+        const outerEdges = new Map();
+        const outerEdge1 = registerEdge(outerEdges, mockEdge(
+            mockNodeView(graph.nodes[0], 0, 0),
+            mockNodeView(nvpNode, 1, 0),
+            graph.nodes[0].outputs[0].value[0]
+        ));
+        const outerEdge2 = registerEdge(outerEdges, mockEdge(
+            mockNodeView(nvpNode, 1, 0),
+            mockNodeView(graph.nodes[2], 2, 0),
+            nvpNode.outputs[0].value[0]
+        ));
+        const innerEdges = new Map();
+        const innerEdge1 = registerEdge(innerEdges, mockEdge(
+            mockInputView(nvpCompiled.inputs[0], -1, 0),
+            mockNodeView(innerA, 0, 0),
+            nvpCompiled.inputs[0].value[0]
+        ));
+        const innerEdge2 = registerEdge(innerEdges, mockEdge(
+            mockNodeView(innerA, 0, 0),
+            mockNodeView(innerB, 1, 0),
+            innerA.outputs[0].value[0]
+        ));
+        const nvpBlock = mockGraphBlock(nvpCompiled, innerEdges, new Map([
+            [innerA, { x: 0, y: 0 }],
+            [innerB, { x: 1, y: 0 }]
+        ]));
+        const paneViewGraph = mockRuntimeViewGraph(new Map([
+            [graph.nodes[0], { x: 0, y: 0 }],
+            [nvpNode, { x: 1, y: 0 }],
+            [graph.nodes[2], { x: 2, y: 0 }],
+            [innerA, { x: 0, y: 0 }],
+            [innerB, { x: 1, y: 0 }]
+        ]), outerEdges, [
+            mockExpandedShellView(nvpNode, nvpBlock, 1, 0)
+        ]);
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: paneViewGraph,
+            layoutDirection: 'horizontal'
+        });
+        return {
+            graph,
+            nvpCompiled,
+            paneViewGraph,
+            nestedViewGraph: nvpBlock.target,
+            outerEdge1,
+            outerEdge2,
+            innerEdge1,
+            innerEdge2
+        };
+    };
+
+    it('collectBftConnectionSearchScopes pairs model scopes with view graphs', () => {
+        const { graph, paneViewGraph, nestedViewGraph } = buildNumberedNvpConnectionFixture();
+        const scopes = collectBftConnectionSearchScopes(graph, paneViewGraph);
+        assert.equal(scopes.length, 2);
+        assert.equal(scopes[0].viewGraph, paneViewGraph);
+        assert.equal(scopes[1].viewGraph, nestedViewGraph);
+    });
+
+    it('findEdgeByBftOrderInViewGraph respects scope when order numbers collide', () => {
+        const { paneViewGraph, nestedViewGraph, outerEdge1, outerEdge2, innerEdge1, innerEdge2 } =
+            buildNumberedNvpConnectionFixture();
+        assert.equal(findEdgeByBftOrderInViewGraph(paneViewGraph, 1), outerEdge1);
+        assert.equal(findEdgeByBftOrderInViewGraph(paneViewGraph, 2), outerEdge2);
+        assert.equal(findEdgeByBftOrderInViewGraph(nestedViewGraph, 1), innerEdge1);
+        assert.equal(findEdgeByBftOrderInViewGraph(nestedViewGraph, 2), innerEdge2);
+    });
+
+    it('getBftEdgeOrderRangeForViewGraph returns scoped ranges', () => {
+        const { paneViewGraph, nestedViewGraph } = buildNumberedNvpConnectionFixture();
+        assert.deepEqual(getBftEdgeOrderRangeForViewGraph(paneViewGraph), { min: 1, max: 2 });
+        assert.deepEqual(getBftEdgeOrderRangeForViewGraph(nestedViewGraph), { min: 1, max: 2 });
+    });
+
+    it('parseBftEdgeOrderQuery validates and resolves within selected view scope', () => {
+        const { paneViewGraph, nestedViewGraph } = buildNumberedNvpConnectionFixture();
+        const mainResult = parseBftEdgeOrderQuery('1', paneViewGraph, 'runtime (main graph)');
+        assert.equal(mainResult.ok, true);
+        assert.equal(mainResult.edge._bftEdgeNumber, 1);
+        assert.match(formatBftEdgeLabel(mainResult.edge), /conv_out/);
+
+        const nestedResult = parseBftEdgeOrderQuery('1', nestedViewGraph, 'nvp0');
+        assert.equal(nestedResult.ok, true);
+        assert.equal(nestedResult.edge._bftEdgeNumber, 1);
+        assert.match(formatBftEdgeLabel(nestedResult.edge), /nvp_in/);
+
+        const invalid = parseBftEdgeOrderQuery('3', nestedViewGraph, 'nvp0');
+        assert.equal(invalid.ok, false);
+        assert.match(invalid.error, /between 1 and 2/);
+
+        const collapsed = parseBftEdgeOrderQuery('1', null, 'collapsed');
+        assert.equal(collapsed.ok, false);
+        assert.match(collapsed.error, /Expand the block/);
     });
 });

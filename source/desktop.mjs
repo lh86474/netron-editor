@@ -226,6 +226,9 @@ desktop.Host = class {
         electron.ipcRenderer.on('find-node-by-order', () => {
             this._view.findNodeByOrder();
         });
+        electron.ipcRenderer.on('find-connection-by-order', () => {
+            this._view.findConnectionByOrder();
+        });
         electron.ipcRenderer.on('about', () => {
             this._view.about();
         });

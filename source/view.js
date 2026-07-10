@@ -29,12 +29,17 @@ import { MergeWorkspaceController } from './merge-workspace.js';
 import {
     assignBftNumbers,
     assignEdgeBftNumbers,
+    collectBftConnectionSearchScopes,
     collectBftSearchScopes,
+    findEdgeByBftOrderInViewGraph,
+    formatBftEdgeLabel,
+    getBftEdgeOrderRangeForViewGraph,
     getBftOrderRangeForGraph,
     getCompiledGraphAttrName,
     getCompiledGraphFromNode,
     locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
+    parseBftEdgeOrderQuery,
     parseBftOrderQuery,
     resolveSidebarBftValue
 } from './ambapb-bft-numbering.js';
@@ -121,6 +126,7 @@ view.View = class {
         this._initSidebars();
         this._find = null;
         this._findNodeByOrder = null;
+        this._findConnectionByOrder = null;
         this._modelFactoryService = new view.ModelFactoryService(this._host);
         this._modelFactoryService.import();
         this._worker = this._host.environment('serial') ? null : new view.Worker(this._host);
@@ -345,6 +351,12 @@ view.View = class {
                     label: 'Find Node by &Order...',
                     accelerator: 'CmdOrCtrl+G',
                     execute: () => this.findNodeByOrder(),
+                    enabled: () => this.activeTarget
+                });
+                edit.add({
+                    label: 'Find Connection by &Order...',
+                    accelerator: 'CmdOrCtrl+Shift+G',
+                    execute: () => this.findConnectionByOrder(),
                     enabled: () => this.activeTarget
                 });
                 const view = this._menu.group('&View');
@@ -761,6 +773,34 @@ view.View = class {
         }
     }
 
+    findConnectionByOrder() {
+        const paneId = this._focusedPaneIdOrDefault();
+        const paneSidebar = this._sidebarForPane(paneId);
+        if (this._target && paneSidebar.identifier !== 'find-connection-by-order') {
+            const grapher = this._focusedPaneGrapher();
+            const searchTarget = this._focusedPaneSearchTarget();
+            if (grapher) {
+                grapher.select(null);
+            }
+            const sidebar = new view.FindConnectionByOrderSidebar(
+                this,
+                this._findConnectionByOrder,
+                searchTarget,
+                grapher
+            );
+            sidebar.on('state-changed', (sender, state) => {
+                this._findConnectionByOrder = state;
+            });
+            sidebar.on('select', async (sender, result) => {
+                await this._navigateAndSelectBftConnection(result);
+            });
+            sidebar.on('activate', async (sender, result) => {
+                await this._navigateAndActivateBftConnection(result);
+            });
+            paneSidebar.open(sidebar, 'Find Connection by Order');
+        }
+    }
+
     get model() {
         return this._model;
     }
@@ -1128,6 +1168,99 @@ view.View = class {
             return true;
         }
         return false;
+    }
+
+    _resolveEdgeNavigationNode(edge) {
+        if (!edge) {
+            return null;
+        }
+        if (edge.from && edge.from.class !== 'graph-input' && edge.from.value) {
+            return edge.from.value;
+        }
+        if (edge.to && edge.to.class !== 'graph-output' && edge.to.value) {
+            return edge.to.value;
+        }
+        return (edge.from && edge.from.value) || (edge.to && edge.to.value) || null;
+    }
+
+    async _resolveBftConnectionEdge(result) {
+        const grapher = this._focusedPaneGrapher();
+        const searchRoot = this._focusedPaneSearchTarget();
+        if (!grapher || !searchRoot || !result) {
+            return null;
+        }
+        const scopes = collectBftConnectionSearchScopes(searchRoot, grapher);
+        const scope = scopes.find((entry) => entry.id === result.scopeId);
+        if (!scope || !scope.viewGraph) {
+            return null;
+        }
+        return findEdgeByBftOrderInViewGraph(scope.viewGraph, result.order);
+    }
+
+    async _navigateAndSelectBftConnection(result) {
+        const searchRoot = this._focusedPaneSearchTarget();
+        if (!searchRoot || !result) {
+            return;
+        }
+        let edge = await this._resolveBftConnectionEdge(result);
+        const modelNode = edge ? this._resolveEdgeNavigationNode(edge) : null;
+        if (modelNode) {
+            const location = locateBftNodeInGraph(searchRoot, modelNode);
+            if (location && location.ancestors.length > 0) {
+                const paneId = this._focusedPaneIdOrDefault();
+                if (!await this._expandBlocksForBftLocation(location, paneId)) {
+                    return;
+                }
+            }
+        }
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher) {
+            return;
+        }
+        edge = await this._resolveBftConnectionEdge(result);
+        if (!edge) {
+            return;
+        }
+        grapher.clearSelection();
+        const elements = edge.select();
+        if (elements && elements.length > 0) {
+            grapher.scrollTo(elements, 'sidebar');
+        }
+    }
+
+    async _navigateAndActivateBftConnection(result) {
+        const searchRoot = this._focusedPaneSearchTarget();
+        if (!searchRoot || !result) {
+            return false;
+        }
+        let edge = await this._resolveBftConnectionEdge(result);
+        const modelNode = edge ? this._resolveEdgeNavigationNode(edge) : null;
+        if (modelNode) {
+            const location = locateBftNodeInGraph(searchRoot, modelNode);
+            if (location && location.ancestors.length > 0) {
+                const paneId = this._focusedPaneIdOrDefault();
+                if (!await this._expandBlocksForBftLocation(location, paneId)) {
+                    return false;
+                }
+            }
+        }
+        const grapher = this._focusedPaneGrapher();
+        if (!grapher) {
+            return false;
+        }
+        edge = await this._resolveBftConnectionEdge(result);
+        if (!edge) {
+            return false;
+        }
+        grapher.clearSelection();
+        const elements = edge.select();
+        if (elements && elements.length > 0) {
+            grapher.scrollTo(elements, 'sidebar');
+        }
+        if (edge.activate) {
+            edge.activate();
+        }
+        return true;
     }
 
     //Search order: merge panes, main editor panes (original modified)
@@ -11016,6 +11149,220 @@ view.FindNodeByOrderSidebar = class extends view.Control {
     }
 
     activate() {
+        this._populateScopeSelect();
+        this._query.value = this._state.query || '';
+        this._updateHint();
+        this._validate();
+        this._query.focus();
+        this._host.event('open_sidebar', {
+            sidebar_identifier: this.identifier,
+            sidebar_size: this._table.size
+        });
+    }
+
+    deactivate() {
+        this._table.clear();
+        this._result.replaceChildren();
+        this._error.textContent = '';
+    }
+
+    error(error, fatal) {
+        super.error(error, fatal);
+        const element = this.createElement('li');
+        const title = this.createElement('b');
+        title.textContent = 'ERROR: ';
+        element.appendChild(title);
+        element.appendChild(this.createTextNode(` ${error.message}`));
+        this._result.appendChild(element);
+    }
+};
+
+view.FindConnectionByOrderSidebar = class extends view.Control {
+
+    constructor(context, state, graph, paneViewGraph) {
+        super(context);
+        this._target = graph;
+        this._paneViewGraph = paneViewGraph;
+        this._state = state || { query: '', scopeId: 'root' };
+        if (!this._state.scopeId) {
+            this._state.scopeId = 'root';
+        }
+        this._scopes = [];
+    }
+
+    get identifier() {
+        return 'find-connection-by-order';
+    }
+
+    _refreshScopes() {
+        this._scopes = collectBftConnectionSearchScopes(this._target, this._paneViewGraph);
+        if (this._scopes.length === 0) {
+            return;
+        }
+        if (!this._scopes.some((scope) => scope.id === this._state.scopeId)) {
+            this._state.scopeId = this._scopes[0].id;
+        }
+    }
+
+    _selectedScope() {
+        if (this._scopes.length === 0) {
+            return null;
+        }
+        return this._scopes.find((scope) => scope.id === this._state.scopeId) || this._scopes[0];
+    }
+
+    _populateScopeSelect() {
+        this._refreshScopes();
+        while (this._scopeSelect.firstChild) {
+            this._scopeSelect.removeChild(this._scopeSelect.firstChild);
+        }
+        const selectedScope = this._selectedScope();
+        for (const scope of this._scopes) {
+            const option = this.createElement('option');
+            option.value = scope.id;
+            option.textContent = scope.label;
+            if (!scope.viewGraph) {
+                option.setAttribute('disabled', 'true');
+            }
+            if (selectedScope && scope.id === selectedScope.id) {
+                option.setAttribute('selected', 'true');
+            }
+            this._scopeSelect.appendChild(option);
+        }
+        if (selectedScope) {
+            this._scopeSelect.setAttribute('title', selectedScope.label);
+        }
+    }
+
+    _updateHint() {
+        const scope = this._selectedScope();
+        if (!scope) {
+            this._hint.textContent = 'No connection orders in this graph.';
+            return;
+        }
+        if (!scope.viewGraph) {
+            this._hint.textContent = `Expand the block to search connections in ${scope.label}.`;
+            return;
+        }
+        const range = getBftEdgeOrderRangeForViewGraph(scope.viewGraph);
+        this._hint.textContent = range ?
+            `Valid connection orders in ${scope.label}: ${range.min}\u2013${range.max}` :
+            `No connection orders in ${scope.label}.`;
+    }
+
+    _validate() {
+        const trimmed = this._query.value.trim();
+        this._table.clear();
+        if (!trimmed) {
+            this._error.textContent = '';
+            this._result.replaceChildren();
+            return null;
+        }
+        const scope = this._selectedScope();
+        if (!scope) {
+            this._error.textContent = 'No searchable graph scope.';
+            this._result.replaceChildren();
+            return null;
+        }
+        const result = parseBftEdgeOrderQuery(trimmed, scope.viewGraph, scope.label);
+        if (!result.ok) {
+            this._error.textContent = result.error;
+            this._result.replaceChildren();
+            return null;
+        }
+        this._error.textContent = '';
+        const label = formatBftEdgeLabel(result.edge);
+        this._result.replaceChildren();
+
+        const item = this.createElement('li');
+        item.innerHTML = `<svg class='sidebar-find-content-icon'><use href="#sidebar-icon-node"></use></svg>`;
+        item.appendChild(this._host.document.createTextNode(`${result.value}: ${label}`));
+        this._table.set(item, {
+            order: result.value,
+            scopeId: scope.id
+        });
+        this._result.appendChild(item);
+        return {
+            order: result.value,
+            scopeId: scope.id
+        };
+    }
+
+    _submit() {
+        const result = this._validate();
+        if (result) {
+            this.emit('activate', result);
+        }
+    }
+
+    render() {
+        this._table = new Map();
+
+        this._scopeWrap = this.createElement('div', 'sidebar-find-scope');
+        this._scopeSelect = this.createElement('select', 'sidebar-item-selector');
+        this._scopeSelect.setAttribute('id', 'find-connection-by-order-scope');
+        this._scopeWrap.appendChild(this._scopeSelect);
+
+        this._search = this.createElement('div', 'sidebar-find-search');
+        this._query = this.createElement('input', 'sidebar-find-query');
+        this._query.setAttribute('id', 'find-connection-by-order');
+        this._query.setAttribute('type', 'text');
+        this._query.setAttribute('inputmode', 'numeric');
+        this._query.setAttribute('spellcheck', 'false');
+        this._query.setAttribute('placeholder', 'Order');
+        this._search.appendChild(this._query);
+
+        this._hint = this.createElement('div', 'sidebar-find-order-hint');
+        this._error = this.createElement('div', 'sidebar-find-order-error');
+        this._result = this.createElement('ol', 'sidebar-find-content');
+        this._result.setAttribute('tabindex', '-1');
+
+        this._scopeSelect.addEventListener('change', (e) => {
+            const index = e.target.selectedIndex;
+            if (index >= 0 && index < this._scopes.length) {
+                this._state.scopeId = this._scopes[index].id;
+                this._scopeSelect.setAttribute('title', this._scopes[index].label);
+                this.emit('state-changed', this._state);
+                this._updateHint();
+                this._validate();
+            }
+        });
+        this._query.addEventListener('input', (e) => {
+            this._state.query = e.target.value;
+            this.emit('state-changed', this._state);
+            this._validate();
+        });
+        this._query.addEventListener('keydown', (e) => {
+            if (e.keyCode === 0x08 && !e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey) {
+                e.stopPropagation();
+            } else if (e.keyCode === 0x0D) { // Enter
+                e.preventDefault();
+                e.stopPropagation();
+                this._submit();
+            }
+        });
+
+        this._result.addEventListener('click', (e) => {
+            if (this._table.has(e.target)) {
+                this.emit('select', this._table.get(e.target));
+            }
+        });
+        this._result.addEventListener('dblclick', (e) => {
+            if (this._table.has(e.target)) {
+                this.emit('activate', this._table.get(e.target));
+            }
+        });
+
+        this._populateScopeSelect();
+        this._updateHint();
+    }
+
+    get element() {
+        return [this._scopeWrap, this._search, this._hint, this._error, this._result];
+    }
+
+    activate() {
+        this._paneViewGraph = this.context._focusedPaneGrapher();
         this._populateScopeSelect();
         this._query.value = this._state.query || '';
         this._updateHint();

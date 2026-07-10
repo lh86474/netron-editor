@@ -965,6 +965,102 @@ export const parseBftOrderQuery = (text, rootGraph, scopeGraph = rootGraph) => {
     return { ok: true, value, node };
 };
 
+const findHostNodeForCompiledGraph = (graph, targetCompiled) => {
+    if (!graph || !targetCompiled) {
+        return null;
+    }
+    for (const node of graph.nodes || []) {
+        const compiled = getCompiledGraphFromNode(node);
+        if (!compiled) {
+            continue;
+        }
+        if (compiled === targetCompiled) {
+            return node;
+        }
+        const nestedHost = findHostNodeForCompiledGraph(compiled, targetCompiled);
+        if (nestedHost) {
+            return nestedHost;
+        }
+    }
+    return null;
+};
+
+export const collectBftConnectionSearchScopes = (rootModelGraph, paneViewGraph) => {
+    return collectBftSearchScopes(rootModelGraph).map((scope) => {
+        let scopedViewGraph = paneViewGraph;
+        if (scope.id !== 'root') {
+            const host = findHostNodeForCompiledGraph(rootModelGraph, scope.graph);
+            scopedViewGraph = host && paneViewGraph ?
+                findNestedViewGraphForHost(paneViewGraph, host) :
+                null;
+        }
+        return {
+            ...scope,
+            viewGraph: scopedViewGraph
+        };
+    });
+};
+
+export const getBftEdgeOrderRangeForViewGraph = (viewGraph) => {
+    if (!viewGraph) {
+        return null;
+    }
+    let max = 0;
+    for (const edge of collectViewEdges(viewGraph)) {
+        if (edge._bftEdgeNumber != null) {
+            max = Math.max(max, edge._bftEdgeNumber);
+        }
+    }
+    return max > 0 ? { min: 1, max } : null;
+};
+
+export const findEdgeByBftOrderInViewGraph = (viewGraph, order) => {
+    if (!viewGraph || !Number.isInteger(order) || order <= 0) {
+        return null;
+    }
+    return collectViewEdges(viewGraph).find((edge) => edge._bftEdgeNumber === order) || null;
+};
+
+export const formatBftEdgeLabel = (edge) => {
+    if (!edge) {
+        return 'connection';
+    }
+    const tensor = edge.value && edge.value.value;
+    const tensorName = tensor && tensor.name ? tensor.name : 'connection';
+    const fromName = edge.from && (edge.from.value?.name || edge.from.class || '?');
+    const toName = edge.to && (edge.to.value?.name || edge.to.class || '?');
+    return `${tensorName} (${fromName} \u2192 ${toName})`;
+};
+
+export const parseBftEdgeOrderQuery = (text, scopeViewGraph, scopeLabel = 'this graph') => {
+    const trimmed = (text || '').trim();
+    if (!trimmed) {
+        return { ok: false, error: 'Enter an order number.' };
+    }
+    if (!scopeViewGraph) {
+        return { ok: false, error: `Expand the block to search connections in ${scopeLabel}.` };
+    }
+    if (!/^\d+$/.test(trimmed)) {
+        return { ok: false, error: 'Enter a positive whole number.' };
+    }
+    const value = Number(trimmed);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        return { ok: false, error: 'Enter a positive whole number.' };
+    }
+    const range = getBftEdgeOrderRangeForViewGraph(scopeViewGraph);
+    if (!range) {
+        return { ok: false, error: `No connection orders in ${scopeLabel}.` };
+    }
+    if (value < range.min || value > range.max) {
+        return { ok: false, error: `Order must be between ${range.min} and ${range.max}.` };
+    }
+    const edge = findEdgeByBftOrderInViewGraph(scopeViewGraph, value);
+    if (!edge) {
+        return { ok: false, error: `No connection with order ${value}.` };
+    }
+    return { ok: true, value, edge };
+};
+
 export const resolveEdgeBftNumber = (value) => {
     return value && value._bftEdgeNumber != null ? value._bftEdgeNumber : null;
 };
