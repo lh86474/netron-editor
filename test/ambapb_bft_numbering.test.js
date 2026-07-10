@@ -1412,6 +1412,208 @@ describe('ambapb bft numbering', () => {
         assert.equal(nodeIsInDisplayedGraph(inner, runtime), false);
         assert.equal(inner._bftNumber, 2);
     });
+
+    it('restarts node and edge numbering inside expanded CVFlowNVP compiled_prim_graph', () => {
+        const innerA = {
+            name: 'inner_a',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'y', value: [tensor('inner_a_out')] }]
+        };
+        const innerB = {
+            name: 'inner_b',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('inner_a_out')] }],
+            outputs: [{ name: 'y', value: [tensor('nvp_out')] }]
+        };
+        const nvpCompiled = {
+            name: 'nvp_compiled',
+            inputs: [{ name: 'input', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'output', value: [tensor('nvp_out')] }],
+            nodes: [innerA, innerB]
+        };
+        const nvpNode = {
+            name: 'nvp0',
+            type: { name: 'CVFlowNVP' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: nvpCompiled }],
+            inputs: [{ name: 'x', value: [tensor('conv_out')] }],
+            outputs: [{ name: 'y', value: [tensor('nvp_shell_out')] }]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'conv',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('conv_out')] }]
+                },
+                nvpNode,
+                {
+                    name: 'relu',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('nvp_shell_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('relu_out')] }]
+                }
+            ]
+        };
+        const outerEdges = new Map();
+        registerEdge(outerEdges, mockEdge(
+            mockNodeView(graph.nodes[0], 0, 0),
+            mockNodeView(nvpNode, 1, 0),
+            graph.nodes[0].outputs[0].value[0]
+        ));
+        registerEdge(outerEdges, mockEdge(
+            mockNodeView(nvpNode, 1, 0),
+            mockNodeView(graph.nodes[2], 2, 0),
+            nvpNode.outputs[0].value[0]
+        ));
+        const innerEdges = new Map();
+        registerEdge(innerEdges, mockEdge(
+            mockInputView(nvpCompiled.inputs[0], -1, 0),
+            mockNodeView(innerA, 0, 0),
+            nvpCompiled.inputs[0].value[0]
+        ));
+        registerEdge(innerEdges, mockEdge(
+            mockNodeView(innerA, 0, 0),
+            mockNodeView(innerB, 1, 0),
+            innerA.outputs[0].value[0]
+        ));
+        const nvpBlock = mockGraphBlock(nvpCompiled, innerEdges, new Map([
+            [innerA, { x: 0, y: 0 }],
+            [innerB, { x: 1, y: 0 }]
+        ]));
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockRuntimeViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [nvpNode, { x: 1, y: 0 }],
+                [graph.nodes[2], { x: 2, y: 0 }],
+                [innerA, { x: 0, y: 0 }],
+                [innerB, { x: 1, y: 0 }]
+            ]), outerEdges, [
+                mockExpandedShellView(nvpNode, nvpBlock, 1, 0)
+            ]),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(graph.nodes[0]._bftNumber, 1);
+        assert.equal(nvpNode._bftNumber, 2);
+        assert.equal(graph.nodes[2]._bftNumber, 3);
+        assert.equal(graph.nodes[0].outputs[0].value[0]._bftEdgeNumber, 1);
+        assert.equal(nvpNode.outputs[0].value[0]._bftEdgeNumber, 2);
+        assert.equal(innerA._bftNumber, 1);
+        assert.equal(innerB._bftNumber, 2);
+        assert.equal(nvpCompiled.inputs[0].value[0]._bftEdgeNumber, 1);
+        assert.equal(innerA.outputs[0].value[0]._bftEdgeNumber, 2);
+    });
+
+    it('continues frag shell numbering while nested CVFlowNVP restarts inside the same compiled graph', () => {
+        const nvpInner = {
+            name: 'nvp_inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'y', value: [tensor('nvp_inner_out')] }]
+        };
+        const nvpCompiled = {
+            name: 'nvp_compiled',
+            inputs: [{ name: 'input', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'output', value: [tensor('nvp_inner_out')] }],
+            nodes: [nvpInner]
+        };
+        const nvpNode = {
+            name: 'nested_nvp',
+            type: { name: 'CVFlowNVP' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: nvpCompiled }],
+            inputs: [{ name: 'x', value: [tensor('frag_in')] }],
+            outputs: [{ name: 'y', value: [tensor('nvp_shell_out')] }]
+        };
+        const fragInner = {
+            name: 'frag_inner',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('frag_in')] }],
+            outputs: [{ name: 'y', value: [tensor('frag_out')] }]
+        };
+        const fragCompiled = {
+            name: 'frag_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('frag_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('frag_out')] }],
+            nodes: [fragInner, nvpNode]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: fragCompiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        const fragEdges = new Map();
+        registerEdge(fragEdges, mockEdge(
+            mockInputView(fragCompiled.inputs[0], -1, 0),
+            mockNodeView(fragInner, 0, 0),
+            fragCompiled.inputs[0].value[0]
+        ));
+        const nvpEdges = new Map();
+        registerEdge(nvpEdges, mockEdge(
+            mockInputView(nvpCompiled.inputs[0], -1, 5),
+            mockNodeView(nvpInner, 0, 5),
+            nvpCompiled.inputs[0].value[0]
+        ));
+        const nvpBlock = mockGraphBlock(nvpCompiled, nvpEdges, new Map([
+            [nvpInner, { x: 0, y: 5 }]
+        ]));
+        const fragBlock = mockGraphBlock(fragCompiled, fragEdges, new Map([
+            [fragInner, { x: 0, y: 0 }],
+            [nvpNode, { x: 1, y: 5 }],
+            [nvpInner, { x: 0, y: 5 }]
+        ]));
+        const fragNode = graph.nodes[1];
+        const outerNestedView = mockNestedViewGraph(fragCompiled, fragEdges, new Map([
+            [fragInner, { x: 0, y: 0 }],
+            [nvpNode, { x: 1, y: 5 }],
+            [nvpInner, { x: 0, y: 5 }]
+        ]));
+        outerNestedView.nodes = new Map([
+            ['nested_nvp', { label: mockExpandedShellView(nvpNode, nvpBlock, 1, 5) }]
+        ]);
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockRuntimeViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [fragNode, { x: 1, y: 0 }],
+                [fragInner, { x: 0, y: 0 }],
+                [nvpNode, { x: 1, y: 5 }],
+                [nvpInner, { x: 0, y: 5 }]
+            ]), new Map(), [
+                mockExpandedShellView(fragNode, { target: outerNestedView }, 1, 0)
+            ]),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(graph.nodes[0]._bftNumber, 1);
+        assert.equal(fragInner._bftNumber, 2);
+        assert.equal(nvpNode._bftNumber, 3);
+        assert.equal(nvpInner._bftNumber, 1);
+        assert.equal(fragCompiled.inputs[0].value[0]._bftEdgeNumber, 1);
+        assert.equal(nvpCompiled.inputs[0].value[0]._bftEdgeNumber, 1);
+    });
+
     it('formats tensor labels with producer/consumer sourceNodeId', () => {
         const graph = buildLinearGraph();
         ensureBftNumbersForDisplayGraph(graph, 'horizontal');

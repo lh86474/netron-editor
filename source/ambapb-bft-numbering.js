@@ -246,8 +246,8 @@ const forEachNestedViewGraph = (viewGraph, visitor) => {
     }
 };
 
-const findNestedViewGraphForShell = (viewGraph, shellNode) => {
-    const compiled = getCompiledGraphFromNode(shellNode);
+const findNestedViewGraphForHost = (viewGraph, hostNode) => {
+    const compiled = getCompiledGraphFromNode(hostNode);
     if (!compiled || !isViewGraphLike(viewGraph)) {
         return null;
     }
@@ -585,14 +585,24 @@ const buildBatchCallNumberMapFromNumberedSource = (sourceGraph) => {
     return map;
 };
 
-const collectNestedShellNodes = (graph) => {
-    return (graph.nodes || []).filter((node) => (
-        node.type?.name === 'FragSubgraph' || node.type?.name === 'UserDefSubgraph'
-    ));
+const isFragShellHost = (node) => (
+    node.type?.name === 'FragSubgraph' || node.type?.name === 'UserDefSubgraph'
+);
+
+const isRestartCompiledHost = (node) => (
+    node.type?.name === 'CVFlowNVP'
+);
+
+const collectCompiledGraphHosts = (graph) => {
+    return (graph.nodes || []).filter((node) => getCompiledGraphFromNode(node));
 };
 
-const assignNestedShellGraphs = (graph, viewGraph, nodeCounter, layoutDirection) => {
-    const entries = collectNestedShellNodes(graph).map((node, index) => ({
+const graphHasCompiledGraphHosts = (graph) => {
+    return collectCompiledGraphHosts(graph).length > 0;
+};
+
+const assignNestedCompiledHosts = (graph, viewGraph, nodeCounter, layoutDirection) => {
+    const entries = collectCompiledGraphHosts(graph).map((node, index) => ({
         node,
         view: findViewNode(viewGraph, node),
         fallbackIndex: index
@@ -603,12 +613,17 @@ const assignNestedShellGraphs = (graph, viewGraph, nodeCounter, layoutDirection)
         if (!subGraph) {
             continue;
         }
-        nextCounter = assignNumbersToGraphNodes(subGraph, viewGraph, nextCounter, {
-            assignUnreachableAtEnd: true,
+        const restart = isRestartCompiledHost(entry.node);
+        const startCounter = restart ? 1 : nextCounter;
+        const endCounter = assignNumbersToGraphNodes(subGraph, viewGraph, startCounter, {
+            assignUnreachableAtEnd: !restart,
             entryOnlySources: true,
             layoutDirection
         });
-        nextCounter = assignNestedShellGraphs(subGraph, viewGraph, nextCounter, layoutDirection);
+        assignNestedCompiledHosts(subGraph, viewGraph, endCounter, layoutDirection);
+        if (!restart) {
+            nextCounter = endCounter;
+        }
     }
     return nextCounter;
 };
@@ -629,7 +644,7 @@ export const resolveAmbapbNumberingMode = (ctx) => {
     if (displayGraph._ambapbCompiledGraph) {
         return 'compiledFrag';
     }
-    if (graphHasAmbapbShells(displayGraph)) {
+    if (graphHasAmbapbShells(displayGraph) || graphHasCompiledGraphHosts(displayGraph)) {
         return 'runtime';
     }
     return 'plain';
@@ -662,7 +677,7 @@ export const assignBftNumbers = (ctx) => {
             entryOnlySources: resolveEntryOnlySources(sourceGraph, false),
             layoutDirection
         });
-        sourceCounter = assignNestedShellGraphs(sourceGraph, viewGraph, sourceCounter, layoutDirection);
+        sourceCounter = assignNestedCompiledHosts(sourceGraph, viewGraph, sourceCounter, layoutDirection);
         sourceBftByNode = snapshotBftNumbers(sourceGraph);
         clearBftMetadata(sourceGraph);
     }
@@ -674,7 +689,7 @@ export const assignBftNumbers = (ctx) => {
     });
 
     if (mode === 'runtime' || mode === 'compiledFrag') {
-        nodeCounter = assignNestedShellGraphs(displayGraph, viewGraph, nodeCounter, layoutDirection);
+        nodeCounter = assignNestedCompiledHosts(displayGraph, viewGraph, nodeCounter, layoutDirection);
     }
 
     const displayTraversalByNode = new Map();
@@ -728,22 +743,26 @@ const assignEdgeNumbersInScope = (viewGraph, layoutDirection, counter) => {
     return nextCounter;
 };
 
-const assignNestedShellEdgeNumbers = (modelGraph, viewGraph, layoutDirection, counter) => {
-    const entries = collectNestedShellNodes(modelGraph).map((node, index) => ({
+const assignNestedCompiledHostEdges = (modelGraph, viewGraph, layoutDirection, counter) => {
+    const entries = collectCompiledGraphHosts(modelGraph).map((node, index) => ({
         node,
         view: findViewNode(viewGraph, node),
         fallbackIndex: index
     }));
     let nextCounter = counter;
     for (const entry of sortEntriesByVisualPosition(entries, layoutDirection)) {
-        const nestedViewGraph = findNestedViewGraphForShell(viewGraph, entry.node);
+        const nestedViewGraph = findNestedViewGraphForHost(viewGraph, entry.node);
         if (!nestedViewGraph) {
             continue;
         }
-        nextCounter = assignEdgeNumbersInScope(nestedViewGraph, layoutDirection, nextCounter);
+        if (isRestartCompiledHost(entry.node)) {
+            assignEdgeNumbersInScope(nestedViewGraph, layoutDirection, 1);
+        } else {
+            nextCounter = assignEdgeNumbersInScope(nestedViewGraph, layoutDirection, nextCounter);
+        }
         const subGraph = getCompiledGraphFromNode(entry.node);
         if (subGraph) {
-            nextCounter = assignNestedShellEdgeNumbers(subGraph, viewGraph, layoutDirection, nextCounter);
+            nextCounter = assignNestedCompiledHostEdges(subGraph, viewGraph, layoutDirection, nextCounter);
         }
     }
     return nextCounter;
@@ -764,7 +783,7 @@ export const assignEdgeBftNumbers = (ctx) => {
 
     let counter = assignEdgeNumbersInScope(viewGraph, layoutDirection, 1);
     if (displayGraph) {
-        counter = assignNestedShellEdgeNumbers(displayGraph, viewGraph, layoutDirection, counter);
+        counter = assignNestedCompiledHostEdges(displayGraph, viewGraph, layoutDirection, counter);
     }
 };
 
