@@ -100,6 +100,7 @@
 .select.node-argument > rect { fill: transparent; stroke: rgba(220, 0, 0, 0.9); }
 
 .edge-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 10px; }
+.edge-bft-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 10px; font-weight: bold; fill: #333; pointer-events: none; }
 .edge-path-control-dependency { stroke-dasharray: 3, 2; }
 .edge-path-tunnel { stroke-dasharray: 5, 3; marker-end: url("#arrowhead-tunnel"); opacity: 0.5; }
 #arrowhead-tunnel { fill: #000; }
@@ -129,6 +130,7 @@
     #arrowhead-select { fill: rgba(192, 0, 0, 0.8); }
 
     .edge-label { fill: #b2b2b2; }
+    .edge-bft-label { fill: #dfdfdf; }
 
     .node-item-function path { fill: #404040; }
     .node-item-function text { fill: #dfdfdfdf; }

@@ -122,6 +122,91 @@ const graphInputNames = (graph) => {
     return names;
 };
 
+const graphOutputNames = (graph) => {
+    const names = new Set();
+    for (const output of graph.outputs || []) {
+        for (const value of argumentValues(output)) {
+            if (value && value.name) {
+                names.add(value.name);
+            }
+        }
+    }
+    return names;
+};
+
+const graphHasDeclaredInputs = (graph) => {
+    return (graph.inputs || []).length > 0;
+};
+
+const resolveEntryOnlySources = (graph, entryOnlySources) => {
+    return entryOnlySources || graphHasDeclaredInputs(graph);
+};
+
+const findGraphInputView = (viewGraph, inputArgument) => {
+    if (!viewGraph || !inputArgument || typeof viewGraph.find !== 'function') {
+        return null;
+    }
+    const found = viewGraph.find(inputArgument);
+    return found && found.x !== undefined ? found : null;
+};
+
+const graphInputVisualOrder = (graph, viewGraph, layoutDirection) => {
+    const entries = (graph.inputs || []).map((input, index) => ({
+        index,
+        view: findGraphInputView(viewGraph, input),
+        fallbackIndex: index
+    }));
+    return sortEntriesByVisualPosition(entries, layoutDirection).map((entry) => entry.index);
+};
+
+const entryNodePrimaryInputOrder = (graph, node, inputNames, viewGraph, layoutDirection) => {
+    const visualOrder = graphInputVisualOrder(graph, viewGraph, layoutDirection);
+    let bestOrder = Number.MAX_SAFE_INTEGER;
+    for (let order = 0; order < visualOrder.length; order++) {
+        const inputIndex = visualOrder[order];
+        const input = graph.inputs[inputIndex];
+        for (const value of argumentValues(input)) {
+            if (!value || !value.name || !inputNames.has(value.name)) {
+                continue;
+            }
+            for (const nodeInput of node.inputs || []) {
+                for (const bound of argumentValues(nodeInput)) {
+                    if (bound && bound.name === value.name) {
+                        bestOrder = Math.min(bestOrder, order);
+                    }
+                }
+            }
+        }
+    }
+    return bestOrder;
+};
+
+const findOutputSortView = (viewGraph, graph, output, outputIndex, layoutDirection) => {
+    let bestKey = null;
+    for (const value of argumentValues(output)) {
+        if (!value || !value.name) {
+            continue;
+        }
+        for (const consumer of findValueConsumers(graph, value)) {
+            if (!consumer.node) {
+                continue;
+            }
+            const view = findViewNode(viewGraph, consumer.node);
+            const key = visualSortKey(view, layoutDirection, (graph.nodes || []).indexOf(consumer.node));
+            if (bestKey == null || key < bestKey) {
+                bestKey = key;
+            }
+        }
+    }
+    if (bestKey == null) {
+        return null;
+    }
+    if (layoutDirection === 'vertical') {
+        return { x: bestKey, y: outputIndex };
+    }
+    return { x: outputIndex, y: bestKey };
+};
+
 const isEntryNode = (graph, node, inputNames) => {
     let hasNonInitializerInput = false;
     for (const input of node.inputs || []) {
@@ -145,12 +230,13 @@ const isEntryNode = (graph, node, inputNames) => {
 
 const computeBftLevels = (graph, skipTypes, options = {}) => {
     const { entryOnlySources = false } = options;
+    const seedFromGraphInputs = resolveEntryOnlySources(graph, entryOnlySources);
     const levels = new Map();
     const nodes = (graph.nodes || []).filter((node) => !isShellNode(node, skipTypes));
     const inputNames = graphInputNames(graph);
     const queue = [];
     for (const node of nodes) {
-        const isSource = entryOnlySources ?
+        const isSource = seedFromGraphInputs ?
             isEntryNode(graph, node, inputNames) :
             !hasInGraphProducer(graph, node);
         if (isSource) {
@@ -202,6 +288,9 @@ const visualSortKey = (viewNode, layoutDirection, fallbackIndex) => {
 
 const sortEntriesByVisualPosition = (entries, layoutDirection) => {
     return entries.slice().sort((a, b) => {
+        if (a.inputOrder != null && b.inputOrder != null && a.inputOrder !== b.inputOrder) {
+            return a.inputOrder - b.inputOrder;
+        }
         const delta = visualSortKey(a.view, layoutDirection, a.fallbackIndex) -
             visualSortKey(b.view, layoutDirection, b.fallbackIndex);
         if (delta !== 0) {
@@ -223,6 +312,7 @@ const orderedGraphNodes = (graph, viewGraph, options = {}) => {
     const reachable = new Set(levels.keys());
     const levelGroups = new Map();
     const ordered = [];
+    const inputNames = graphInputNames(graph);
 
     for (const [node, level] of levels.entries()) {
         if (!levelGroups.has(level)) {
@@ -237,6 +327,9 @@ const orderedGraphNodes = (graph, viewGraph, options = {}) => {
             node,
             view: findViewNode(viewGraph, node),
             fallbackIndex: (graph.nodes || []).indexOf(node),
+            inputOrder: level === 0 && graphHasDeclaredInputs(graph) ?
+                entryNodePrimaryInputOrder(graph, node, inputNames, viewGraph, layoutDirection) :
+                null,
             level
         }));
         for (const entry of sortEntriesByVisualPosition(entries, layoutDirection)) {
@@ -261,13 +354,41 @@ const orderedGraphNodes = (graph, viewGraph, options = {}) => {
     return ordered;
 };
 
-const assignNumbersToGraph = (graph, viewGraph, counter, options = {}) => {
-    let nextCounter = counter;
+const shouldNumberOutputValue = (value, inputNames, outputNames) => {
+    if (!value || !value.name || value.initializer || value._bftEdgeNumber != null) {
+        return false;
+    }
+    if (inputNames.has(value.name) || outputNames.has(value.name)) {
+        return false;
+    }
+    return true;
+};
+
+const traverseAndNumberGraph = (graph, viewGraph, counters, options = {}) => {
+    let nodeCounter = counters.nodeCounter;
+    let edgeCounter = counters.edgeCounter;
+    const inputNames = graphInputNames(graph);
+    const outputNames = graphOutputNames(graph);
+
+    const layoutDirection = options.layoutDirection || 'horizontal';
     for (const entry of orderedGraphNodes(graph, viewGraph, options)) {
-        entry.node._bftNumber = nextCounter++;
+        const outputs = (entry.node.outputs || []).map((output, index) => ({
+            output,
+            fallbackIndex: index,
+            view: findOutputSortView(viewGraph, graph, output, index, layoutDirection)
+        }));
+        for (const { output } of sortEntriesByVisualPosition(outputs, layoutDirection)) {
+            for (const value of argumentValues(output)) {
+                if (shouldNumberOutputValue(value, inputNames, outputNames)) {
+                    value._bftEdgeNumber = edgeCounter++;
+                }
+            }
+        }
+        entry.node._bftNumber = nodeCounter++;
         entry.node._bftLevel = entry.level;
     }
-    return nextCounter;
+
+    return { nodeCounter, edgeCounter };
 };
 
 const graphHasAmbapbShells = (graph) => {
@@ -379,26 +500,26 @@ const collectNestedShellNodes = (graph) => {
     ));
 };
 
-const assignNestedShellGraphs = (graph, viewGraph, counter, layoutDirection) => {
+const assignNestedShellGraphs = (graph, viewGraph, counters, layoutDirection) => {
     const entries = collectNestedShellNodes(graph).map((node, index) => ({
         node,
         view: findViewNode(viewGraph, node),
         fallbackIndex: index
     }));
-    let nextCounter = counter;
+    let nextCounters = { ...counters };
     for (const entry of sortEntriesByVisualPosition(entries, layoutDirection)) {
         const subGraph = getCompiledGraphFromNode(entry.node);
         if (!subGraph) {
             continue;
         }
-        nextCounter = assignNumbersToGraph(subGraph, viewGraph, nextCounter, {
+        nextCounters = traverseAndNumberGraph(subGraph, viewGraph, nextCounters, {
             assignUnreachableAtEnd: true,
             entryOnlySources: true,
             layoutDirection
         });
-        nextCounter = assignNestedShellGraphs(subGraph, viewGraph, nextCounter, layoutDirection);
+        nextCounters = assignNestedShellGraphs(subGraph, viewGraph, nextCounters, layoutDirection);
     }
-    return nextCounter;
+    return nextCounters;
 };
 
 const isUserDefNavigationHost = (navigationHost) => {
@@ -443,27 +564,32 @@ export const assignBftNumbers = (ctx) => {
     const compiledLike = mode === 'compiledFrag';
     const runtimeLike = mode === 'runtime';
 
-    let batchCallNumbers = new Map();
     let sourceBftByNode = new Map();
     if (sourceGraph && runtimeLike) {
-        let sourceCounter = assignNumbersToGraph(sourceGraph, viewGraph, 1, {
+        let sourceCounters = traverseAndNumberGraph(sourceGraph, viewGraph, {
+            nodeCounter: 1,
+            edgeCounter: 1
+        }, {
             assignUnreachableAtEnd: false,
-            entryOnlySources: false,
+            entryOnlySources: resolveEntryOnlySources(sourceGraph, false),
             layoutDirection
         });
-        assignNestedShellGraphs(sourceGraph, viewGraph, sourceCounter, layoutDirection);
+        sourceCounters = assignNestedShellGraphs(sourceGraph, viewGraph, sourceCounters, layoutDirection);
         sourceBftByNode = snapshotBftNumbers(sourceGraph);
         clearBftMetadata(sourceGraph);
     }
 
-    let counter = assignNumbersToGraph(displayGraph, viewGraph, 1, {
+    let counters = traverseAndNumberGraph(displayGraph, viewGraph, {
+        nodeCounter: 1,
+        edgeCounter: 1
+    }, {
         assignUnreachableAtEnd: compiledLike,
-        entryOnlySources: compiledLike,
+        entryOnlySources: resolveEntryOnlySources(displayGraph, compiledLike),
         layoutDirection
     });
 
     if (mode === 'runtime' || mode === 'compiledFrag') {
-        assignNestedShellGraphs(displayGraph, viewGraph, counter, layoutDirection);
+        counters = assignNestedShellGraphs(displayGraph, viewGraph, counters, layoutDirection);
     }
 
     const displayTraversalByNode = new Map();
@@ -480,81 +606,8 @@ export const assignBftNumbers = (ctx) => {
     }
 };
 
-const isGraphTerminalViewNode = (viewNode) => {
-    if (!viewNode || !viewNode.class) {
-        return false;
-    }
-    return viewNode.class === 'graph-input' || viewNode.class === 'graph-output';
-};
-
-const edgeMidpointSortKey = (fromView, toView, layoutDirection) => {
-    if (!fromView || !toView || fromView.x === undefined || toView.x === undefined) {
-        return 0;
-    }
-    if (layoutDirection === 'vertical') {
-        return (fromView.x + toView.x) / 2;
-    }
-    return (fromView.y + toView.y) / 2;
-};
-
-export const assignEdgeBftNumbers = (ctx) => {
-    const {
-        viewGraph = null,
-        layoutDirection = 'horizontal'
-    } = ctx || {};
-
-    if (!viewGraph || !viewGraph.edges) {
-        return;
-    }
-
-    const edgeEntries = [];
-    for (const entry of viewGraph.edges.values()) {
-        const edge = entry.label;
-        if (!edge || !edge.from || !edge.to || !edge.value) {
-            continue;
-        }
-        if (isGraphTerminalViewNode(edge.from) || isGraphTerminalViewNode(edge.to)) {
-            continue;
-        }
-        const fromNode = edge.from.value;
-        const toNode = edge.to.value;
-        if (!fromNode || !toNode) {
-            continue;
-        }
-        if (fromNode._bftLevel == null && fromNode._bftNumber == null) {
-            continue;
-        }
-        if (toNode._bftLevel == null && toNode._bftNumber == null) {
-            continue;
-        }
-        const fromLevel = fromNode._bftLevel != null ? fromNode._bftLevel : 0;
-        const toLevel = toNode._bftLevel != null ? toNode._bftLevel : 0;
-        const level = Math.min(fromLevel, toLevel);
-        const tensorValue = edge.value.value;
-        if (tensorValue) {
-            delete tensorValue._bftEdgeNumber;
-        }
-        edgeEntries.push({
-            edge,
-            tensorValue,
-            level,
-            sortKey: edgeMidpointSortKey(edge.from, edge.to, layoutDirection)
-        });
-    }
-
-    edgeEntries.sort((a, b) => {
-        if (a.level !== b.level) {
-            return a.level - b.level;
-        }
-        return a.sortKey - b.sortKey;
-    });
-
-    let counter = 1;
-    for (const entry of edgeEntries) {
-        if (entry.tensorValue) {
-            entry.tensorValue._bftEdgeNumber = counter++;
-        }
-    }
+export const assignEdgeBftNumbers = () => {
+    // Edge numbers are assigned during assignBftNumbers BFS traversal.
 };
 
 export const resolveNodeBftNumber = (node) => {

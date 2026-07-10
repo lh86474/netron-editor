@@ -28,7 +28,6 @@ import { GraphPane } from './graph-pane.js';
 import { MergeWorkspaceController } from './merge-workspace.js';
 import {
     assignBftNumbers,
-    assignEdgeBftNumbers,
     getCompiledGraphFromNode,
     nodeIsInDisplayedGraph,
     resolveSidebarBftValue
@@ -517,10 +516,6 @@ view.View = class {
             viewGraph,
             layoutDirection: this._bftLayoutDirection(),
             navigationHost: this._bftNavigationHost(pane)
-        });
-        assignEdgeBftNumbers({
-            viewGraph,
-            layoutDirection: this._bftLayoutDirection()
         });
         viewGraph._bftDisplayGraph = displayGraph;
     }

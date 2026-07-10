@@ -1004,6 +1004,7 @@ grapher.Edge = class {
         edgePathGroupElement.appendChild(this.element);
         this.hitTest = createElement('path');
         edgePathHitTestGroupElement.appendChild(this.hitTest);
+        this._edgeLabelGroup = edgeLabelGroupElement;
         if (this.label) {
             const tspan = createElement('tspan');
             tspan.setAttribute('xml:space', 'preserve');
@@ -1019,6 +1020,64 @@ grapher.Edge = class {
             }
             edgeLabelGroupElement.appendChild(this.labelElement);
         }
+        this.bftOrderTspan = createElement('tspan');
+        this.bftOrderTspan.setAttribute('xml:space', 'preserve');
+        this.bftOrderTspan.setAttribute('dy', '1em');
+        this.bftOrderTspan.setAttribute('x', '0');
+        this.bftOrderElement = createElement('text');
+        this.bftOrderElement.appendChild(this.bftOrderTspan);
+        this.bftOrderElement.style.opacity = 0;
+        this.bftOrderElement.setAttribute('class', 'edge-bft-label');
+        edgeLabelGroupElement.appendChild(this.bftOrderElement);
+    }
+
+    _edgeLabelAnchor() {
+        if (typeof this.x === 'number' && typeof this.y === 'number' &&
+            !isNaN(this.x) && !isNaN(this.y)) {
+            return { x: this.x, y: this.y };
+        }
+        if (Array.isArray(this.points) && this.points.length > 0) {
+            const mid = this.points[Math.floor(this.points.length / 2)];
+            if (mid && typeof mid.x === 'number' && typeof mid.y === 'number') {
+                return { x: mid.x, y: mid.y };
+            }
+        }
+        return null;
+    }
+
+    _updateBftOrderLabel() {
+        if (!this.bftOrderElement || !this.bftOrderTspan) {
+            return;
+        }
+        const tensorValue = this.value && this.value.value;
+        const bftNumber = tensorValue && tensorValue._bftEdgeNumber;
+        if (bftNumber == null) {
+            this.bftOrderElement.style.opacity = 0;
+            return;
+        }
+        const anchor = this._edgeLabelAnchor();
+        if (!anchor) {
+            this.bftOrderElement.style.opacity = 0;
+            return;
+        }
+        this.bftOrderTspan.textContent = String(bftNumber);
+        let box = null;
+        try {
+            box = this.bftOrderElement.getBBox();
+        } catch {
+            box = null;
+        }
+        const orderWidth = box && box.width ? box.width : 8;
+        const orderHeight = box && box.height ? box.height : 10;
+        let dimLeft = anchor.x;
+        if (this.labelElement &&
+            typeof this.width === 'number' && !isNaN(this.width)) {
+            dimLeft = anchor.x - (this.width / 2);
+        }
+        const orderX = dimLeft - 6 - orderWidth;
+        const orderY = anchor.y - (orderHeight / 2);
+        this.bftOrderElement.setAttribute('transform', `translate(${orderX},${orderY})`);
+        this.bftOrderElement.style.opacity = 1;
     }
 
     update() {
@@ -1059,6 +1118,7 @@ grapher.Edge = class {
             this.labelElement.setAttribute('transform', `translate(${this.x - (this.width / 2)},${this.y - (this.height / 2)})`);
             this.labelElement.style.opacity = 1;
         }
+        this._updateBftOrderLabel();
     }
 
     select() {
