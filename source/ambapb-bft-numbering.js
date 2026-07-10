@@ -202,6 +202,64 @@ const edgeMidpointSortKey = (fromView, toView, layoutDirection) => {
     return (fromView.y + toView.y) / 2;
 };
 
+const isViewGraphLike = (viewGraph) => {
+    return Boolean(viewGraph && viewGraph.edges instanceof Map && typeof viewGraph.find === 'function');
+};
+
+const isGraphBlock = (block) => {
+    return Boolean(block && isViewGraphLike(block.target));
+};
+
+const walkViewNodeBlocks = (viewNode, visitor) => {
+    if (!viewNode || !Array.isArray(viewNode.blocks)) {
+        return;
+    }
+    for (const block of viewNode.blocks) {
+        if (isGraphBlock(block)) {
+            visitor(block.target);
+        }
+        if (Array.isArray(block._items)) {
+            for (const item of block._items) {
+                const content = item.content;
+                if (content && Array.isArray(content.blocks)) {
+                    for (const innerBlock of content.blocks) {
+                        if (isGraphBlock(innerBlock)) {
+                            visitor(innerBlock.target);
+                        }
+                    }
+                }
+            }
+        }
+    }
+};
+
+const forEachNestedViewGraph = (viewGraph, visitor) => {
+    if (!isViewGraphLike(viewGraph) || !viewGraph.nodes) {
+        return;
+    }
+    for (const entry of viewGraph.nodes.values()) {
+        const viewNode = entry && entry.label;
+        walkViewNodeBlocks(viewNode, (nestedViewGraph) => {
+            visitor(nestedViewGraph);
+            forEachNestedViewGraph(nestedViewGraph, visitor);
+        });
+    }
+};
+
+const findNestedViewGraphForShell = (viewGraph, shellNode) => {
+    const compiled = getCompiledGraphFromNode(shellNode);
+    if (!compiled || !isViewGraphLike(viewGraph)) {
+        return null;
+    }
+    let found = null;
+    forEachNestedViewGraph(viewGraph, (nestedViewGraph) => {
+        if (!found && nestedViewGraph.target === compiled) {
+            found = nestedViewGraph;
+        }
+    });
+    return found;
+};
+
 const collectViewEdges = (viewGraph) => {
     const edges = [];
     if (!viewGraph || !viewGraph.edges) {
@@ -216,10 +274,18 @@ const collectViewEdges = (viewGraph) => {
     return edges;
 };
 
-const clearViewEdgeNumbers = (viewGraph) => {
+const clearViewEdgeNumbersInScope = (viewGraph) => {
     for (const edge of collectViewEdges(viewGraph)) {
         delete edge._bftEdgeNumber;
     }
+};
+
+const clearAllViewEdgeNumbers = (viewGraph) => {
+    if (!isViewGraphLike(viewGraph)) {
+        return;
+    }
+    clearViewEdgeNumbersInScope(viewGraph);
+    forEachNestedViewGraph(viewGraph, clearViewEdgeNumbersInScope);
 };
 
 const orderTerminalEdges = (edges, layoutDirection) => {
@@ -624,20 +690,13 @@ export const assignBftNumbers = (ctx) => {
         node._bftWrapperNumber = traversalNumber;
     }
 
-    assignEdgeBftNumbers({ viewGraph, layoutDirection });
+    assignEdgeBftNumbers({ viewGraph, layoutDirection, displayGraph });
 };
 
-export const assignEdgeBftNumbers = (ctx) => {
-    const {
-        viewGraph = null,
-        layoutDirection = 'horizontal'
-    } = ctx || {};
-
-    if (!viewGraph || !viewGraph.edges) {
-        return;
+const assignEdgeNumbersInScope = (viewGraph, layoutDirection, counter) => {
+    if (!isViewGraphLike(viewGraph)) {
+        return counter;
     }
-
-    clearViewEdgeNumbers(viewGraph);
 
     const inputEdges = [];
     const internalEdges = [];
@@ -662,9 +721,50 @@ export const assignEdgeBftNumbers = (ctx) => {
         ...orderOutputTerminalEdges(outputEdges, layoutDirection)
     ];
 
-    let counter = 1;
+    let nextCounter = counter;
     for (const edge of ordered) {
-        mirrorEdgeNumberToTensor(edge, counter++);
+        mirrorEdgeNumberToTensor(edge, nextCounter++);
+    }
+    return nextCounter;
+};
+
+const assignNestedShellEdgeNumbers = (modelGraph, viewGraph, layoutDirection, counter) => {
+    const entries = collectNestedShellNodes(modelGraph).map((node, index) => ({
+        node,
+        view: findViewNode(viewGraph, node),
+        fallbackIndex: index
+    }));
+    let nextCounter = counter;
+    for (const entry of sortEntriesByVisualPosition(entries, layoutDirection)) {
+        const nestedViewGraph = findNestedViewGraphForShell(viewGraph, entry.node);
+        if (!nestedViewGraph) {
+            continue;
+        }
+        nextCounter = assignEdgeNumbersInScope(nestedViewGraph, layoutDirection, nextCounter);
+        const subGraph = getCompiledGraphFromNode(entry.node);
+        if (subGraph) {
+            nextCounter = assignNestedShellEdgeNumbers(subGraph, viewGraph, layoutDirection, nextCounter);
+        }
+    }
+    return nextCounter;
+};
+
+export const assignEdgeBftNumbers = (ctx) => {
+    const {
+        viewGraph = null,
+        layoutDirection = 'horizontal',
+        displayGraph = null
+    } = ctx || {};
+
+    if (!isViewGraphLike(viewGraph)) {
+        return;
+    }
+
+    clearAllViewEdgeNumbers(viewGraph);
+
+    let counter = assignEdgeNumbersInScope(viewGraph, layoutDirection, 1);
+    if (displayGraph) {
+        counter = assignNestedShellEdgeNumbers(displayGraph, viewGraph, layoutDirection, counter);
     }
 };
 

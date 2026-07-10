@@ -165,6 +165,48 @@ const buildDualInputViewEdges = (graph, positions) => {
     return edges;
 };
 
+const mockNestedViewGraph = (modelGraph, edges, positions = new Map()) => ({
+    target: modelGraph,
+    edges,
+    find(node) {
+        return positions.get(node) || null;
+    },
+    nodes: new Map()
+});
+
+const mockGraphBlock = (modelGraph, edges, positions = new Map()) => ({
+    target: mockNestedViewGraph(modelGraph, edges, positions)
+});
+
+const mockExpandedShellView = (shellNode, block, x, y) => ({
+    value: shellNode,
+    class: 'graph-node',
+    x,
+    y,
+    name: shellNode.name,
+    blocks: [{
+        _items: [{
+            content: {
+                blocks: [block]
+            }
+        }]
+    }]
+});
+
+const mockRuntimeViewGraph = (positions, outerEdges = new Map(), shellViews = []) => {
+    const nodes = new Map();
+    for (const shellView of shellViews) {
+        nodes.set(shellView.name, { label: shellView });
+    }
+    return {
+        find(node) {
+            return positions.get(node) || null;
+        },
+        edges: outerEdges,
+        nodes
+    };
+};
+
 describe('ambapb bft numbering', () => {
     it('numbers a linear graph in breadth-first order', () => {
         const graph = buildLinearGraph();
@@ -270,15 +312,22 @@ describe('ambapb bft numbering', () => {
             mockNodeView(innerB, 1, 0),
             innerA.outputs[0].value[0]
         ));
+        const fragNode = graph.nodes[1];
+        const fragBlock = mockGraphBlock(compiled, innerEdges, new Map([
+            [innerA, { x: 0, y: 0 }],
+            [innerB, { x: 1, y: 0 }]
+        ]));
         assignBftNumbers({
             displayGraph: graph,
             sourceGraph: graph,
-            viewGraph: mockViewGraph(new Map([
+            viewGraph: mockRuntimeViewGraph(new Map([
                 [graph.nodes[0], { x: 0, y: 0 }],
-                [graph.nodes[1], { x: 1, y: 0 }],
+                [fragNode, { x: 1, y: 0 }],
                 [innerA, { x: 0, y: 0 }],
                 [innerB, { x: 1, y: 0 }]
-            ]), innerEdges),
+            ]), new Map(), [
+                mockExpandedShellView(fragNode, fragBlock, 1, 0)
+            ]),
             layoutDirection: 'horizontal'
         });
         assert.equal(graph.nodes[1]._bftNumber, undefined);
@@ -717,6 +766,268 @@ describe('ambapb bft numbering', () => {
         });
         assert.equal(graph.nodes[0].outputs[0].value[0]._bftEdgeNumber, 1);
         assert.equal(graph.nodes[0].outputs[1].value[0]._bftEdgeNumber, undefined);
+    });
+
+    it('numbers expanded frag edges after outer graph edges', () => {
+        const innerA = {
+            name: 'inner_a',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'y', value: [tensor('inner_a_out')] }]
+        };
+        const innerB = {
+            name: 'inner_b',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('inner_a_out')] }],
+            outputs: [{ name: 'y', value: [tensor('sub_out')] }]
+        };
+        const compiled = {
+            name: 'compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('sub_out')] }],
+            nodes: [innerA, innerB]
+        };
+        const main = {
+            name: 'main',
+            type: { name: 'Conv' },
+            inputs: [],
+            outputs: [{ name: 'y', value: [tensor('main_out')] }]
+        };
+        const sink = {
+            name: 'sink',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('main_out')] }],
+            outputs: [{ name: 'y', value: [tensor('sink_out')] }]
+        };
+        const fragNode = {
+            name: 'frag',
+            type: { name: 'FragSubgraph' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: compiled }],
+            inputs: [],
+            outputs: []
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [main, fragNode, sink]
+        };
+        const outerEdges = new Map();
+        registerEdge(outerEdges, mockEdge(
+            mockNodeView(main, 0, 0),
+            mockNodeView(sink, 2, 0),
+            main.outputs[0].value[0]
+        ));
+        const innerEdges = new Map();
+        registerEdge(innerEdges, mockEdge(
+            mockNodeView(innerA, 0, 0),
+            mockNodeView(innerB, 1, 0),
+            innerA.outputs[0].value[0]
+        ));
+        const fragBlock = mockGraphBlock(compiled, innerEdges, new Map([
+            [innerA, { x: 0, y: 0 }],
+            [innerB, { x: 1, y: 0 }]
+        ]));
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockRuntimeViewGraph(new Map([
+                [main, { x: 0, y: 0 }],
+                [fragNode, { x: 1, y: 0 }],
+                [sink, { x: 2, y: 0 }],
+                [innerA, { x: 0, y: 0 }],
+                [innerB, { x: 1, y: 0 }]
+            ]), outerEdges, [
+                mockExpandedShellView(fragNode, fragBlock, 1, 0)
+            ]),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(main.outputs[0].value[0]._bftEdgeNumber, 1);
+        assert.equal(innerA.outputs[0].value[0]._bftEdgeNumber, 2);
+    });
+
+    it('numbers multiple expanded frags left to right with a global edge counter', () => {
+        const leftInner = {
+            name: 'left_inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('left_in')] }],
+            outputs: [{ name: 'y', value: [tensor('left_out')] }]
+        };
+        const rightInner = {
+            name: 'right_inner',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('right_in')] }],
+            outputs: [{ name: 'y', value: [tensor('right_out')] }]
+        };
+        const leftCompiled = {
+            name: 'left_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('left_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('left_out')] }],
+            nodes: [leftInner]
+        };
+        const rightCompiled = {
+            name: 'right_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('right_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('right_out')] }],
+            nodes: [rightInner]
+        };
+        const leftFrag = {
+            name: 'frag_left',
+            type: { name: 'FragSubgraph' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: leftCompiled }],
+            inputs: [],
+            outputs: []
+        };
+        const rightFrag = {
+            name: 'frag_right',
+            type: { name: 'FragSubgraph' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: rightCompiled }],
+            inputs: [],
+            outputs: []
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                leftFrag,
+                rightFrag
+            ]
+        };
+        const leftEdges = new Map();
+        registerEdge(leftEdges, mockEdge(
+            mockInputView(leftCompiled.inputs[0], -1, 0),
+            mockNodeView(leftInner, 0, 0),
+            leftCompiled.inputs[0].value[0]
+        ));
+        const rightEdges = new Map();
+        registerEdge(rightEdges, mockEdge(
+            mockInputView(rightCompiled.inputs[0], -1, 10),
+            mockNodeView(rightInner, 0, 10),
+            rightCompiled.inputs[0].value[0]
+        ));
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockRuntimeViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [leftFrag, { x: 1, y: 0 }],
+                [rightFrag, { x: 1, y: 10 }],
+                [leftInner, { x: 0, y: 0 }],
+                [rightInner, { x: 0, y: 10 }]
+            ]), new Map(), [
+                mockExpandedShellView(leftFrag, mockGraphBlock(leftCompiled, leftEdges), 1, 0),
+                mockExpandedShellView(rightFrag, mockGraphBlock(rightCompiled, rightEdges), 1, 10)
+            ]),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(leftCompiled.inputs[0].value[0]._bftEdgeNumber, 1);
+        assert.equal(rightCompiled.inputs[0].value[0]._bftEdgeNumber, 2);
+    });
+
+    it('numbers nested frag edges inside an outer frag', () => {
+        const deepInner = {
+            name: 'deep_inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('deep_in')] }],
+            outputs: [{ name: 'y', value: [tensor('deep_out')] }]
+        };
+        const innerCompiled = {
+            name: 'inner_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('deep_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('deep_out')] }],
+            nodes: [deepInner]
+        };
+        const innerFrag = {
+            name: 'inner_frag',
+            type: { name: 'FragSubgraph' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: innerCompiled }],
+            inputs: [],
+            outputs: []
+        };
+        const outerInner = {
+            name: 'outer_inner',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('outer_in')] }],
+            outputs: [{ name: 'y', value: [tensor('outer_out')] }]
+        };
+        const outerCompiled = {
+            name: 'outer_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('outer_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('outer_out')] }],
+            nodes: [outerInner, innerFrag]
+        };
+        const outerFrag = {
+            name: 'outer_frag',
+            type: { name: 'FragSubgraph' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: outerCompiled }],
+            inputs: [],
+            outputs: []
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                outerFrag
+            ]
+        };
+        const outerEdges = new Map();
+        registerEdge(outerEdges, mockEdge(
+            mockInputView(outerCompiled.inputs[0], -1, 0),
+            mockNodeView(outerInner, 0, 0),
+            outerCompiled.inputs[0].value[0]
+        ));
+        const deepEdges = new Map();
+        registerEdge(deepEdges, mockEdge(
+            mockInputView(innerCompiled.inputs[0], -1, 5),
+            mockNodeView(deepInner, 0, 5),
+            innerCompiled.inputs[0].value[0]
+        ));
+        const innerFragBlock = mockGraphBlock(innerCompiled, deepEdges, new Map([
+            [deepInner, { x: 0, y: 5 }]
+        ]));
+        const outerNestedView = mockNestedViewGraph(outerCompiled, outerEdges, new Map([
+            [outerInner, { x: 0, y: 0 }],
+            [innerFrag, { x: 1, y: 5 }],
+            [deepInner, { x: 0, y: 5 }]
+        ]));
+        outerNestedView.nodes = new Map([
+            ['inner_frag', { label: mockExpandedShellView(innerFrag, innerFragBlock, 1, 5) }]
+        ]);
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockRuntimeViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [outerFrag, { x: 1, y: 0 }],
+                [outerInner, { x: 0, y: 0 }],
+                [innerFrag, { x: 1, y: 5 }],
+                [deepInner, { x: 0, y: 5 }]
+            ]), new Map(), [
+                mockExpandedShellView(outerFrag, { target: outerNestedView }, 1, 0)
+            ]),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(outerCompiled.inputs[0].value[0]._bftEdgeNumber, 1);
+        assert.equal(innerCompiled.inputs[0].value[0]._bftEdgeNumber, 2);
     });
 
     it('detects compact nodes by measured width', () => {
