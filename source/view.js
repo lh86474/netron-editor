@@ -29,8 +29,8 @@ import { MergeWorkspaceController } from './merge-workspace.js';
 import {
     assignBftNumbers,
     assignEdgeBftNumbers,
-    formatBftNodeLocation,
-    getBftOrderRange,
+    collectBftSearchScopes,
+    getBftOrderRangeForGraph,
     getCompiledGraphAttrName,
     getCompiledGraphFromNode,
     locateBftNodeInGraph,
@@ -10850,18 +10850,64 @@ view.FindNodeByOrderSidebar = class extends view.Control {
     constructor(context, state, graph) {
         super(context);
         this._target = graph;
-        this._state = state || { query: '' };
+        this._state = state || { query: '', scopeId: 'root' };
+        if (!this._state.scopeId) {
+            this._state.scopeId = 'root';
+        }
+        this._scopes = [];
     }
 
     get identifier() {
         return 'find-node-by-order';
     }
 
+    _refreshScopes() {
+        this._scopes = collectBftSearchScopes(this._target);
+        if (this._scopes.length === 0) {
+            return;
+        }
+        if (!this._scopes.some((scope) => scope.id === this._state.scopeId)) {
+            this._state.scopeId = this._scopes[0].id;
+        }
+    }
+
+    _selectedScope() {
+        if (this._scopes.length === 0) {
+            return null;
+        }
+        return this._scopes.find((scope) => scope.id === this._state.scopeId) || this._scopes[0];
+    }
+
+    _populateScopeSelect() {
+        this._refreshScopes();
+        while (this._scopeSelect.firstChild) {
+            this._scopeSelect.removeChild(this._scopeSelect.firstChild);
+        }
+        const selectedScope = this._selectedScope();
+        for (const scope of this._scopes) {
+            const option = this.createElement('option');
+            option.value = scope.id;
+            option.textContent = scope.label;
+            if (selectedScope && scope.id === selectedScope.id) {
+                option.setAttribute('selected', 'true');
+            }
+            this._scopeSelect.appendChild(option);
+        }
+        if (selectedScope) {
+            this._scopeSelect.setAttribute('title', selectedScope.label);
+        }
+    }
+
     _updateHint() {
-        const range = getBftOrderRange(this._target);
+        const scope = this._selectedScope();
+        if (!scope) {
+            this._hint.textContent = 'No order numbers in this graph.';
+            return;
+        }
+        const range = getBftOrderRangeForGraph(scope.graph);
         this._hint.textContent = range ?
-            `Valid orders: ${range.min}–${range.max}` :
-            'No order numbers in this graph.';
+            `Valid orders in ${scope.label}: ${range.min}\u2013${range.max}` :
+            `No order numbers in ${scope.label}.`;
     }
 
     _validate() {
@@ -10872,7 +10918,13 @@ view.FindNodeByOrderSidebar = class extends view.Control {
             this._result.replaceChildren();
             return null;
         }
-        const result = parseBftOrderQuery(trimmed, this._target);
+        const scope = this._selectedScope();
+        if (!scope) {
+            this._error.textContent = 'No searchable graph scope.';
+            this._result.replaceChildren();
+            return null;
+        }
+        const result = parseBftOrderQuery(trimmed, this._target, scope.graph);
         if (!result.ok) {
             this._error.textContent = result.error;
             this._result.replaceChildren();
@@ -10880,8 +10932,6 @@ view.FindNodeByOrderSidebar = class extends view.Control {
         }
         this._error.textContent = '';
         const name = result.node.name || `[${result.node.type?.name || 'node'}]`;
-        const location = formatBftNodeLocation(this._target, result.node);
-        const label = location ? `${result.value}: ${name} (in ${location})` : `${result.value} : ${name}`;
         this._result.replaceChildren();
 
         const item = this.createElement('li');
@@ -10902,6 +10952,11 @@ view.FindNodeByOrderSidebar = class extends view.Control {
     render() {
         this._table = new Map();
 
+        this._scopeWrap = this.createElement('div', 'sidebar-find-scope');
+        this._scopeSelect = this.createElement('select', 'sidebar-item-selector');
+        this._scopeSelect.setAttribute('id', 'find-node-by-order-scope');
+        this._scopeWrap.appendChild(this._scopeSelect);
+
         this._search = this.createElement('div', 'sidebar-find-search');
         this._query = this.createElement('input', 'sidebar-find-query');
         this._query.setAttribute('id', 'find-node-by-order');
@@ -10916,6 +10971,16 @@ view.FindNodeByOrderSidebar = class extends view.Control {
         this._result = this.createElement('ol', 'sidebar-find-content');
         this._result.setAttribute('tabindex', '-1');
 
+        this._scopeSelect.addEventListener('change', (e) => {
+            const index = e.target.selectedIndex;
+            if (index >= 0 && index < this._scopes.length) {
+                this._state.scopeId = this._scopes[index].id;
+                this._scopeSelect.setAttribute('title', this._scopes[index].label);
+                this.emit('state-changed', this._state);
+                this._updateHint();
+                this._validate();
+            }
+        });
         this._query.addEventListener('input', (e) => {
             this._state.query = e.target.value;
             this.emit('state-changed', this._state);
@@ -10942,14 +11007,16 @@ view.FindNodeByOrderSidebar = class extends view.Control {
             }
         });
 
+        this._populateScopeSelect();
         this._updateHint();
     }
 
     get element() {
-        return [this._search, this._hint, this._error, this._result];
+        return [this._scopeWrap, this._search, this._hint, this._error, this._result];
     }
 
     activate() {
+        this._populateScopeSelect();
         this._query.value = this._state.query || '';
         this._updateHint();
         this._validate();

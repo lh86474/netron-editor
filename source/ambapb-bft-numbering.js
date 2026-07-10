@@ -859,6 +859,50 @@ export const formatBftNodeLocation = (rootGraph, node) => {
         .join(' / ');
 };
 
+export const collectBftSearchScopes = (rootGraph) => {
+    const scopes = [];
+    const walk = (graph, idPath, labelParts) => {
+        scopes.push({
+            id: idPath.join('/'),
+            graph,
+            label: labelParts.join(' / ')
+        });
+        for (const node of graph.nodes || []) {
+            const compiled = getCompiledGraphFromNode(node);
+            if (!compiled) {
+                continue;
+            }
+            const hostName = node.name || node.type?.name || 'subgraph';
+            const attrName = getCompiledGraphAttrName(node) || 'compiled_prim_graph';
+            const graphName = compiled.name || attrName;
+            walk(
+                compiled,
+                idPath.concat([hostName, graphName]),
+                labelParts.concat([`${hostName} \u203A ${graphName}`])
+            );
+        }
+    };
+    if (!rootGraph) {
+        return scopes;
+    }
+    const rootName = rootGraph.name || 'Graph';
+    walk(rootGraph, ['root'], [`${rootName} (main graph)`]);
+    return scopes;
+};
+
+export const getBftOrderRangeForGraph = (graph) => {
+    if (!graph) {
+        return null;
+    }
+    let max = 0;
+    for (const node of graph.nodes || []) {
+        if (node._bftNumber != null) {
+            max = Math.max(max, node._bftNumber);
+        }
+    }
+    return max > 0 ? { min: 1, max } : null;
+};
+
 export const getBftOrderRange = (graph) => {
     if (!graph) {
         return null;
@@ -874,12 +918,19 @@ export const getBftOrderRange = (graph) => {
     return max > 0 ? { min: 1, max } : null;
 };
 
+export const findNodeByBftOrderInGraph = (graph, order) => {
+    if (!graph || !Number.isInteger(order) || order <= 0) {
+        return null;
+    }
+    return (graph.nodes || []).find((entry) => entry._bftNumber === order) || null;
+};
+
 export const findNodeByBftOrder = (graph, order) => {
     if (!graph || !Number.isInteger(order) || order <= 0) {
         return null;
     }
     for (const nested of collectNestedGraphs(graph)) {
-        const node = (nested.nodes || []).find((entry) => entry._bftNumber === order);
+        const node = findNodeByBftOrderInGraph(nested, order);
         if (node) {
             return node;
         }
@@ -887,7 +938,7 @@ export const findNodeByBftOrder = (graph, order) => {
     return null;
 };
 
-export const parseBftOrderQuery = (text, graph) => {
+export const parseBftOrderQuery = (text, rootGraph, scopeGraph = rootGraph) => {
     const trimmed = (text || '').trim();
     if (!trimmed) {
         return { ok: false, error: 'Enter an order number.' };
@@ -899,14 +950,15 @@ export const parseBftOrderQuery = (text, graph) => {
     if (!Number.isSafeInteger(value) || value <= 0) {
         return { ok: false, error: 'Enter a positive whole number.' };
     }
-    const range = getBftOrderRange(graph);
+    const searchGraph = scopeGraph || rootGraph;
+    const range = getBftOrderRangeForGraph(searchGraph);
     if (!range) {
         return { ok: false, error: 'No order numbers in this graph.' };
     }
     if (value < range.min || value > range.max) {
         return { ok: false, error: `Order must be between ${range.min} and ${range.max}.` };
     }
-    const node = findNodeByBftOrder(graph, value);
+    const node = findNodeByBftOrderInGraph(searchGraph, value);
     if (!node) {
         return { ok: false, error: `No node with order ${value}.` };
     }

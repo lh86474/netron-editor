@@ -17,8 +17,11 @@ import {
     assignBftNumbers,
     clearBftMetadata,
     findNodeByBftOrder,
+    findNodeByBftOrderInGraph,
     formatBftNodeLocation,
     getBftOrderRange,
+    getBftOrderRangeForGraph,
+    collectBftSearchScopes,
     getCompiledGraphFromNode,
     locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
@@ -1667,5 +1670,106 @@ describe('ambapb bft numbering', () => {
         assert.equal(outputNode.name, 'c');
         assert.equal(formatTensorWithSourceNodeId('graph_in', graph, 'input'), 'graph_in | sourceNodeId: 1');
         assert.equal(formatTensorWithSourceNodeId('graph_out', graph, 'output'), 'graph_out | sourceNodeId: 3');
+    });
+});
+
+describe('scoped find node by order', () => {
+    const buildNumberedNvpFixture = () => {
+        const innerA = {
+            name: 'inner_a',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'y', value: [tensor('inner_a_out')] }]
+        };
+        const innerB = {
+            name: 'inner_b',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('inner_a_out')] }],
+            outputs: [{ name: 'y', value: [tensor('nvp_out')] }]
+        };
+        const nvpCompiled = {
+            name: 'nvp_compiled',
+            inputs: [{ name: 'input', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'output', value: [tensor('nvp_out')] }],
+            nodes: [innerA, innerB]
+        };
+        const nvpNode = {
+            name: 'nvp0',
+            type: { name: 'CVFlowNVP' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: nvpCompiled }],
+            inputs: [{ name: 'x', value: [tensor('conv_out')] }],
+            outputs: [{ name: 'y', value: [tensor('nvp_shell_out')] }]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'conv',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('conv_out')] }]
+                },
+                nvpNode,
+                {
+                    name: 'relu',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('nvp_shell_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('relu_out')] }]
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [nvpNode, { x: 1, y: 0 }],
+                [graph.nodes[2], { x: 2, y: 0 }],
+                [innerA, { x: 0, y: 0 }],
+                [innerB, { x: 1, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        return { graph, nvpCompiled, innerA, innerB, nvpNode };
+    };
+
+    it('collectBftSearchScopes lists main graph and nested compiled graphs', () => {
+        const { graph, nvpCompiled } = buildNumberedNvpFixture();
+        const scopes = collectBftSearchScopes(graph);
+        assert.equal(scopes.length, 2);
+        assert.equal(scopes[0].id, 'root');
+        assert.match(scopes[0].label, /runtime \(main graph\)/);
+        assert.equal(scopes[0].graph, graph);
+        assert.equal(scopes[1].graph, nvpCompiled);
+        assert.match(scopes[1].label, /nvp0/);
+        assert.match(scopes[1].label, /nvp_compiled/);
+    });
+
+    it('findNodeByBftOrderInGraph respects scope when order numbers collide', () => {
+        const { graph, nvpCompiled } = buildNumberedNvpFixture();
+        assert.equal(findNodeByBftOrderInGraph(graph, 1).name, 'conv');
+        assert.equal(findNodeByBftOrderInGraph(nvpCompiled, 1).name, 'inner_a');
+        assert.equal(findNodeByBftOrderInGraph(nvpCompiled, 2).name, 'inner_b');
+        assert.equal(findNodeByBftOrderInGraph(graph, 2).name, 'nvp0');
+        assert.equal(findNodeByBftOrder(graph, 1).name, 'conv');
+    });
+
+    it('getBftOrderRangeForGraph returns scoped ranges', () => {
+        const { graph, nvpCompiled } = buildNumberedNvpFixture();
+        assert.deepEqual(getBftOrderRangeForGraph(graph), { min: 1, max: 3 });
+        assert.deepEqual(getBftOrderRangeForGraph(nvpCompiled), { min: 1, max: 2 });
+    });
+
+    it('parseBftOrderQuery validates and resolves within selected scope', () => {
+        const { graph, nvpCompiled } = buildNumberedNvpFixture();
+        assert.equal(parseBftOrderQuery('1', graph, graph).ok, true);
+        assert.equal(parseBftOrderQuery('1', graph, graph).node.name, 'conv');
+        assert.equal(parseBftOrderQuery('1', graph, nvpCompiled).ok, true);
+        assert.equal(parseBftOrderQuery('1', graph, nvpCompiled).node.name, 'inner_a');
+        assert.equal(parseBftOrderQuery('3', graph, graph).ok, true);
+        assert.equal(parseBftOrderQuery('3', graph, nvpCompiled).ok, false);
+        assert.match(parseBftOrderQuery('3', graph, nvpCompiled).error, /between 1 and 2/);
     });
 });
