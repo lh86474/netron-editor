@@ -66,13 +66,8 @@ const getGraphAttribute = (node, attrName) => {
     return null;
 };
 
-const getMainScopeSubgraphFromNode = (node) => {
-    const subgraph = getSubgraphGraphFromNode(node);
-    if (!subgraph || node.type?.name === 'FragSubgraph') {
-        return null;
-    }
-    return subgraph;
-};
+const getMainScopeSubgraphFromNode = (node) => getSubgraphGraphFromNode(node);
+ 
 
 export const getSubgraphGraphFromNode = (node) => getGraphAttribute(node, SUBGRAPH_GRAPH_ATTR);
 
@@ -678,7 +673,16 @@ const assignNestedCompiledHosts = (graph, viewGraph, nodeCounter, layoutDirectio
             layoutDirection
         });
         assignNestedCompiledHosts(subGraph, viewGraph, endCounter, layoutDirection);
-        if (!restart) {
+        const subgraphDef = getSubgraphGraphFromNode(entry.node);
+        if (subgraphDef && subgraphDef !== subGraph && !restart) {
+            const defEndCounter = assignNumbersToGraphNodes(subgraphDef, viewGraph, endCounter, {
+                assignUnreachableAtEnd: true,
+                entryOnlySources: true,
+                layoutDirection
+            });
+            assignNestedCompiledHosts(subgraphDef, viewGraph, defEndCounter, layoutDirection);
+            nextCounter = defEndCounter;
+        } else if (!restart) {
             nextCounter = endCounter;
         }
     }
@@ -813,8 +817,17 @@ const assignNestedCompiledHostEdges = (modelGraph, viewGraph, layoutDirection, c
     }));
     let nextCounter = counter;
     for (const entry of sortEntriesByVisualPosition(entries, layoutDirection)) {
+        const subGraph = getCompiledGraphFromNode(entry.node);
         const nestedViewGraph = findNestedViewGraphForHost(viewGraph, entry.node);
         if (!nestedViewGraph) {
+            if (subGraph) {
+                if (isRestartCompiledHost(entry.node)) {
+                    assignModelGraphEdgeNumbersInScope(subGraph, 1);
+                } else {
+                    nextCounter = assignModelGraphEdgeNumbersInScope(subGraph, nextCounter);
+                }
+                nextCounter = assignNestedCompiledHostEdges(subGraph, viewGraph, layoutDirection, nextCounter);
+            }
             continue;
         }
         if (isRestartCompiledHost(entry.node)) {
@@ -822,7 +835,6 @@ const assignNestedCompiledHostEdges = (modelGraph, viewGraph, layoutDirection, c
         } else {
             nextCounter = assignEdgeNumbersInScope(nestedViewGraph, layoutDirection, nextCounter);
         }
-        const subGraph = getCompiledGraphFromNode(entry.node);
         if (subGraph) {
             nextCounter = assignNestedCompiledHostEdges(subGraph, viewGraph, layoutDirection, nextCounter);
         }
@@ -838,6 +850,9 @@ export const assignEdgeBftNumbers = (ctx) => {
     } = ctx || {};
 
     if (!isViewGraphLike(viewGraph)) {
+        if (displayGraph) {
+            assignModelEdgeNumbersForDisplayGraph(displayGraph);
+        }
         return;
     }
 
@@ -1169,28 +1184,98 @@ const walkMainScopeViewGraphs = (paneViewGraph, modelGraph, visitor) => {
     walk(modelGraph);
 };
 
-export const getBftEdgeOrderRangeForMainScope = (paneViewGraph, rootModelGraph) => {
+export const getBftEdgeOrderRangeForModelGraph = (modelGraph) => {
+    if (!modelGraph) {
+        return null;
+    }
     let max = 0;
-    walkMainScopeViewGraphs(paneViewGraph, rootModelGraph, (viewGraph) => {
-        const range = getBftEdgeOrderRangeForViewGraph(viewGraph);
-        if (range) {
-            max = Math.max(max, range.max);
+    forEachTensorInGraph(modelGraph, (tensor) => {
+        if (tensor._bftEdgeNumber != null) {
+            max = Math.max(max, tensor._bftEdgeNumber);
         }
     });
     return max > 0 ? { min: 1, max } : null;
 };
 
-export const findEdgeByBftOrderInMainScope = (paneViewGraph, rootModelGraph, order) => {
-    if (!paneViewGraph || !rootModelGraph || !Number.isInteger(order) || order <= 0) {
+export const findTensorByBftOrderInModelGraph = (modelGraph, order) => {
+    if (!modelGraph || !Number.isInteger(order) || order <= 0) {
         return null;
     }
     let found = null;
-    walkMainScopeViewGraphs(paneViewGraph, rootModelGraph, (viewGraph) => {
-        if (!found) {
-            found = findEdgeByBftOrderInViewGraph(viewGraph, order);
+    forEachTensorInGraph(modelGraph, (tensor) => {
+        if (tensor._bftEdgeNumber === order) {
+            found = tensor;
         }
     });
     return found;
+};
+
+export const getBftEdgeOrderRangeForMainScopeFromModel = (rootModelGraph) => {
+    if (!rootModelGraph) {
+        return null;
+    }
+    let max = 0;
+    for (const graph of collectMainScopeGraphs(rootModelGraph)) {
+        const range = getBftEdgeOrderRangeForModelGraph(graph);
+        if (range) {
+            max = Math.max(max, range.max);
+        }
+    }
+    return max > 0 ? { min: 1, max } : null;
+};
+
+export const findTensorByBftOrderInMainScopeFromModel = (rootModelGraph, order) => {
+    if (!rootModelGraph || !Number.isInteger(order) || order <= 0) {
+        return null;
+    }
+    for (const graph of collectMainScopeGraphs(rootModelGraph)) {
+        const tensor = findTensorByBftOrderInModelGraph(graph, order);
+        if (tensor) {
+            return tensor;
+        }
+    }
+    return null;
+};
+
+export const isBftModelTensorConnection = (hit) => Boolean(hit && hit._modelTensor);
+
+const wrapModelTensorConnection = (tensor) => (
+    tensor ? { _modelTensor: tensor } : null
+);
+
+export const getBftEdgeOrderRangeForMainScope = (paneViewGraph, rootModelGraph) => {
+    let max = 0;
+    if (paneViewGraph) {
+        walkMainScopeViewGraphs(paneViewGraph, rootModelGraph, (viewGraph) => {
+            const range = getBftEdgeOrderRangeForViewGraph(viewGraph);
+            if (range) {
+                max = Math.max(max, range.max);
+            }
+        });
+    }
+    const modelRange = getBftEdgeOrderRangeForMainScopeFromModel(rootModelGraph);
+    if (modelRange) {
+        max = Math.max(max, modelRange.max);
+    }
+    return max > 0 ? { min: 1, max } : null;
+};
+
+export const findEdgeByBftOrderInMainScope = (paneViewGraph, rootModelGraph, order) => {
+    if (!rootModelGraph || !Number.isInteger(order) || order <= 0) {
+        return null;
+    }
+    if (paneViewGraph) {
+        let found = null;
+        walkMainScopeViewGraphs(paneViewGraph, rootModelGraph, (viewGraph) => {
+            if (!found) {
+                found = findEdgeByBftOrderInViewGraph(viewGraph, order);
+            }
+        });
+        if (found) {
+            return found;
+        }
+    }
+    return wrapModelTensorConnection(findTensorByBftOrderInMainScopeFromModel(rootModelGraph, order));
 };
 
 export const getBftEdgeOrderRangeForScope = (rootModelGraph, paneViewGraph, scope) => {
@@ -1202,7 +1287,10 @@ export const getBftEdgeOrderRangeForScope = (rootModelGraph, paneViewGraph, scop
     if (resolved.kind === 'main' || resolved.id === 'root') {
         return getBftEdgeOrderRangeForMainScope(viewGraph, rootModelGraph);
     }
-    return getBftEdgeOrderRangeForViewGraph(resolved.viewGraph);
+    if (resolved.viewGraph) {
+        return getBftEdgeOrderRangeForViewGraph(resolved.viewGraph);
+    }
+    return getBftEdgeOrderRangeForModelGraph(resolved.graph);
 };
 
 export const findEdgeByBftOrderInScope = (rootModelGraph, scope, order) => {
@@ -1214,7 +1302,13 @@ export const findEdgeByBftOrderInScope = (rootModelGraph, scope, order) => {
     if (resolved.kind === 'main' || resolved.id === 'root') {
         return findEdgeByBftOrderInMainScope(viewGraph, rootModelGraph, order);
     }
-    return findEdgeByBftOrderInViewGraph(viewGraph, order);
+    if (viewGraph) {
+        const edge = findEdgeByBftOrderInViewGraph(viewGraph, order);
+        if (edge) {
+            return edge;
+        }
+    }
+    return wrapModelTensorConnection(findTensorByBftOrderInModelGraph(resolved.graph, order));
 };
 
 export const formatBftEdgeLabel = (edge) => {
@@ -1232,11 +1326,9 @@ export const parseBftEdgeOrderQuery = (text, rootModelGraph, scope) => {
     const trimmed = (text || '').trim();
     const resolvedScope = normalizeBftSearchScope(rootModelGraph, scope);
     const scopeLabel = resolvedScope?.label || 'this graph';
+    const viewGraph = resolvedScope.viewGraph;
     if (!trimmed) {
         return { ok: false, error: 'Enter an order number.' };
-    }
-    if (resolvedScope.kind !== 'main' && !resolvedScope.viewGraph) {
-        return { ok: false, error: `Expand the block to search connections in ${scopeLabel}.` };
     }
     if (!/^\d+$/.test(trimmed)) {
         return { ok: false, error: 'Enter a positive whole number.' };
@@ -1252,11 +1344,20 @@ export const parseBftEdgeOrderQuery = (text, rootModelGraph, scope) => {
     if (value < range.min || value > range.max) {
         return { ok: false, error: `Order must be between ${range.min} and ${range.max}.` };
     }
-    const edge = findEdgeByBftOrderInScope(rootModelGraph, resolvedScope, value);
-    if (!edge) {
+    const hit = findEdgeByBftOrderInScope(rootModelGraph, resolvedScope, value);
+    if (!hit) {
         return { ok: false, error: `No connection with order ${value}.` };
     }
-    return { ok: true, value, edge };
+    if (isBftModelTensorConnection(hit)) {
+        return {
+            ok: true,
+            value,
+            edge: null,
+            tensor: hit._modelTensor,
+            modelGraph: resolvedScope.graph || rootModelGraph
+        };
+    }
+    return { ok: true, value, edge: hit, tensor: null, modelGraph: null };
 };
 
 export const resolveEdgeBftNumber = (value) => {
@@ -1358,6 +1459,101 @@ export const resolveTensorSourceNode = (displayGraph, tensorName, role) => {
     return pickLowestBftNode(
         findValueConsumers(displayGraph, value).filter((entry) => entry.node)
     );
+};
+
+const assignModelGraphEdgeNumbersInScope = (modelGraph, counter) => {
+    if (!modelGraph) {
+        return counter;
+    }
+    let nextCounter = counter;
+    const inputConnections = [];
+    for (const input of modelGraph.inputs || []) {
+        for (const tensor of argumentValues(input)) {
+            if (!tensor || tensor._bftEdgeNumber != null) {
+                continue;
+            }
+            const consumer = resolveTensorSourceNode(modelGraph, tensor.name, 'input');
+            if (consumer) {
+                inputConnections.push({
+                    tensor,
+                    sortKey: consumer._bftNumber != null ? consumer._bftNumber : Infinity
+                });
+            }
+        }
+    }
+    inputConnections.sort((a, b) => a.sortKey - b.sortKey);
+    for (const entry of inputConnections) {
+        entry.tensor._bftEdgeNumber = nextCounter++;
+    }
+
+    const internalConnections = [];
+    for (const node of modelGraph.nodes || []) {
+        for (const output of node.outputs || []) {
+            for (const tensor of argumentValues(output)) {
+                if (!tensor || tensor._bftEdgeNumber != null) {
+                    continue;
+                }
+                const consumer = resolveTensorSourceNode(modelGraph, tensor.name, 'input');
+                if (consumer) {
+                    internalConnections.push({
+                        tensor,
+                        sortKey: node._bftNumber != null ? node._bftNumber : Infinity
+                    });
+                }
+            }
+        }
+    }
+    internalConnections.sort((a, b) => a.sortKey - b.sortKey);
+    for (const entry of internalConnections) {
+        entry.tensor._bftEdgeNumber = nextCounter++;
+    }
+
+    for (const output of modelGraph.outputs || []) {
+        for (const tensor of argumentValues(output)) {
+            if (!tensor || tensor._bftEdgeNumber != null) {
+                continue;
+            }
+            tensor._bftEdgeNumber = nextCounter++;
+        }
+    }
+    return nextCounter;
+};
+
+const assignModelEdgeNumbersForDisplayGraph = (displayGraph) => {
+    if (!displayGraph) {
+        return;
+    }
+    let counter = assignModelGraphEdgeNumbersInScope(displayGraph, 1);
+    const walk = (graph) => {
+        for (const node of graph.nodes || []) {
+            const compiled = getCompiledGraphFromNode(node);
+            const subgraphDef = getSubgraphGraphFromNode(node);
+            if (compiled) {
+                if (isRestartCompiledHost(node)) {
+                    assignModelGraphEdgeNumbersInScope(compiled, 1);
+                } else {
+                    counter = assignModelGraphEdgeNumbersInScope(compiled, counter);
+                }
+                walk(compiled);
+            }
+            if (subgraphDef && subgraphDef !== compiled) {
+                counter = assignModelGraphEdgeNumbersInScope(subgraphDef, counter);
+                walk(subgraphDef);
+            }
+        }
+    };
+    walk(displayGraph);
+};
+
+export const formatBftModelTensorLabel = (tensor, modelGraph) => {
+    if (!tensor || !tensor.name) {
+        return 'connection';
+    }
+    const fromNode = resolveTensorSourceNode(modelGraph, tensor.name, 'output');
+    const toNode = resolveTensorSourceNode(modelGraph, tensor.name, 'input');
+    const fromName = fromNode?.name || fromNode?.type?.name || '?';
+    const toName = toNode?.name || toNode?.type?.name || '?';
+    return `${tensor.name} (${fromName} \u2192 ${toName})`;
 };
 
 export const formatTensorWithSourceNodeId = (tensorName, displayGraph, role) => {

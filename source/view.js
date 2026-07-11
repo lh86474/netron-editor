@@ -31,20 +31,22 @@ import {
     assignEdgeBftNumbers,
     collectBftConnectionSearchScopes,
     collectBftSearchScopes,
-    findEdgeByBftOrderInViewGraph,
     findEdgeByBftOrderInScope,
     formatBftEdgeLabel,
+    formatBftModelTensorLabel,
     getBftEdgeOrderRangeForScope,
     getBftEdgeOrderRangeForViewGraph,
     getBftOrderRangeForGraph,
     getBftOrderRangeForScope,
     getCompiledGraphAttrName,
     getCompiledGraphFromNode,
+    isBftModelTensorConnection,
     locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
     parseBftEdgeOrderQuery,
     parseBftOrderQuery,
-    resolveSidebarBftValue
+    resolveSidebarBftValue,
+    resolveTensorSourceNode
 } from './ambapb-bft-numbering.js';
 import {
     applyBatchInlineExpansions,
@@ -1186,6 +1188,23 @@ view.View = class {
         return (edge.from && edge.from.value) || (edge.to && edge.to.value) || null;
     }
 
+    async _ensureExpandedForBftConnectionHit(searchRoot, hit, scope) {
+        if (!searchRoot || !hit || !isBftModelTensorConnection(hit)) {
+            return;
+        }
+        const modelGraph = scope && scope.kind === 'compiled_prim_graph' ? scope.graph : searchRoot;
+        const tensor = hit._modelTensor;
+        const modelNode = resolveTensorSourceNode(modelGraph, tensor.name, 'output') ||
+            resolveTensorSourceNode(modelGraph, tensor.name, 'input');
+        if (!modelNode) {
+            return;
+        }
+        const location = locateBftNodeInGraph(searchRoot, modelNode);
+        if (location && location.ancestors.length > 0) {
+            await this._expandBlocksForBftLocation(location, this._focusedPaneIdOrDefault());
+        }
+    }
+
     async _resolveBftConnectionEdge(result) {
         const grapher = this._focusedPaneGrapher();
         const searchRoot = this._focusedPaneSearchTarget();
@@ -1196,11 +1215,8 @@ view.View = class {
         const scope = scopes.find((entry) => entry.id === result.scopeId);
         if (!scope) {
             return null;
-        } 
-        if (scope.kind !== 'main' && !scope.viewGraph) {
-            return null;
         }
-        return findEdgeByBftOrderInViewGraph(searchRoot, scope, result.order);
+        return findEdgeByBftOrderInScope(searchRoot, scope, result.order);
     }
 
     async _navigateAndSelectBftConnection(result) {
@@ -1208,8 +1224,16 @@ view.View = class {
         if (!searchRoot || !result) {
             return;
         }
-        let edge = await this._resolveBftConnectionEdge(result);
-        const modelNode = edge ? this._resolveEdgeNavigationNode(edge) : null;
+        const scopes = collectBftConnectionSearchScopes(searchRoot, this._focusedPaneGrapher());
+        const scope = scopes.find((entry) => entry.id === result.scopeId);
+        let hit = await this._resolveBftConnectionEdge(result);
+        if (hit && isBftModelTensorConnection(hit)) {
+            await this._ensureExpandedForBftConnectionHit(searchRoot, hit, scope);
+            hit = await this._resolveBftConnectionEdge(result);
+        }
+        const modelNode = hit && !isBftModelTensorConnection(hit) ?
+            this._resolveEdgeNavigationNode(hit) :
+            null;
         if (modelNode) {
             const location = locateBftNodeInGraph(searchRoot, modelNode);
             if (location && location.ancestors.length > 0) {
@@ -1223,8 +1247,8 @@ view.View = class {
         if (!grapher) {
             return;
         }
-        edge = await this._resolveBftConnectionEdge(result);
-        if (!edge) {
+        const edge = hit && !isBftModelTensorConnection(hit) ? hit : await this._resolveBftConnectionEdge(result);
+        if (!edge || isBftModelTensorConnection(edge)) {
             return;
         }
         grapher.clearSelection();
@@ -1239,8 +1263,16 @@ view.View = class {
         if (!searchRoot || !result) {
             return false;
         }
-        let edge = await this._resolveBftConnectionEdge(result);
-        const modelNode = edge ? this._resolveEdgeNavigationNode(edge) : null;
+        const scopes = collectBftConnectionSearchScopes(searchRoot, this._focusedPaneGrapher());
+        const scope = scopes.find((entry) => entry.id === result.scopeId);
+        let hit = await this._resolveBftConnectionEdge(result);
+        if (hit && isBftModelTensorConnection(hit)) {
+            await this._ensureExpandedForBftConnectionHit(searchRoot, hit, scope);
+            hit = await this._resolveBftConnectionEdge(result);
+        }
+        const modelNode = hit && !isBftModelTensorConnection(hit) ?
+            this._resolveEdgeNavigationNode(hit) :
+            null;
         if (modelNode) {
             const location = locateBftNodeInGraph(searchRoot, modelNode);
             if (location && location.ancestors.length > 0) {
@@ -1254,8 +1286,8 @@ view.View = class {
         if (!grapher) {
             return false;
         }
-        edge = await this._resolveBftConnectionEdge(result);
-        if (!edge) {
+        const edge = hit && !isBftModelTensorConnection(hit) ? hit : await this._resolveBftConnectionEdge(result);
+        if (!edge || isBftModelTensorConnection(edge)) {
             return false;
         }
         grapher.clearSelection();
@@ -11222,14 +11254,7 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
         while (this._scopeSelect.firstChild) {
             this._scopeSelect.removeChild(this._scopeSelect.firstChild);
         }
-        let selectedScope = this._selectedScope();
-        if (selectedScope && selectedScope.kind !== 'main' && !selectedScope.viewGraph) {
-            const fallback = this._scopes.find((scope) => scope.viewGraph)
-            if (fallback) {
-                this._state.scopeId = fallback.id;
-                selectedScope = fallback;
-            }
-        }
+        const selectedScope = this._selectedScope();
         for (const scope of this._scopes) {
             const option = this.createElement('option');
             option.value = scope.id;
@@ -11248,10 +11273,6 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
         const scope = this._selectedScope();
         if (!scope) {
             this._hint.textContent = 'No connection orders in this graph.';
-            return;
-        }
-        if (scope.kind !== 'main' && !scope.viewGraph) {
-            this._hint.textContent = `Expand the block to search connections in ${scope.label}.`;
             return;
         }
         const range = getBftEdgeOrderRangeForScope(this._target, scope.viewGraph, scope);
@@ -11281,7 +11302,9 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
             return null;
         }
         this._error.textContent = '';
-        const label = formatBftEdgeLabel(result.edge);
+        const label = result.edge ?
+            formatBftEdgeLabel(result.edge) :
+            formatBftModelTensorLabel(result.tensor, result.modelGraph || scope.graph || this._target);
         this._result.replaceChildren();
 
         const item = this.createElement('li');

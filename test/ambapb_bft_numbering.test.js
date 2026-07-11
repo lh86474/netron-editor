@@ -18,12 +18,16 @@ import {
     clearBftMetadata,
     collectBftConnectionSearchScopes,
     collectBftSearchScopes,
+    findEdgeByBftOrderInScope,
     findEdgeByBftOrderInViewGraph,
     findNodeByBftOrder,
     findNodeByBftOrderInGraph,
     findNodeByBftOrderInMainScope,
+    findTensorByBftOrderInModelGraph,
     formatBftEdgeLabel,
+    formatBftModelTensorLabel,
     formatBftNodeLocation,
+    getBftEdgeOrderRangeForModelGraph,
     getBftEdgeOrderRangeForViewGraph,
     getBftOrderRange,
     getBftOrderRangeForGraph,
@@ -2031,7 +2035,7 @@ describe('scoped find connection by order', () => {
     });
 
     it('parseBftEdgeOrderQuery validates and resolves within selected view scope', () => {
-        const { graph, paneViewGraph, nestedViewGraph } = buildNumberedNvpConnectionFixture();
+        const { graph, paneViewGraph, nvpCompiled } = buildNumberedNvpConnectionFixture();
         const scopes = collectBftConnectionSearchScopes(graph, paneViewGraph);
         const mainResult = parseBftEdgeOrderQuery('1', graph, scopes[0]);
         assert.equal(mainResult.ok, true);
@@ -2047,20 +2051,112 @@ describe('scoped find connection by order', () => {
         assert.equal(invalid.ok, false);
         assert.match(invalid.error, /between 1 and 2/);
 
-        const collapsed = parseBftEdgeOrderQuery('1', graph, {
+        const collapsedScope = {
+            ...scopes[1],
+            viewGraph: null
+        };
+        const collapsedResult = parseBftEdgeOrderQuery('1', graph, collapsedScope);
+        assert.equal(collapsedResult.ok, true);
+        assert.equal(collapsedResult.tensor._bftEdgeNumber, 1);
+        assert.match(formatBftModelTensorLabel(collapsedResult.tensor, nvpCompiled), /nvp_in/);
+    });
+
+    it('findEdgeByBftOrderInScope resolves compiled_prim_graph without expanded view graph', () => {
+        const innerA = {
+            name: 'inner_a',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'y', value: [tensor('inner_a_out')] }]
+        };
+        const nvpCompiled = {
+            name: 'nvp_compiled',
+            inputs: [{ name: 'input', value: [tensor('nvp_in')] }],
+            outputs: [{ name: 'output', value: [tensor('nvp_out')] }],
+            nodes: [innerA]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [{
+                name: 'nvp0',
+                type: { name: 'CVFlowNVP' },
+                attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: nvpCompiled }],
+                inputs: [],
+                outputs: []
+            }]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: null,
+            layoutDirection: 'horizontal'
+        });
+        const scope = {
             id: 'root/nvp0',
             kind: 'compiled_prim_graph',
-            label: 'collapsed',
+            graph: nvpCompiled,
+            label: 'runtime / nvp0 (compiled_prim_graph)',
             viewGraph: null
-        });
-        assert.equal(collapsed.ok, false);
-        assert.match(collapsed.error, /Expand the block/);
+        };
+        assert.deepEqual(getBftEdgeOrderRangeForModelGraph(nvpCompiled), { min: 1, max: 2 });
+        const hit = findEdgeByBftOrderInScope(graph, scope, 1);
+        assert.ok(hit && hit._modelTensor);
+        assert.equal(hit._modelTensor.name, 'nvp_in');
     });
-    it('findEdgeByBftOrderInMainScope resolves globally numbered nested edges', () => {
-        // build two expanded frags with numbered edges in compiled_prim_graph
-        // assignBftNumbers with mockRuntimeViewGraph + expanded shell views
-        const scopes = collectBftConnectionSearchScopes(graph, paneViewGraph);
-        assert.equal(scopes.length, 1); // no separate frag scopes
-        assert.equal(findEdgeByBftOrderInScope(graph, scopes[0], 3)._bftEdgeNumber, 3);
+
+    it('findNodeByBftOrderInMainScope includes nodes inside frag subgraph graph attribute', () => {
+        const inner = {
+            name: 'sub_inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'y', value: [tensor('sub_out')] }]
+        };
+        const subgraphBody = {
+            name: 'subgraph_body',
+            inputs: [{ name: 'input', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'output', value: [tensor('sub_out')] }],
+            nodes: [inner]
+        };
+        const compiled = {
+            name: 'compiled_body',
+            _ambapbCompiledGraph: true,
+            inputs: [],
+            outputs: [],
+            nodes: []
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [
+                        { name: 'graph', type: 'graph', value: subgraphBody },
+                        { name: 'compiled_prim_graph', type: 'graph', value: compiled }
+                    ],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [graph.nodes[1], { x: 1, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(findNodeByBftOrderInMainScope(graph, 2).name, 'sub_inner');
     });
 });
