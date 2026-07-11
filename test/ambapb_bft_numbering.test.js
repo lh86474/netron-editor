@@ -21,11 +21,14 @@ import {
     findEdgeByBftOrderInViewGraph,
     findNodeByBftOrder,
     findNodeByBftOrderInGraph,
+    findNodeByBftOrderInMainScope,
     formatBftEdgeLabel,
     formatBftNodeLocation,
     getBftEdgeOrderRangeForViewGraph,
     getBftOrderRange,
     getBftOrderRangeForGraph,
+    getBftOrderRangeForMainScope,
+    getBftOrderRangeForScope,
     getCompiledGraphFromNode,
     locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
@@ -1740,16 +1743,137 @@ describe('scoped find node by order', () => {
         return { graph, nvpCompiled, innerA, innerB, nvpNode };
     };
 
-    it('collectBftSearchScopes lists main graph and nested compiled graphs', () => {
+    it('collectBftSearchScopes lists main graph and restart compiled_prim_graph scopes only', () => {
         const { graph, nvpCompiled } = buildNumberedNvpFixture();
         const scopes = collectBftSearchScopes(graph);
         assert.equal(scopes.length, 2);
         assert.equal(scopes[0].id, 'root');
+        assert.equal(scopes[0].kind, 'main');
         assert.match(scopes[0].label, /runtime \(main graph\)/);
         assert.equal(scopes[0].graph, graph);
+        assert.equal(scopes[1].kind, 'compiled_prim_graph');
         assert.equal(scopes[1].graph, nvpCompiled);
         assert.match(scopes[1].label, /nvp0/);
-        assert.match(scopes[1].label, /nvp_compiled/);
+        assert.match(scopes[1].label, /compiled_prim_graph/);
+    });
+
+    it('findNodeByBftOrderInMainScope resolves globally numbered nested nodes', () => {
+        const leftInner = {
+            name: 'left_inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('left_in')] }],
+            outputs: [{ name: 'y', value: [tensor('left_out')] }]
+        };
+        const rightInner = {
+            name: 'right_inner',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [tensor('right_in')] }],
+            outputs: [{ name: 'y', value: [tensor('right_out')] }]
+        };
+        const leftCompiled = {
+            name: 'left_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('left_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('left_out')] }],
+            nodes: [leftInner]
+        };
+        const rightCompiled = {
+            name: 'right_compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [{ name: 'sub_input', value: [tensor('right_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('right_out')] }],
+            nodes: [rightInner]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                {
+                    name: 'frag_left',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: leftCompiled }],
+                    inputs: [],
+                    outputs: []
+                },
+                {
+                    name: 'frag_right',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: rightCompiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [graph.nodes[1], { x: 1, y: 0 }],
+                [graph.nodes[2], { x: 1, y: 10 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        const scopes = collectBftSearchScopes(graph);
+        assert.equal(scopes.length, 1);
+        assert.deepEqual(getBftOrderRangeForMainScope(graph), { min: 1, max: 3 });
+        assert.equal(findNodeByBftOrderInMainScope(graph, 1).name, 'main');
+        assert.equal(findNodeByBftOrderInMainScope(graph, 2).name, 'left_inner');
+        assert.equal(findNodeByBftOrderInMainScope(graph, 3).name, 'right_inner');
+    });
+
+    it('does not add a separate scope for userdef graph attributes', () => {
+        const innerConv = {
+            name: 'conv0',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('data_in')] }],
+            outputs: [{ name: 'y', value: [tensor('data_out')] }]
+        };
+        const userDefCompiled = {
+            name: 'userdefsubgraph_0',
+            inputs: [{ name: 'input', value: [tensor('data_in')] }],
+            outputs: [{ name: 'output', value: [tensor('data_out')] }],
+            nodes: [innerConv]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'main',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('main_out')] }]
+                },
+                {
+                    name: 'userdef',
+                    type: { name: 'UserDefSubgraph' },
+                    attributes: [{ name: 'graph', type: 'graph', value: userDefCompiled }],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [graph.nodes[1], { x: 1, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        const scopes = collectBftSearchScopes(graph);
+        assert.equal(scopes.length, 1);
+        assert.equal(findNodeByBftOrderInMainScope(graph, 2).name, 'conv0');
     });
 
     it('findNodeByBftOrderInGraph respects scope when order numbers collide', () => {
@@ -1765,17 +1889,21 @@ describe('scoped find node by order', () => {
         const { graph, nvpCompiled } = buildNumberedNvpFixture();
         assert.deepEqual(getBftOrderRangeForGraph(graph), { min: 1, max: 3 });
         assert.deepEqual(getBftOrderRangeForGraph(nvpCompiled), { min: 1, max: 2 });
+        assert.deepEqual(getBftOrderRangeForScope(graph, { id: 'root', kind: 'main', graph }), { min: 1, max: 3 });
+        assert.deepEqual(getBftOrderRangeForScope(graph, { id: 'root/nvp0', kind: 'compiled_prim_graph', graph: nvpCompiled }), { min: 1, max: 2 });
     });
 
     it('parseBftOrderQuery validates and resolves within selected scope', () => {
         const { graph, nvpCompiled } = buildNumberedNvpFixture();
-        assert.equal(parseBftOrderQuery('1', graph, graph).ok, true);
-        assert.equal(parseBftOrderQuery('1', graph, graph).node.name, 'conv');
-        assert.equal(parseBftOrderQuery('1', graph, nvpCompiled).ok, true);
-        assert.equal(parseBftOrderQuery('1', graph, nvpCompiled).node.name, 'inner_a');
-        assert.equal(parseBftOrderQuery('3', graph, graph).ok, true);
-        assert.equal(parseBftOrderQuery('3', graph, nvpCompiled).ok, false);
-        assert.match(parseBftOrderQuery('3', graph, nvpCompiled).error, /between 1 and 2/);
+        const mainScope = { id: 'root', kind: 'main', graph };
+        const compiledScope = { id: 'root/nvp0', kind: 'compiled_prim_graph', graph: nvpCompiled };
+        assert.equal(parseBftOrderQuery('1', graph, mainScope).ok, true);
+        assert.equal(parseBftOrderQuery('1', graph, mainScope).node.name, 'conv');
+        assert.equal(parseBftOrderQuery('1', graph, compiledScope).ok, true);
+        assert.equal(parseBftOrderQuery('1', graph, compiledScope).node.name, 'inner_a');
+        assert.equal(parseBftOrderQuery('3', graph, mainScope).ok, true);
+        assert.equal(parseBftOrderQuery('3', graph, compiledScope).ok, false);
+        assert.match(parseBftOrderQuery('3', graph, compiledScope).error, /between 1 and 2/);
     });
 });
 
@@ -1903,23 +2031,36 @@ describe('scoped find connection by order', () => {
     });
 
     it('parseBftEdgeOrderQuery validates and resolves within selected view scope', () => {
-        const { paneViewGraph, nestedViewGraph } = buildNumberedNvpConnectionFixture();
-        const mainResult = parseBftEdgeOrderQuery('1', paneViewGraph, 'runtime (main graph)');
+        const { graph, paneViewGraph, nestedViewGraph } = buildNumberedNvpConnectionFixture();
+        const scopes = collectBftConnectionSearchScopes(graph, paneViewGraph);
+        const mainResult = parseBftEdgeOrderQuery('1', graph, scopes[0]);
         assert.equal(mainResult.ok, true);
         assert.equal(mainResult.edge._bftEdgeNumber, 1);
         assert.match(formatBftEdgeLabel(mainResult.edge), /conv_out/);
 
-        const nestedResult = parseBftEdgeOrderQuery('1', nestedViewGraph, 'nvp0');
+        const nestedResult = parseBftEdgeOrderQuery('1', graph, scopes[1]);
         assert.equal(nestedResult.ok, true);
         assert.equal(nestedResult.edge._bftEdgeNumber, 1);
         assert.match(formatBftEdgeLabel(nestedResult.edge), /nvp_in/);
 
-        const invalid = parseBftEdgeOrderQuery('3', nestedViewGraph, 'nvp0');
+        const invalid = parseBftEdgeOrderQuery('3', graph, scopes[1]);
         assert.equal(invalid.ok, false);
         assert.match(invalid.error, /between 1 and 2/);
 
-        const collapsed = parseBftEdgeOrderQuery('1', null, 'collapsed');
+        const collapsed = parseBftEdgeOrderQuery('1', graph, {
+            id: 'root/nvp0',
+            kind: 'compiled_prim_graph',
+            label: 'collapsed',
+            viewGraph: null
+        });
         assert.equal(collapsed.ok, false);
         assert.match(collapsed.error, /Expand the block/);
+    });
+    it('findEdgeByBftOrderInMainScope resolves globally numbered nested edges', () => {
+        // build two expanded frags with numbered edges in compiled_prim_graph
+        // assignBftNumbers with mockRuntimeViewGraph + expanded shell views
+        const scopes = collectBftConnectionSearchScopes(graph, paneViewGraph);
+        assert.equal(scopes.length, 1); // no separate frag scopes
+        assert.equal(findEdgeByBftOrderInScope(graph, scopes[0], 3)._bftEdgeNumber, 3);
     });
 });

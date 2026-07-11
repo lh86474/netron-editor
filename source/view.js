@@ -32,9 +32,12 @@ import {
     collectBftConnectionSearchScopes,
     collectBftSearchScopes,
     findEdgeByBftOrderInViewGraph,
+    findEdgeByBftOrderInScope,
     formatBftEdgeLabel,
+    getBftEdgeOrderRangeForScope,
     getBftEdgeOrderRangeForViewGraph,
     getBftOrderRangeForGraph,
+    getBftOrderRangeForScope,
     getCompiledGraphAttrName,
     getCompiledGraphFromNode,
     locateBftNodeInGraph,
@@ -1191,10 +1194,13 @@ view.View = class {
         }
         const scopes = collectBftConnectionSearchScopes(searchRoot, grapher);
         const scope = scopes.find((entry) => entry.id === result.scopeId);
-        if (!scope || !scope.viewGraph) {
+        if (!scope) {
+            return null;
+        } 
+        if (scope.kind !== 'main' && !scope.viewGraph) {
             return null;
         }
-        return findEdgeByBftOrderInViewGraph(scope.viewGraph, result.order);
+        return findEdgeByBftOrderInViewGraph(searchRoot, scope, result.order);
     }
 
     async _navigateAndSelectBftConnection(result) {
@@ -11037,7 +11043,7 @@ view.FindNodeByOrderSidebar = class extends view.Control {
             this._hint.textContent = 'No order numbers in this graph.';
             return;
         }
-        const range = getBftOrderRangeForGraph(scope.graph);
+        const range = getBftOrderRangeForScope(this._target, scope);
         this._hint.textContent = range ?
             `Valid orders in ${scope.label}: ${range.min}\u2013${range.max}` :
             `No order numbers in ${scope.label}.`;
@@ -11057,7 +11063,7 @@ view.FindNodeByOrderSidebar = class extends view.Control {
             this._result.replaceChildren();
             return null;
         }
-        const result = parseBftOrderQuery(trimmed, this._target, scope.graph);
+        const result = parseBftOrderQuery(trimmed, this._target, scope);
         if (!result.ok) {
             this._error.textContent = result.error;
             this._result.replaceChildren();
@@ -11217,7 +11223,7 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
             this._scopeSelect.removeChild(this._scopeSelect.firstChild);
         }
         let selectedScope = this._selectedScope();
-        if (selectedScope && !selectedScope.viewGraph) {
+        if (selectedScope && selectedScope.kind !== 'main' && !selectedScope.viewGraph) {
             const fallback = this._scopes.find((scope) => scope.viewGraph)
             if (fallback) {
                 this._state.scopeId = fallback.id;
@@ -11244,11 +11250,11 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
             this._hint.textContent = 'No connection orders in this graph.';
             return;
         }
-        if (!scope.viewGraph) {
+        if (scope.kind !== 'main' && !scope.viewGraph) {
             this._hint.textContent = `Expand the block to search connections in ${scope.label}.`;
             return;
         }
-        const range = getBftEdgeOrderRangeForViewGraph(scope.viewGraph);
+        const range = getBftEdgeOrderRangeForScope(this._target, scope.viewGraph, scope);
         this._hint.textContent = range ?
             `Valid connection orders in ${scope.label}: ${range.min}\u2013${range.max}` :
             `No connection orders in ${scope.label}.`;
@@ -11268,7 +11274,7 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
             this._result.replaceChildren();
             return null;
         }
-        const result = parseBftEdgeOrderQuery(trimmed, scope.viewGraph, scope.label);
+        const result = parseBftEdgeOrderQuery(trimmed, this._target, scope);
         if (!result.ok) {
             this._error.textContent = result.error;
             this._result.replaceChildren();

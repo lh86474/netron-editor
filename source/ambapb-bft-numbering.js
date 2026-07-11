@@ -51,6 +51,33 @@ export const getCompiledGraphAttrName = (node) => {
     return null;
 };
 
+const SUBGRAPH_GRAPH_ATTR = 'graph';
+const COMPILED_PRIM_GRAPH_ATTR = 'compiled_prim_graph';
+
+const getGraphAttribute = (node, attrName) => {
+    if (!node) {
+        return null;
+    }
+    for (const entry of graphArguments(node)) {
+        if (entry.name === attrName && entry.type === 'graph' && entry.value) {
+            return entry.value;
+        }
+    }
+    return null;
+};
+
+const getMainScopeSubgraphFromNode = (node) => {
+    const subgraph = getSubgraphGraphFromNode(node);
+    if (!subgraph || node.type?.name === 'FragSubgraph') {
+        return null;
+    }
+    return subgraph;
+};
+
+export const getSubgraphGraphFromNode = (node) => getGraphAttribute(node, SUBGRAPH_GRAPH_ATTR);
+
+export const getCompiledPrimGraphFromNode = (node) => getGraphAttribute(node, COMPILED_PRIM_GRAPH_ATTR);
+
 const isShellNode = (node, skipTypes = FRAG_SHELL_TYPES) => {
     return Boolean(node && node.type && skipTypes.has(node.type.name));
 };
@@ -859,34 +886,60 @@ export const formatBftNodeLocation = (rootGraph, node) => {
         .join(' / ');
 };
 
-export const collectBftSearchScopes = (rootGraph) => {
-    const scopes = [];
-    const walk = (graph, idPath, labelParts) => {
-        scopes.push({
-            id: idPath.join('/'),
-            graph,
-            label: labelParts.join(' / ')
-        });
-        for (const node of graph.nodes || []) {
-            const compiled = getCompiledGraphFromNode(node);
-            if (!compiled) {
-                continue;
-            }
-            const hostName = node.name || node.type?.name || 'subgraph';
-            const attrName = getCompiledGraphAttrName(node) || 'compiled_prim_graph';
-            const graphName = compiled.name || attrName;
-            walk(
-                compiled,
-                idPath.concat([hostName, graphName]),
-                labelParts.concat([`${hostName} \u203A ${graphName}`])
-            );
+const collectMainScopeGraphs = (rootGraph, graphs = new Set()) => {
+    if (!rootGraph || graphs.has(rootGraph)) {
+        return graphs;
+    }
+    graphs.add(rootGraph);
+    for (const node of rootGraph.nodes || []) {
+        const subgraph = getMainScopeSubgraphFromNode(node);
+        if (subgraph) {
+            collectMainScopeGraphs(subgraph, graphs);
         }
-    };
+        const compiled = getCompiledPrimGraphFromNode(node);
+        if (compiled && !isRestartCompiledHost(node)) {
+            collectMainScopeGraphs(compiled, graphs);
+        }
+    }
+    return graphs;
+};
+
+export const collectBftSearchScopes = (rootGraph) => {
     if (!rootGraph) {
-        return scopes;
+        return [];
     }
     const rootName = rootGraph.name || 'Graph';
-    walk(rootGraph, ['root'], [`${rootName} (main graph)`]);
+    const scopes = [{
+        id: 'root',
+        kind: 'main',
+        graph: rootGraph,
+        label: `${rootName} (main graph)`
+    }];
+    const walkRestartCompiled = (graph, idPath, labelParts) => {
+        for (const node of graph.nodes || []) {
+            const hostName = node.name || node.type?.name || 'subgraph';
+            const childPath = idPath.concat(hostName);
+            const childLabels = labelParts.concat(hostName);
+            const subgraph = getMainScopeSubgraphFromNode(node);
+            const compiled = getCompiledPrimGraphFromNode(node);
+            if (compiled && isRestartCompiledHost(node)) {
+                scopes.push({
+                    id: childPath.join('/'),
+                    kind: 'compiled_prim_graph',
+                    graph: compiled,
+                    hostNode: node,
+                    label: `${childLabels.join(' / ')} (compiled_prim_graph)`
+                });
+            }
+            if (subgraph) {
+                walkRestartCompiled(subgraph, childPath, childLabels);
+            }
+            if (compiled) {
+                walkRestartCompiled(compiled, childPath, childLabels);
+            }
+        }
+    };
+    walkRestartCompiled(rootGraph, ['root'], [rootName]);
     return scopes;
 };
 
@@ -925,6 +978,66 @@ export const findNodeByBftOrderInGraph = (graph, order) => {
     return (graph.nodes || []).find((entry) => entry._bftNumber === order) || null;
 };
 
+export const getBftOrderRangeForMainScope = (rootGraph) => {
+    if (!rootGraph) {
+        return null;
+    }
+    let max = 0;
+    for (const graph of collectMainScopeGraphs(rootGraph)) {
+        for (const node of graph.nodes || []) {
+            if (node._bftNumber != null) {
+                max = Math.max(max, node._bftNumber);
+            }
+        }
+    }
+    return max > 0 ? { min: 1, max } : null;
+};
+
+export const findNodeByBftOrderInMainScope = (rootGraph, order) => {
+    if (!rootGraph || !Number.isInteger(order) || order <= 0) {
+        return null;
+    }
+    for (const graph of collectMainScopeGraphs(rootGraph)) {
+        const node = findNodeByBftOrderInGraph(graph, order);
+        if (node) {
+            return node;
+        }
+    }
+    return null;
+};
+
+const normalizeBftSearchScope = (rootGraph, scope) => {
+    if (scope && typeof scope === 'object' && scope.id != null) {
+        return scope;
+    }
+    if (scope === rootGraph) {
+        return { id: 'root', kind: 'main', graph: rootGraph };
+    }
+    return { id: 'compiled', kind: 'compiled_prim_graph', graph: scope };
+};
+
+export const getBftOrderRangeForScope = (rootGraph, scope) => {
+    const resolved = normalizeBftSearchScope(rootGraph, scope);
+    if (!resolved) {
+        return null;
+    }
+    if (resolved.kind === 'main' || resolved.id === 'root') {
+        return getBftOrderRangeForMainScope(rootGraph);
+    }
+    return getBftOrderRangeForGraph(resolved.graph);
+};
+
+export const findNodeByBftOrderInScope = (rootGraph, scope, order) => {
+    const resolved = normalizeBftSearchScope(rootGraph, scope);
+    if (!resolved) {
+        return null;
+    }
+    if (resolved.kind === 'main' || resolved.id === 'root') {
+        return findNodeByBftOrderInMainScope(rootGraph, order);
+    }
+    return findNodeByBftOrderInGraph(resolved.graph, order);
+};
+
 export const findNodeByBftOrder = (graph, order) => {
     if (!graph || !Number.isInteger(order) || order <= 0) {
         return null;
@@ -938,7 +1051,7 @@ export const findNodeByBftOrder = (graph, order) => {
     return null;
 };
 
-export const parseBftOrderQuery = (text, rootGraph, scopeGraph = rootGraph) => {
+export const parseBftOrderQuery = (text, rootGraph, scope = null) => {
     const trimmed = (text || '').trim();
     if (!trimmed) {
         return { ok: false, error: 'Enter an order number.' };
@@ -950,36 +1063,42 @@ export const parseBftOrderQuery = (text, rootGraph, scopeGraph = rootGraph) => {
     if (!Number.isSafeInteger(value) || value <= 0) {
         return { ok: false, error: 'Enter a positive whole number.' };
     }
-    const searchGraph = scopeGraph || rootGraph;
-    const range = getBftOrderRangeForGraph(searchGraph);
+    const resolvedScope = normalizeBftSearchScope(rootGraph, scope ?? rootGraph);
+    const range = getBftOrderRangeForScope(rootGraph, resolvedScope);
     if (!range) {
         return { ok: false, error: 'No order numbers in this graph.' };
     }
     if (value < range.min || value > range.max) {
         return { ok: false, error: `Order must be between ${range.min} and ${range.max}.` };
     }
-    const node = findNodeByBftOrderInGraph(searchGraph, value);
+    const node = findNodeByBftOrderInScope(rootGraph, resolvedScope, value);
     if (!node) {
         return { ok: false, error: `No node with order ${value}.` };
     }
     return { ok: true, value, node };
 };
 
-const findHostNodeForCompiledGraph = (graph, targetCompiled) => {
+const findHostNodeForCompiledPrimGraph = (graph, targetCompiled) => {
     if (!graph || !targetCompiled) {
         return null;
     }
     for (const node of graph.nodes || []) {
-        const compiled = getCompiledGraphFromNode(node);
-        if (!compiled) {
-            continue;
-        }
+        const compiled = getCompiledPrimGraphFromNode(node);
         if (compiled === targetCompiled) {
             return node;
         }
-        const nestedHost = findHostNodeForCompiledGraph(compiled, targetCompiled);
-        if (nestedHost) {
-            return nestedHost;
+        const subgraph = getSubgraphGraphFromNode(node);
+        if (subgraph) {
+            const nestedHost = findHostNodeForCompiledPrimGraph(subgraph, targetCompiled);
+            if (nestedHost) {
+                return nestedHost;
+            }
+        }
+        if (compiled) {
+            const nestedHost = findHostNodeForCompiledPrimGraph(compiled, targetCompiled);
+            if (nestedHost) {
+                return nestedHost;
+            }
         }
     }
     return null;
@@ -987,13 +1106,16 @@ const findHostNodeForCompiledGraph = (graph, targetCompiled) => {
 
 export const collectBftConnectionSearchScopes = (rootModelGraph, paneViewGraph) => {
     return collectBftSearchScopes(rootModelGraph).map((scope) => {
-        let scopedViewGraph = paneViewGraph;
-        if (scope.id !== 'root') {
-            const host = findHostNodeForCompiledGraph(rootModelGraph, scope.graph);
-            scopedViewGraph = host && paneViewGraph ?
-                findNestedViewGraphForHost(paneViewGraph, host) :
-                null;
+        if (scope.kind === 'main') {
+            return {
+                ...scope,
+                viewGraph: paneViewGraph
+            };
         }
+        const host = scope.hostNode || findHostNodeForCompiledPrimGraph(rootModelGraph, scope.graph);
+        const scopedViewGraph = host && paneViewGraph ?
+            findNestedViewGraphForHost(paneViewGraph, host) :
+            null;
         return {
             ...scope,
             viewGraph: scopedViewGraph
@@ -1021,6 +1143,80 @@ export const findEdgeByBftOrderInViewGraph = (viewGraph, order) => {
     return collectViewEdges(viewGraph).find((edge) => edge._bftEdgeNumber === order) || null;
 };
 
+const walkMainScopeViewGraphs = (paneViewGraph, modelGraph, visitor) => {
+    if (!paneViewGraph || !modelGraph) {
+        return;
+    }
+    visitor(paneViewGraph);
+    const walk = (graph) => {
+        for (const node of graph.nodes || []) {
+            const subgraph = getMainScopeSubgraphFromNode(node);
+            const compiled = getCompiledPrimGraphFromNode(node);
+            if (compiled && !isRestartCompiledHost(node)) {
+                const nestedViewGraph = findNestedViewGraphForHost(paneViewGraph, node);
+                if (nestedViewGraph) {
+                    visitor(nestedViewGraph);
+                }
+            }
+            if (subgraph) {
+                walk(subgraph);
+            }
+            if (compiled) {
+                walk(compiled);
+            }
+        }
+    };
+    walk(modelGraph);
+};
+
+export const getBftEdgeOrderRangeForMainScope = (paneViewGraph, rootModelGraph) => {
+    let max = 0;
+    walkMainScopeViewGraphs(paneViewGraph, rootModelGraph, (viewGraph) => {
+        const range = getBftEdgeOrderRangeForViewGraph(viewGraph);
+        if (range) {
+            max = Math.max(max, range.max);
+        }
+    });
+    return max > 0 ? { min: 1, max } : null;
+};
+
+export const findEdgeByBftOrderInMainScope = (paneViewGraph, rootModelGraph, order) => {
+    if (!paneViewGraph || !rootModelGraph || !Number.isInteger(order) || order <= 0) {
+        return null;
+    }
+    let found = null;
+    walkMainScopeViewGraphs(paneViewGraph, rootModelGraph, (viewGraph) => {
+        if (!found) {
+            found = findEdgeByBftOrderInViewGraph(viewGraph, order);
+        }
+    });
+    return found;
+};
+
+export const getBftEdgeOrderRangeForScope = (rootModelGraph, paneViewGraph, scope) => {
+    const resolved = normalizeBftSearchScope(rootModelGraph, scope);
+    if (!resolved) {
+        return null;
+    }
+    const viewGraph = resolved.viewGraph ?? paneViewGraph;
+    if (resolved.kind === 'main' || resolved.id === 'root') {
+        return getBftEdgeOrderRangeForMainScope(viewGraph, rootModelGraph);
+    }
+    return getBftEdgeOrderRangeForViewGraph(resolved.viewGraph);
+};
+
+export const findEdgeByBftOrderInScope = (rootModelGraph, scope, order) => {
+    const resolved = normalizeBftSearchScope(rootModelGraph, scope);
+    if (!resolved) {
+        return null;
+    }
+    const viewGraph = resolved.viewGraph;
+    if (resolved.kind === 'main' || resolved.id === 'root') {
+        return findEdgeByBftOrderInMainScope(viewGraph, rootModelGraph, order);
+    }
+    return findEdgeByBftOrderInViewGraph(viewGraph, order);
+};
+
 export const formatBftEdgeLabel = (edge) => {
     if (!edge) {
         return 'connection';
@@ -1032,12 +1228,14 @@ export const formatBftEdgeLabel = (edge) => {
     return `${tensorName} (${fromName} \u2192 ${toName})`;
 };
 
-export const parseBftEdgeOrderQuery = (text, scopeViewGraph, scopeLabel = 'this graph') => {
+export const parseBftEdgeOrderQuery = (text, rootModelGraph, scope) => {
     const trimmed = (text || '').trim();
+    const resolvedScope = normalizeBftSearchScope(rootModelGraph, scope);
+    const scopeLabel = resolvedScope?.label || 'this graph';
     if (!trimmed) {
         return { ok: false, error: 'Enter an order number.' };
     }
-    if (!scopeViewGraph) {
+    if (resolvedScope.kind !== 'main' && !resolvedScope.viewGraph) {
         return { ok: false, error: `Expand the block to search connections in ${scopeLabel}.` };
     }
     if (!/^\d+$/.test(trimmed)) {
@@ -1047,14 +1245,14 @@ export const parseBftEdgeOrderQuery = (text, scopeViewGraph, scopeLabel = 'this 
     if (!Number.isSafeInteger(value) || value <= 0) {
         return { ok: false, error: 'Enter a positive whole number.' };
     }
-    const range = getBftEdgeOrderRangeForViewGraph(scopeViewGraph);
+    const range = getBftEdgeOrderRangeForScope(rootModelGraph, viewGraph, resolvedScope);
     if (!range) {
         return { ok: false, error: `No connection orders in ${scopeLabel}.` };
     }
     if (value < range.min || value > range.max) {
         return { ok: false, error: `Order must be between ${range.min} and ${range.max}.` };
     }
-    const edge = findEdgeByBftOrderInViewGraph(scopeViewGraph, value);
+    const edge = findEdgeByBftOrderInScope(rootModelGraph, resolvedScope, value);
     if (!edge) {
         return { ok: false, error: `No connection with order ${value}.` };
     }
