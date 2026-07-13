@@ -443,8 +443,8 @@ describe('ambapb bft numbering', () => {
         };
         const compiled = {
             name: 'compiled',
-            inputs: [{ name: 'sub_input', value: [tensor('sub_in')] }],
-            outputs: [{ name: 'sub_output', value: [tensor('sub_out')] }],
+            inputs: [{ name: 'sub_in', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'sub_out', value: [tensor('sub_out')] }],
             nodes: [inner]
         };
         const sourceGraph = {
@@ -463,8 +463,16 @@ describe('ambapb bft numbering', () => {
                     type: { name: 'BatchCall' },
                     attributes: [
                         { name: 'graph_id', type: 'string', value: 'compiled' },
-                        { name: 'src_mappings', type: 'string', value: '[]' },
-                        { name: 'out_mappings', type: 'string', value: '[]' }
+                        {
+                            name: 'src_mappings',
+                            type: 'string',
+                            value: JSON.stringify([{ id: 'sub_in' }])
+                        },
+                        {
+                            name: 'out_mappings',
+                            type: 'string',
+                            value: JSON.stringify([{ id: 'sub_out' }])
+                        }
                     ],
                     inputs: [{ name: 'x', value: [tensor('producer_out')] }],
                     outputs: [{ name: 'y', value: [tensor('batch_out')] }]

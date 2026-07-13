@@ -16,6 +16,10 @@ const isSubgraphDefinitionNode = (node) => {
         node.type.name === FRAG_SUBGRAPH_OP || node.type.name === USER_DEF_SUBGRAPH_OP
     ));
 };
+
+export const isBatchCallNode = (node) => {
+    return Boolean(node && node.type && (node.type.name === BATCH_CALL_OP || node.type.name === 'UserDefCall'));
+};
 const COMPILED_PRIM_GRAPH_ATTR = 'compiled_prim_graph';
 const FRAG_SUBGRAPH_GRAPH_ATTR = 'graph';
 // compiled_prim_graph_attr is equal to compiled_prim_graph in other modules
@@ -229,8 +233,332 @@ export const resolveBatchCallTarget = (graph, batchCallNode) => {
     return null;
 };
 
+const boundaryIdMatches = (boundaryName, mappingId) => {
+    if (!boundaryName || !mappingId) {
+        return false;
+    }
+    return boundaryName === mappingId ||
+        boundaryName.endsWith(mappingId) ||
+        mappingId.endsWith(boundaryName);
+};
+
+const subgraphExpandableNodes = (subGraph, batchCallNode) => {
+    const nodes = subGraph && Array.isArray(subGraph.nodes) ? subGraph.nodes : [];
+    if (batchCallNode && batchCallNode.type?.name === 'UserDefCall') {
+        return nodes.filter((node) => !isSubgraphDefinitionNode(node));
+    }
+    return nodes;
+};
+
+const pushIssue = (issues, code, message) => {
+    issues.push({ code, level: 'error', message });
+};
+
+/**
+ * Strict BatchCall ↔ FragSubgraph linkage check.
+ * Expand is allowed only when graph_id resolves and src/out mappings match subgraph I/O.
+ */
+export const analyzeBatchCallLinkage = (graph, batchCallNode) => {
+    const issues = [];
+    if (!graph || !batchCallNode ||
+        (batchCallNode.type?.name !== BATCH_CALL_OP && batchCallNode.type?.name !== 'UserDefCall')) {
+        pushIssue(issues, 'NOT_BATCH_CALL', 'Node is not a BatchCall.');
+        return { ok: false, canExpand: false, target: null, issues };
+    }
+
+    const graphIdAttr = getNodeAttribute(batchCallNode, 'graph_id');
+    const graphId = normalizeGraphId(graphIdAttr ? graphIdAttr.value : null);
+    if (!graphId) {
+        pushIssue(issues, 'MISSING_GRAPH_ID', 'BatchCall is missing graph_id.');
+    }
+
+    const target = resolveBatchCallTarget(graph, batchCallNode);
+    if (graphId && !target) {
+        pushIssue(issues, 'UNRESOLVED_GRAPH_ID',
+            `BatchCall graph_id '${graphId}' does not match a FragSubgraph.`);
+    }
+
+    const subGraph = target ? target.subGraph : null;
+    if (target && subgraphExpandableNodes(subGraph, batchCallNode).length === 0) {
+        pushIssue(issues, 'EMPTY_SUBGRAPH', 'Matched FragSubgraph has no expandable nodes.');
+    }
+
+    const srcAttr = getNodeAttribute(batchCallNode, 'src_mappings');
+    const outAttr = getNodeAttribute(batchCallNode, 'out_mappings');
+    const srcMappings = parseMappingAttribute(srcAttr);
+    const outMappings = parseMappingAttribute(outAttr);
+    const subInputs = (subGraph && subGraph.inputs) || [];
+    const subOutputs = (subGraph && subGraph.outputs) || [];
+
+    if (!srcAttr) {
+        pushIssue(issues, 'MISSING_SRC_MAPPINGS', 'BatchCall is missing src_mappings.');
+    } else if (subInputs.length > 0 && srcMappings.length === 0) {
+        pushIssue(issues, 'EMPTY_SRC_MAPPINGS', 'BatchCall src_mappings is empty.');
+    }
+
+    if (!outAttr) {
+        pushIssue(issues, 'MISSING_OUT_MAPPINGS', 'BatchCall is missing out_mappings.');
+    } else if (subOutputs.length > 0 && outMappings.length === 0) {
+        pushIssue(issues, 'EMPTY_OUT_MAPPINGS', 'BatchCall out_mappings is empty.');
+    }
+
+    if (subGraph) {
+        for (const input of subInputs) {
+            const inputName = input && input.name;
+            if (!inputName) {
+                continue;
+            }
+            const mappingIndex = srcMappings.findIndex((entry) =>
+                boundaryIdMatches(inputName, mappingEntryId(entry)));
+            if (mappingIndex < 0) {
+                pushIssue(issues, 'SRC_MAPPING_MISMATCH',
+                    `src_mappings does not cover FragSubgraph input '${inputName}'.`);
+                continue;
+            }
+            if (!(batchCallNode.inputs || [])[mappingIndex]) {
+                pushIssue(issues, 'SRC_MAPPING_MISMATCH',
+                    `src_mappings for '${inputName}' has no matching BatchCall input.`);
+            }
+        }
+        for (const output of subOutputs) {
+            const outputName = output && output.name;
+            if (!outputName) {
+                continue;
+            }
+            const mappingIndex = outMappings.findIndex((entry) =>
+                boundaryIdMatches(outputName, mappingEntryId(entry)));
+            if (mappingIndex < 0) {
+                pushIssue(issues, 'OUT_MAPPING_MISMATCH',
+                    `out_mappings does not cover FragSubgraph output '${outputName}'.`);
+                continue;
+            }
+            if (!(batchCallNode.outputs || [])[mappingIndex]) {
+                pushIssue(issues, 'OUT_MAPPING_MISMATCH',
+                    `out_mappings for '${outputName}' has no matching BatchCall output.`);
+            }
+        }
+        for (let index = 0; index < srcMappings.length; index++) {
+            if (!mappingEntryId(srcMappings[index])) {
+                pushIssue(issues, 'SRC_MAPPING_MISMATCH', `src_mappings[${index}] is missing an id.`);
+            }
+        }
+        for (let index = 0; index < outMappings.length; index++) {
+            if (!mappingEntryId(outMappings[index])) {
+                pushIssue(issues, 'OUT_MAPPING_MISMATCH', `out_mappings[${index}] is missing an id.`);
+            }
+        }
+    }
+
+    const canExpand = issues.length === 0;
+    return {
+        ok: canExpand,
+        canExpand,
+        target,
+        issues
+    };
+};
+
 export const canExpandBatchCall = (graph, batchCallNode) => {
-    return resolveBatchCallTarget(graph, batchCallNode) !== null;
+    return analyzeBatchCallLinkage(graph, batchCallNode).canExpand;
+};
+
+const LINKAGE_ATTR_NAMES = new Set(['graph_id', 'src_mappings', 'out_mappings']);
+
+const attributeNameFromProperty = (property) => {
+    const prefix = 'attributes.';
+    if (typeof property === 'string' && property.startsWith(prefix)) {
+        return property.slice(prefix.length);
+    }
+    return property;
+};
+
+const batchCallLinkageStates = (graph) => {
+    const states = new Map();
+    for (const node of graph.nodes || []) {
+        if (!isBatchCallNode(node)) {
+            continue;
+        }
+        states.set(node.name || '', analyzeBatchCallLinkage(graph, node));
+    }
+    return states;
+};
+
+const parseTopLevelNodeEntityId = (entityId) => {
+    if (!entityId) {
+        return null;
+    }
+    const match = /^graph:(\d+)\/node:(\d+)(?:\/attr:(\d+))?$/.exec(entityId);
+    if (!match) {
+        return null;
+    }
+    return {
+        graphIndex: Number(match[1]),
+        nodeIndex: Number(match[2]),
+        attributeIndex: match[3] !== undefined ? Number(match[3]) : null
+    };
+};
+
+const simulateLinkagePatch = (graph, patch) => {
+    const entityId = patch.entityId || patch.parentId;
+    const location = parseTopLevelNodeEntityId(entityId);
+    if (!location) {
+        return false;
+    }
+    const node = (graph.nodes || [])[location.nodeIndex];
+    if (!node) {
+        return false;
+    }
+
+    if (patch.entityType === 'attribute' && patch.changeType === 'delete') {
+        if (location.attributeIndex === null || !Array.isArray(node.attributes)) {
+            return false;
+        }
+        if (location.attributeIndex < 0 || location.attributeIndex >= node.attributes.length) {
+            return false;
+        }
+        node.attributes.splice(location.attributeIndex, 1);
+        return true;
+    }
+    if (patch.entityType === 'attribute' && (patch.changeType === 'modify' || !patch.changeType)) {
+        if (location.attributeIndex === null || !Array.isArray(node.attributes)) {
+            return false;
+        }
+        const attribute = node.attributes[location.attributeIndex];
+        if (!attribute) {
+            return false;
+        }
+        attribute.value = Array.isArray(patch.newValue) ? patch.newValue.slice() : patch.newValue;
+        return true;
+    }
+    if (patch.entityType === 'attribute' && patch.changeType === 'add') {
+        if (!Array.isArray(node.attributes)) {
+            node.attributes = [];
+        }
+        node.attributes.push({
+            name: attributeNameFromProperty(patch.property),
+            type: patch.attributeType || 'string',
+            value: Array.isArray(patch.newValue) ? patch.newValue.slice() : patch.newValue
+        });
+        return true;
+    }
+    if (patch.entityType === 'node' && patch.changeType === 'delete' && patch.property === 'remove') {
+        graph.nodes.splice(location.nodeIndex, 1);
+        return true;
+    }
+    if (patch.entityType === 'node' && patch.property === 'name') {
+        node.name = patch.newValue;
+        return true;
+    }
+    return false;
+};
+
+const isLinkageRelevantPatch = (graph, patch) => {
+    if (!graph || !patch) {
+        return false;
+    }
+    const entityId = patch.entityId || patch.parentId;
+    const location = parseTopLevelNodeEntityId(entityId);
+    if (!location) {
+        return false;
+    }
+    const node = (graph.nodes || [])[location.nodeIndex];
+    if (!node) {
+        return false;
+    }
+    if (isBatchCallNode(node)) {
+        if (patch.entityType !== 'attribute') {
+            return false;
+        }
+        if (patch.changeType === 'add') {
+            return LINKAGE_ATTR_NAMES.has(attributeNameFromProperty(patch.property));
+        }
+        if (location.attributeIndex === null) {
+            return false;
+        }
+        const attribute = (node.attributes || [])[location.attributeIndex];
+        return Boolean(attribute && LINKAGE_ATTR_NAMES.has(attribute.name));
+    }
+    if (isSubgraphDefinitionNode(node)) {
+        return (patch.entityType === 'node' && patch.property === 'remove') ||
+            (patch.entityType === 'node' && patch.property === 'name');
+    }
+    return false;
+};
+
+export const batchCallExpandBlockReason = (analysis) => {
+    if (!analysis || analysis.canExpand || !analysis.issues || analysis.issues.length === 0) {
+        return null;
+    }
+    const code = analysis.issues[0].code;
+    const labels = {
+        MISSING_GRAPH_ID: 'missing graph_id',
+        UNRESOLVED_GRAPH_ID: 'no matching FragSubgraph',
+        EMPTY_SUBGRAPH: 'empty FragSubgraph',
+        MISSING_SRC_MAPPINGS: 'missing src_mappings',
+        EMPTY_SRC_MAPPINGS: 'empty src_mappings',
+        MISSING_OUT_MAPPINGS: 'missing out_mappings',
+        EMPTY_OUT_MAPPINGS: 'empty out_mappings',
+        SRC_MAPPING_MISMATCH: 'src_mappings mismatch',
+        OUT_MAPPING_MISMATCH: 'out_mappings mismatch',
+        NOT_BATCH_CALL: 'not a BatchCall'
+    };
+    return labels[code] || analysis.issues[0].message;
+};
+
+/**
+ * Predict whether a patch would break expandable BatchCall ↔ FragSubgraph linkage.
+ * Returns ok:false when the edit would disconnect a previously expandable BatchCall.
+ */
+export const analyzeBatchCallEditImpact = (graph, patch) => {
+    if (!graph || !patch || !isLinkageRelevantPatch(graph, patch)) {
+        return { ok: true, needsConfirm: false, issues: [], affected: [] };
+    }
+    const before = batchCallLinkageStates(graph);
+    const simulated = cloneGraph(graph);
+    if (!simulateLinkagePatch(simulated, patch)) {
+        return { ok: true, needsConfirm: false, issues: [], affected: [] };
+    }
+    const after = batchCallLinkageStates(simulated);
+    const issues = [];
+    const affected = [];
+    for (const [name, beforeState] of before) {
+        if (!beforeState.canExpand) {
+            continue;
+        }
+        const afterState = after.get(name);
+        if (afterState && afterState.canExpand) {
+            continue;
+        }
+        affected.push(name);
+        const detailIssues = (afterState && afterState.issues) || [{
+            code: 'UNRESOLVED_GRAPH_ID',
+            level: 'error',
+            message: 'BatchCall is no longer linked to a FragSubgraph.'
+        }];
+        for (const issue of detailIssues) {
+            issues.push({
+                ...issue,
+                batchCallName: name,
+                message: name ?
+                    `BatchCall '${name}': ${issue.message}` :
+                    issue.message
+            });
+        }
+    }
+    return {
+        ok: issues.length === 0,
+        needsConfirm: false,
+        issues,
+        affected
+    };
+};
+
+export const formatBatchCallEditImpactMessage = (impact) => {
+    if (!impact || !impact.issues || impact.issues.length === 0) {
+        return 'This edit would disconnect BatchCall from its FragSubgraph.';
+    }
+    const lines = impact.issues.map((issue) => `- ${issue.message}`);
+    return `This edit would disconnect BatchCall from its FragSubgraph and disable inline expand.\n\n${lines.join('\n')}`;
 };
 
 export const inlineExpansionBatchCallName = (node) => {
@@ -472,12 +800,12 @@ const expandSingleBatchCall = (graph, batchCallName, options = {}) => {
     if (batchCallNode.type?.name !== BATCH_CALL_OP && batchCallNode.type?.name !== 'UserDefCall') {
         return null;
     }
-    const target = resolveBatchCallTarget(graph, batchCallNode);
-    if (!target) {
+    const linkage = analyzeBatchCallLinkage(graph, batchCallNode);
+    if (!linkage.canExpand || !linkage.target) {
         return null;
     }
 
-    const { subGraph } = target;
+    const { subGraph } = linkage.target;
     const prefix = materialize ? '' : `inline::${batchCallNode.name}::`;
     const valueMap = new Map();
     const nameMap = new Map();
@@ -722,8 +1050,4 @@ export const applyBatchInlineExpansions = (graph, expandedBatchCallNames, graphI
     attachDisplayNodeSourceRefs(displayGraph, graph, graphIndex, model);
     displayGraph._inlineExpandedNodeNames = inlinedNodeNames;
     return displayGraph;
-};
-
-export const isBatchCallNode = (node) => {
-    return Boolean(node && node.type && (node.type.name === BATCH_CALL_OP || node.type.name === 'UserDefCall'));
 };

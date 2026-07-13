@@ -2255,23 +2255,8 @@ class EditorState {
             entityId = `${patch.parentId}/attr:${target.attributes.length - 1}`;
         } else if (patch.changeType === 'delete' && patch.entityType === 'attribute') {
             const location = parseAttributeEntityId(entityId);
-            const graph = this.modified.getGraph(location.graphIndex);
-            const wasAdded = this.delta.getState(entityId) === 'added';
-             // Drop attribute/child deltas for this node while its index is still valid.
-            this.delta.clearEntitySubtree(entityId);
-            deleteNode(graph, location.nodeIndex);
-            this.delta.remapNodeIndices(location.graphIndex, location.nodeIndex + 1, -1);
-            changeType = 'delete';
-            if (wasAdded) {
-                return {
-                    entityId,
-                    entityType: patch.entityType,
-                    changeType,
-                    property: patch.property,
-                    oldValue: undefined,
-                    newValue: patch.newValue
-                };
-            }
+            const target = getAttributeTarget(this.modified.model, location);
+            target.attributes.splice(location.attributeIndex, 1);
         } else if (patch.entityType === 'value') {
             const value = getValueByEntityId(this.modified.model, entityId);
             if (!value) {
@@ -2330,11 +2315,13 @@ class EditorState {
             const location = parseNodeEntityId(entityId);
             const graph = this.modified.getGraph(location.graphIndex);
             const wasAdded = this.delta.getState(entityId) === 'added';
+            if (wasAdded) {
+                this.delta.clearEntitySubtree(entityId);
+            }
             deleteNode(graph, location.nodeIndex);
             this.delta.remapNodeIndices(location.graphIndex, location.nodeIndex + 1, -1);
             changeType = 'delete';
             if (wasAdded) {
-                this.delta.clearEntity(entityId);
                 return {
                     entityId,
                     entityType: patch.entityType,

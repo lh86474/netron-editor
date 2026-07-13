@@ -5,8 +5,9 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { locateNodeEntity } from '../source/model-editor.js';
 import {
+    analyzeBatchCallEditImpact,
+    analyzeBatchCallLinkage,
     applyBatchInlineExpansions,
     buildNestedCompiledNodeEntityId,
     canExpandBatchCall,
@@ -18,6 +19,7 @@ import {
     sourceNodeForEntity,
     sourceValueForEntity
 } from '../source/ambapb-batch-inline.js';
+import { locateNodeEntity } from '../source/model-editor.js';
 
 const tensor = (name) => ({ name, type: 'float32' });
 // build mock producer (input for batch call), batch call, and frag subgraph
@@ -579,6 +581,86 @@ describe('ambapb batch inline expansion', () => {
         assert.ok(inner);
         assert.equal(inner.inputs[0].value[0].name, 'producer_out');
         assert.equal(inner.inputs[1].value[0].name, 'external_ref');
+    });
+
+    it('blocks expand when src_mappings is deleted', () => {
+        const graph = buildRuntimeGraph();
+        const batchCall = graph.nodes.find((node) => node.name === 'batch_call');
+        batchCall.attributes = batchCall.attributes.filter((entry) => entry.name !== 'src_mappings');
+        assert.equal(canExpandBatchCall(graph, batchCall), false);
+        const analysis = analyzeBatchCallLinkage(graph, batchCall);
+        assert.ok(analysis.issues.some((issue) => issue.code === 'MISSING_SRC_MAPPINGS'));
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+        assert.ok(expanded.nodes.some((node) => node.name === 'batch_call'));
+        assert.equal(expanded._inlineExpandedNodeNames.length, 0);
+    });
+
+    it('blocks expand when out_mappings does not cover subgraph outputs', () => {
+        const graph = buildRuntimeGraph();
+        const batchCall = graph.nodes.find((node) => node.name === 'batch_call');
+        batchCall.attributes.find((entry) => entry.name === 'out_mappings').value = JSON.stringify([
+            { id: 'wrong_output' }
+        ]);
+        assert.equal(canExpandBatchCall(graph, batchCall), false);
+        const expanded = applyBatchInlineExpansions(graph, new Set(['batch_call']));
+        assert.ok(expanded.nodes.some((node) => node.name === 'batch_call'));
+    });
+
+    it('blocks edit that deletes src_mappings from an expandable BatchCall', () => {
+        const graph = buildRuntimeGraph();
+        const batchCall = graph.nodes.find((node) => node.name === 'batch_call');
+        const attrIndex = batchCall.attributes.findIndex((entry) => entry.name === 'src_mappings');
+        const impact = analyzeBatchCallEditImpact(graph, {
+            entityId: `graph:0/node:${graph.nodes.indexOf(batchCall)}/attr:${attrIndex}`,
+            entityType: 'attribute',
+            changeType: 'delete',
+            property: 'attributes.src_mappings'
+        });
+        assert.equal(impact.ok, false);
+        assert.ok(impact.affected.includes('batch_call'));
+        assert.ok(impact.issues.some((issue) => issue.code === 'MISSING_SRC_MAPPINGS'));
+    });
+
+    it('blocks edit that changes graph_id away from FragSubgraph', () => {
+        const graph = buildRuntimeGraph();
+        const batchCall = graph.nodes.find((node) => node.name === 'batch_call');
+        const attrIndex = batchCall.attributes.findIndex((entry) => entry.name === 'graph_id');
+        const impact = analyzeBatchCallEditImpact(graph, {
+            entityId: `graph:0/node:${graph.nodes.indexOf(batchCall)}/attr:${attrIndex}`,
+            entityType: 'attribute',
+            changeType: 'modify',
+            property: 'attributes.graph_id',
+            newValue: 'missing_subgraph'
+        });
+        assert.equal(impact.ok, false);
+        assert.ok(impact.issues.some((issue) => issue.code === 'UNRESOLVED_GRAPH_ID'));
+    });
+
+    it('blocks edit that deletes the linked FragSubgraph', () => {
+        const graph = buildRuntimeGraph();
+        const fragIndex = graph.nodes.findIndex((node) => node.name === 'frag');
+        const impact = analyzeBatchCallEditImpact(graph, {
+            entityId: `graph:0/node:${fragIndex}`,
+            entityType: 'node',
+            changeType: 'delete',
+            property: 'remove'
+        });
+        assert.equal(impact.ok, false);
+        assert.ok(impact.affected.includes('batch_call'));
+    });
+
+    it('allows FragSubgraph shell rename that keeps nested graph_id match', () => {
+        const graph = buildRuntimeGraph();
+        const fragIndex = graph.nodes.findIndex((node) => node.name === 'frag');
+        const impact = analyzeBatchCallEditImpact(graph, {
+            entityId: `graph:0/node:${fragIndex}`,
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'name',
+            newValue: 'renamed_frag'
+        });
+        assert.equal(impact.ok, true);
+        assert.equal(canExpandBatchCall(graph, graph.nodes.find((node) => node.name === 'batch_call')), true);
     });
 });
 

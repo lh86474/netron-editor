@@ -52,9 +52,13 @@ import {
     resolveTensorSourceNode
 } from './ambapb-bft-numbering.js';
 import {
+    analyzeBatchCallEditImpact,
+    analyzeBatchCallLinkage,
     applyBatchInlineExpansions,
     attachCompiledGraphSourceRefs,
+    batchCallExpandBlockReason,
     canExpandBatchCall,
+    formatBatchCallEditImpactMessage,
     inlineExpansionBatchCallName,
     isBatchCallNode,
     materializeUserDefCallExpansion,
@@ -128,6 +132,7 @@ view.View = class {
         this._graphBusyShowTimer = null;
         this._graphBusyOverlay = null;
         this._danglingNodeNames = new Set();
+        this._danglingNodeRefs = new Set();
         this._applyingHistory = false;
         this._exportBasenameOverride = null;
         this._sidebarStack = [];
@@ -1452,6 +1457,7 @@ view.View = class {
         this._userDefSelectedMarkers.clear();
         this._borderStackOrder.clear();
         this._danglingNodeNames.clear();
+        this._danglingNodeRefs.clear();
         this._exportBasenameOverride = null;
         this._find = null;
         this._findNodeByOrder = null;
@@ -2384,6 +2390,7 @@ view.View = class {
                     this._setDanglingNodeNames(findDanglingNodes(this._editSession.modified.getGraph(graphIndex)));
                 } else {
                     this._danglingNodeNames.clear();
+                    this._danglingNodeRefs.clear();
                 }
             }
             this._refreshOpenSidebars(change);
@@ -2430,6 +2437,7 @@ view.View = class {
             this._invalidateDisplayGraphCache();
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
+            this._danglingNodeRefs.clear();
             this._closeGraphOverlays();
             this._closeAllSidebars();
             await this._refreshModifiedPane();
@@ -2452,6 +2460,7 @@ view.View = class {
             this._invalidateDisplayGraphCache();
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
+            this._danglingNodeRefs.clear();
             this._closeGraphOverlays();
             this._closeAllSidebars();
             await this._refreshModifiedPane();
@@ -2532,10 +2541,20 @@ view.View = class {
                 return null;
             }
         }
+        const linkageImpact = this._analyzeBatchCallEditImpact(patch);
+        if (linkageImpact && !linkageImpact.ok) {
+            this.error(
+                new Error(formatBatchCallEditImpactMessage(linkageImpact)),
+                'Edit would disconnect BatchCall.',
+                null
+            );
+            return null;
+        }
         // edits must call checkpointedit history before applying any patches. 
         this._checkpointEditHistory();
         if (!(patch.entityType === 'node' && patch.changeType === 'delete' && patch.property === 'remove')) {
             this._danglingNodeNames.clear();
+            this._danglingNodeRefs.clear();
         }
         let change = null;
         try {
@@ -2860,12 +2879,33 @@ view.View = class {
         this._graphContextMenu.open();
     }
 
-    _canExpandBatchCall(nodeView) {
+    _analyzeBatchCallEditImpact(patch) {
+        if (!this._editSession || !patch) {
+            return null;
+        }
+        const entityId = patch.entityId || patch.parentId || '';
+        const match = /^graph:(\d+)/.exec(entityId);
+        const graphIndex = match ? Number(match[1]) : 0;
+        const graph = this._editSession.modified.getGraph(graphIndex);
+        if (!graph) {
+            return null;
+        }
+        return analyzeBatchCallEditImpact(graph, patch);
+    }
+
+    _batchCallLinkageAnalysis(nodeView) {
         if (!isBatchCallNode(nodeView.value)) {
-            return false;
+            return { ok: false, canExpand: false, target: null, issues: [] };
         }
         const graph = this._resolveBatchCallGraph(nodeView);
-        return Boolean(graph && canExpandBatchCall(graph, nodeView.value));
+        if (!graph) {
+            return { ok: false, canExpand: false, target: null, issues: [] };
+        }
+        return analyzeBatchCallLinkage(graph, nodeView.value);
+    }
+
+    _canExpandBatchCall(nodeView) {
+        return this._batchCallLinkageAnalysis(nodeView).canExpand;
     }
 
     _batchCallContextMenuItems(nodeView) {
@@ -2888,7 +2928,8 @@ view.View = class {
 
         const nodeName = node.name;
         const isExpanded = this._batchInlineExpanded.has(nodeName);
-        const canExpand = this._canExpandBatchCall(nodeView);
+        const linkage = this._batchCallLinkageAnalysis(nodeView);
+        const canExpand = linkage.canExpand;
 
         if (isExpanded) {
             items.push({
@@ -2896,11 +2937,11 @@ view.View = class {
                 action: () => this._toggleBatchInlineExpansion(nodeName)
             });
         } else {
-            const noMatchLabel = node.type?.name === 'FragSubgraph';
+            const blockReason = batchCallExpandBlockReason(linkage);
             items.push({
                 label: canExpand
                     ? 'Expand Subgraph Inline'
-                    : `Expand Subgraph Inline (no matching ${noMatchLabel})`,
+                    : `Expand Subgraph Inline (${blockReason || 'linkage incomplete'})`,
                 enabled: canExpand,
                 action: () => this._toggleBatchInlineExpansion(nodeName)
             });
@@ -2952,6 +2993,9 @@ view.View = class {
                 this._refreshInlineExpandedStyles();
                 return;
             }
+            if (!canExpandBatchCall(graph, sourceNode)) {
+                return;
+            }
             const modifiedGraph = cloneGraph(graph);
             const result = materializeUserDefCallExpansion(modifiedGraph, batchCallName);
             if (!result) {
@@ -2985,6 +3029,9 @@ view.View = class {
         if (this._batchInlineExpanded.has(batchCallName)) {
             this._batchInlineExpanded.delete(batchCallName);
         } else {
+            if (!sourceNode || !canExpandBatchCall(graph, sourceNode)) {
+                return;
+            }
             this._batchInlineExpanded.add(batchCallName);
         }
         this._persistBatchInlineState();
@@ -3611,6 +3658,7 @@ view.View = class {
     }
 
     _setDanglingNodeNames(nodes) {
+        this._danglingNodeRefs = new Set((nodes || []).filter(Boolean));
         this._danglingNodeNames = new Set(
             (nodes || []).map((node) => node && node.name).filter(Boolean)
         );
@@ -7236,12 +7284,15 @@ view.Node = class extends grapher.Node {
         if (!this.element || !this.context.view) {
             return;
         }
+        const view = this.context.view;
         const nodeName = this.value && this.value.name;
-        const dangling = nodeName && this.context.view._danglingNodeNames.has(nodeName);
+        const dangling = Boolean(
+            (nodeName && view._danglingNodeNames.has(nodeName)) ||
+            (view._danglingNodeRefs && view._danglingNodeRefs.has(this.value))
+        );
         const wasDangling = this.element.classList.contains('dangling');
         this.element.classList.toggle('dangling', Boolean(dangling));
-        const view = this.context.view;
-        if (view && this._entityId) {
+        if (this._entityId) {
             if (!wasDangling && dangling) {
                 view._pushBorderLayer(this._entityId, 'dangling');
             } else if (wasDangling && !dangling) {
