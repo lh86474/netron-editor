@@ -1439,6 +1439,48 @@ view.View = class {
         }
     }
 
+    _resetEditorUiState() {
+        this._closeAllSidebars();
+        this._leftPath = [];
+        this._rightPath = [];
+        this._clearMergePanePaths();
+        this._activePane = 'modified';
+        this._selection = [];
+        this._rangeBegins = [];
+        this._rangeEnds = [];
+        this._batchInlineExpanded.clear();
+        this._userDefSelectedMarkers.clear();
+        this._borderStackOrder.clear();
+        this._danglingNodeNames.clear();
+        this._exportBasenameOverride = null;
+        this._find = null;
+        this._findNodeByOrder = null;
+        this._findConnectionByOrder = null;
+        this._clearPaneFocusVisuals();
+        this._invalidateDisplayGraphCache();
+
+        // Restore default 50/50 (and merge) pane sizes from CSS.
+        for (const id of ['target-original', 'merge-upstream-pane', 'merge-source-row']) {
+            const el = this._element(id);
+            if (el) {
+                el.style.removeProperty('flex');
+            }
+        }
+
+        this._options.showOriginal = true;
+        this._options.showModified = true;
+        const showOriginalEl = this._element('toolbar-show-original');
+        const showModifiedEl = this._element('toolbar-show-modified');
+        if (showOriginalEl) {
+            showOriginalEl.checked = true;
+        }
+        if (showModifiedEl) {
+            showModifiedEl.checked = true;
+        }
+        this._updateDiffPanesVisibility();
+        this._saveOptions();
+    }
+
     _closeAllSidebars() {
         for (const paneId of ['original', 'modified']) {
             if (this._sidebars[paneId].isOpen) {
@@ -4224,23 +4266,7 @@ view.View = class {
     }
 
     async open(context) {
-        this._closeAllSidebars();
-        this._leftPath = [];
-        this._rightPath = [];
-        this._activePane = 'modified';
-        this._exportBasenameOverride = null;
-        this._options.showOriginal = true;
-        this._options.showModified = true;
-        const showOriginalEl = this._element('toolbar-show-original');
-        const showModifiedEl = this._element('toolbar-show-modified');
-        if (showOriginalEl) {
-            showOriginalEl.checked = true;
-        }
-        if (showModifiedEl) {
-            showModifiedEl.checked = true;
-        }
-        this._updateDiffPanesVisibility();
-        this._saveOptions();
+        this._resetEditorUiState();
         await this._timeout(2);
         try {
             const model = await this._modelFactoryService.open(context);
