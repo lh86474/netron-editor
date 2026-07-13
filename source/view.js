@@ -2030,6 +2030,14 @@ view.View = class {
         return entityId.replace(/\/attr:\d+$/, '');
     }
 
+    _entityTargetsValue(entityId) {
+        if (!entityId) {
+            return false;
+        }
+        const base = entityId.replace(/\/attr:\d+$/, '');
+        return /\/value:\d+$/.test(base);
+    }
+
     _findModelNodeForSidebar(staleNode) {
         if (!staleNode || !this._editSession) {
             return staleNode;
@@ -2071,7 +2079,10 @@ view.View = class {
         if (change.entityType === 'node' ||
             change.entityType === 'attribute' ||
             (change.entityType === 'value' && change.parentId)) {
-            return getNodeByEntityId(this._editSession.modified.model, entityId);
+                if (this._entityTargetsValue(entityId)) {
+                    return null;
+                }
+                return getNodeByEntityId(this._editSession.modified.model, entityId);
         }
         return null;
     }
@@ -2211,7 +2222,11 @@ view.View = class {
         if (!entityId) {
             return null;
         }
-        return getNodeByEntityId(this._editSession.modified.model, entityId);
+        const baseEntityId = entityId.replace(/\/attr:\d+$/, '');
+        if (this._entityTargetsValue(baseEntityId)) {
+            return null;
+        }
+        return getNodeByEntityId(this._editSession.modified.model, baseEntityId);
     }
 
     _editorChangeNeedsGraphRefresh(change) {
