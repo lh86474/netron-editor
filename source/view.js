@@ -2813,6 +2813,10 @@ view.View = class {
                 action: () => this._markRangeBegin(nodeView)
             },
             {
+                label: 'Extract This Node',
+                action: () => this._extractSingleNode(nodeView)
+            },
+            {
                 label: isEnd ? 'Unmark End' : 'Mark as End',
                 action: () => this._markRangeEnd(nodeView)
             },
@@ -2828,6 +2832,21 @@ view.View = class {
             }
         );
         return items;
+    }
+
+    async _extractSingleNode(nodeView) {
+        const marker = this._createRangeMarker(nodeView);
+        if (!this._editSession || !marker || !marker.nodeId) {
+            return;
+        }
+        // Temporarily drive the existing extract path with begin === end
+        this._rangeBegins = [marker];
+        this._rangeEnds = [marker];
+        this._clearBorderLayerKind('range-begin');
+        this._clearBorderLayerKind('range-end');
+        this._pushBorderLayer(marker.nodeId, 'range-begin');
+        // optional: also push range-end, or skip visuals since extract clears markers
+        await this._extractAndReplaceGraph();
     }
 
     _showSubgraphContextMenu(nodeView, event) {
