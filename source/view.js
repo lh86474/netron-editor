@@ -8695,11 +8695,14 @@ view.EditableNodeSidebar = class extends view.EditableObjectSidebar {
             for (let index = 0; index < attributes.length; index++) {
                 const attribute = attributes[index];
                 // WE check for attribute type
+                 const isTextEditable = 
+                    attribute.type === 'string' || attribute.type === 'float32' || attribute.type === 'int64' ||
+                    attribute.type === 'string[]' || attribute.type === 'float32[]' || attribute.type === 'int64[]'; 
                  if (!nodeId ||
                     attribute.type === 'graph' ||
                     attribute.type === 'function' ||
                     READ_ONLY_SHELL_ATTRIBUTES.has(attribute.name) ||
-                    !(attribute.type === 'string' || attribute.type === 'float32' || attribute.type === 'int64')) {
+                    !isTextEditable) {
                     this.addArgument(attribute.name, attribute, 'attribute');
                     continue;
                 }
@@ -9252,9 +9255,21 @@ view.AmbaShellNodeSidebar = class extends view.EditableObjectSidebar {
                     this.addEntry(attribute.name, item);
                 } else if (READ_ONLY_SHELL_ATTRIBUTES.has(attribute.name)) {
                     this.addArgument(attribute.name, attribute, 'attribute');
-                } else if (attribute.type === 'string' || attribute.type === 'float32' || attribute.type === 'int64') {
+                } else if (
+                    attribute.type === 'string' || attribute.type === 'float32' || attribute.type === 'int64' ||
+                    attribute.type === 'string[]' || attribute.type === 'float32[]' || attribute.type === 'int64[]'
+                ) {
                     this.addEditableAttribute(attribute, attributeId, (patch) => {
                         this._view.applyEditorPatch(patch);
+                    }, {
+                        onDelete: () => {
+                            this._view.applyEditorPatch({
+                                entityId: attributeId,
+                                entityType: 'attribute',
+                                changeType: 'delete',
+                                property: `attributes.${attribute.name}`
+                            });
+                        }
                     });
                 } else {
                     this.addArgument(attribute.name, attribute, 'attribute');
