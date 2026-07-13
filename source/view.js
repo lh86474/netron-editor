@@ -32,6 +32,7 @@ import {
     collectBftConnectionSearchScopes,
     collectBftSearchScopes,
     findEdgeByBftOrderInScope,
+    findModelGraphContainingTensor,
     formatBftEdgeLabel,
     formatBftModelTensorLabel,
     getBftEdgeOrderRangeForScope,
@@ -1188,12 +1189,15 @@ view.View = class {
         return (edge.from && edge.from.value) || (edge.to && edge.to.value) || null;
     }
 
-    async _ensureExpandedForBftConnectionHit(searchRoot, hit, scope) {
+    async _ensureExpandedForBftConnectionHit(searchRoot, hit, scope, modelGraphHint) {
         if (!searchRoot || !hit || !isBftModelTensorConnection(hit)) {
             return;
         }
-        const modelGraph = scope && scope.kind === 'compiled_prim_graph' ? scope.graph : searchRoot;
         const tensor = hit._modelTensor;
+        const modelGraph =  modelGraphHint ||
+            (scope && scope.kind === 'compiled_prim_graph' ? scope.graph: null) ||
+            findModelGraphContainingTensor(searchRoot, tensor) ||
+            searchRoot;
         const modelNode = resolveTensorSourceNode(modelGraph, tensor.name, 'output') ||
             resolveTensorSourceNode(modelGraph, tensor.name, 'input');
         if (!modelNode) {
@@ -1228,7 +1232,7 @@ view.View = class {
         const scope = scopes.find((entry) => entry.id === result.scopeId);
         let hit = await this._resolveBftConnectionEdge(result);
         if (hit && isBftModelTensorConnection(hit)) {
-            await this._ensureExpandedForBftConnectionHit(searchRoot, hit, scope);
+            await this._ensureExpandedForBftConnectionHit(searchRoot, hit, scope, result.modelGraph);
             hit = await this._resolveBftConnectionEdge(result);
         }
         const modelNode = hit && !isBftModelTensorConnection(hit) ?
@@ -1267,7 +1271,7 @@ view.View = class {
         const scope = scopes.find((entry) => entry.id === result.scopeId);
         let hit = await this._resolveBftConnectionEdge(result);
         if (hit && isBftModelTensorConnection(hit)) {
-            await this._ensureExpandedForBftConnectionHit(searchRoot, hit, scope);
+            await this._ensureExpandedForBftConnectionHit(searchRoot, hit, scope, result.modelGraph);
             hit = await this._resolveBftConnectionEdge(result);
         }
         const modelNode = hit && !isBftModelTensorConnection(hit) ?
@@ -11312,12 +11316,14 @@ view.FindConnectionByOrderSidebar = class extends view.Control {
         item.appendChild(this._host.document.createTextNode(`${result.value}: ${label}`));
         this._table.set(item, {
             order: result.value,
-            scopeId: scope.id
+            scopeId: scope.id,
+            modelGraph: result.modelGraph || null
         });
         this._result.appendChild(item);
         return {
             order: result.value,
-            scopeId: scope.id
+            scopeId: scope.id,
+            modelGraph: result.modelGraph || null
         };
     }
 

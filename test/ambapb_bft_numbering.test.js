@@ -2159,4 +2159,38 @@ describe('scoped find connection by order', () => {
         });
         assert.equal(findNodeByBftOrderInMainScope(graph, 2).name, 'sub_inner');
     });
+    it('findModelGraphContainingTensor finds nested frag compiled graphs', () => {
+        const innerA = {
+            name: 'inner_a',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'y', value: [tensor('inner_a_out')] }]
+        };
+        const compiled = {
+            name: 'compiled',
+            inputs: [{ name: 'sub_input', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'sub_output', value: [tensor('sub_out')] }],
+            nodes: [innerA]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [{
+                name: 'frag',
+                type: { name: 'FragSubgraph' },
+                attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: compiled }],
+                inputs: [],
+                outputs: []
+            }]
+        };
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: null,
+            layoutDirection: 'horizontal'
+        });
+        const tensor = innerA.outputs[0].value[0];
+        assert.equal(findModelGraphContainingTensor(graph, tensor), compiled);
+    });
 });

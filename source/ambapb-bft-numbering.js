@@ -873,17 +873,27 @@ export const locateBftNodeInGraph = (rootGraph, targetNode) => {
         return null;
     }
     const walk = (graph, ancestors) => {
+        if (!graph) {
+            return null;
+        }
         if ((graph.nodes || []).includes(targetNode)) {
             return { graph, ancestors };
         }
         for (const shell of graph.nodes || []) {
+            const nestedGraphs = [];
             const compiled = getCompiledGraphFromNode(shell);
-            if (!compiled) {
-                continue;
+            const subgraph = getSubgraphGraphFromNode(shell);
+            if (compiled) {
+                nestedGraphs.push(compiled);
             }
-            const found = walk(compiled, ancestors.concat({ shell, graph: compiled }));
-            if (found) {
-                return found;
+            if (subgraph && subgraph !== compiled) {
+                nestedGraphs.push(subgraph);
+            }
+            for (const nestedGraph of nestedGraphs) {
+                const found = walk(nestedGraph, ancestors.concat({ shell, graph: nestedGraph }));
+                if (found) {
+                    return found;
+                }
             }
         }
         return null;
@@ -1237,6 +1247,24 @@ export const findTensorByBftOrderInMainScopeFromModel = (rootModelGraph, order) 
     return null;
 };
 
+export const findModelGraphContainingTensor = (rootModelGraph, tensor) => {
+    if (!rootModelGraph || !tensor) {
+        return null;
+    }
+    for (const graph of collectMainScopeGraphs(rootModelGraph)) {
+        let found = false;
+        forEachTensorInGraph(graph, (candidate) => {
+            if (candidate === tensor || (tensor.name && candidate.name === tensor.name)) {
+                found = true;
+            }
+        });
+        if (found) {
+            return graph;
+        }
+    }
+    return null;
+};
+
 export const isBftModelTensorConnection = (hit) => Boolean(hit && hit._modelTensor);
 
 const wrapModelTensorConnection = (tensor) => (
@@ -1349,12 +1377,15 @@ export const parseBftEdgeOrderQuery = (text, rootModelGraph, scope) => {
         return { ok: false, error: `No connection with order ${value}.` };
     }
     if (isBftModelTensorConnection(hit)) {
+        const modelGraph = resolvedScope.kind === 'compiled_prim_graph' ?
+            resolvedScope.graph :
+            findModelGraphContainingTensor(rootModelGraph, hit._modelTensor) || rootModelGraph;
         return {
             ok: true,
             value,
             edge: null,
             tensor: hit._modelTensor,
-            modelGraph: resolvedScope.graph || rootModelGraph
+            modelGraph 
         };
     }
     return { ok: true, value, edge: hit, tensor: null, modelGraph: null };
