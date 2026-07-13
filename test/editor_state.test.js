@@ -484,6 +484,37 @@ describe('Node deletion', () => {
     });
 
     // We have an inserted node. We have to make sure that Topology is restored and delta entry is cleared
+    it('delete inserted node clears attribute deltas on that node', () => {
+        const editor = ModelEditor.createSession(mockChainModel);
+        const insertChange = editor.applyPatch({
+            parentId: 'graph:0/node:1',
+            entityType: 'node',
+            changeType: 'add',
+            property: 'insert',
+            position: 'below',
+            newValue: identityNodeSpec('InsertedBelow')
+        });
+        editor.applyPatch({
+            parentId: insertChange.entityId,
+            entityType: 'attribute',
+            changeType: 'add',
+            property: 'attributes.test',
+            attributeType: 'string',
+            newValue: 'test'
+        });
+        assert.ok(editor.delta.getChanges().some((entry) => entry.entityId === `${insertChange.entityId}/attr:0`));
+        editor.applyPatch({
+            entityId: insertChange.entityId,
+            entityType: 'node',
+            changeType: 'delete',
+            property: 'remove'
+        });
+        assert.equal(editor.delta.getChanges().some((entry) => (
+            entry.entityId === insertChange.entityId ||
+            entry.entityId.startsWith(`${insertChange.entityId}/`) ||
+            entry.parentId === insertChange.entityId
+        )), false);
+    });
     it('delete inserted node clears delta entry', () => {
         const editor = ModelEditor.createSession(mockChainModel);
         const graph = editor.modified.getGraph();

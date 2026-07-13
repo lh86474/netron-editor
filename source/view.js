@@ -2766,8 +2766,9 @@ view.View = class {
             this._userDefSelectedMarkers.has(marker.nodeId) :
             false;
         const isUserDefSelectable = isUserDefSelected || (sourceGraph && this._isNodeCompatibleForUserDef(sourceGraph, node));
+        const canShowUserDef = isAmbapbCheckpoint(this._model);
 
-        if (node && node.type?.name !== 'UserDefCall' && node.type?.name !== 'UserDefSubgraph' && node.type?.name !== 'FragSubgraph' && isUserDefSelectable) {
+        if (canShowUserDef && node && node.type?.name !== 'UserDefCall' && node.type?.name !== 'UserDefSubgraph' && node.type?.name !== 'FragSubgraph' && isUserDefSelectable) {
             items.push({
                 label: isUserDefSelected ? 'Deselect Node for UserDefCall' : 'Select Node for UserDefCall',
                 action: () => {
@@ -2789,7 +2790,7 @@ view.View = class {
             });
             items.push({ separator: true });
         }
-        if (this._userDefSelectedMarkers.size > 0 && node.type?.name !== 'UserDefCall') {
+        if (canShowUserDef && this._userDefSelectedMarkers.size > 0 && node.type?.name !== 'UserDefCall') {
             items.push({
                 label: 'Create UserDefCall',
                 action: () => this._createUserDefCall()

@@ -153,11 +153,40 @@ export class DeltaTracker {
         this._emit();
     }
     // to support undo
+    // to support undo
     clearEntity(entityId) {
         if (this._changes.delete(entityId)) {
             this._emit();
         }
     }
+
+    // Clears a node and any child entity changes (e.g. graph:0/node:3/attr:0).
+    clearEntitySubtree(entityId) {
+        if (!entityId) {
+            return false;
+        }
+        let changed = false;
+        for (const [id, change] of [...this._changes.entries()]) {
+            const matchesId = id === entityId || id.startsWith(`${entityId}/`);
+            const matchesParent = change.parentId === entityId ||
+                (change.parentId && change.parentId.startsWith(`${entityId}/`));
+            if (matchesId || matchesParent) {
+                this._changes.delete(id);
+                changed = true;
+            }
+        }
+        for (const key of [...this._original.keys()]) {
+            if (key === entityId || key.startsWith(`${entityId}/`)) {
+                this._original.delete(key);
+                changed = true;
+            }
+        }
+        if (changed) {
+            this._emit();
+        }
+        return changed;
+    } 
+
     // to support redo
     exportSnapshot() {
         return {

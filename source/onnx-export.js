@@ -783,9 +783,15 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
             continue;
         }
         const originalNode = originalProto.graph.node[location.nodeIndex];
+        if (!originalNode) {
+            continue;
+        }
         const originalAttribute = (originalNode.attribute || [])[location.attributeIndex];
         if (originalAttribute && originalAttribute.name) {
             const node = graph.node[location.nodeIndex];
+            if (!node) {
+                continue;
+            }
             node.attribute = (node.attribute || []).filter((attribute) => attribute.name !== originalAttribute.name);
         }
     }
@@ -812,6 +818,9 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
             continue;
         }
         const node = graph.node[location.nodeIndex];
+        if (!node || !Array.isArray(node.attribute)) {
+            continue;
+        }
         const attribute = node.attribute[location.attributeIndex];
         if (!attribute) {
             continue;
@@ -857,6 +866,9 @@ const applyAttributeChanges = (graph, originalProto, editSession, changes) => {
             continue;
         }
         const node = graph.node[location.nodeIndex];
+        if (!node) {
+            continue;
+        }
         const modifiedNode = editSession.modified.getGraph(location.graphIndex).nodes[location.nodeIndex];
         const modifiedAttribute = (modifiedNode.attributes || []).find((entry) => entry.name === name);
         const attributeType = change.attributeType || (modifiedAttribute && modifiedAttribute.type) || 'string';

@@ -1739,6 +1739,121 @@ const bypassInputForOutput = (node, outputIndex) => {
     return dataInputs[0];
 };
 
+const valueProducerLabel = (graph, value) => {
+    if (!value) {
+        return 'unnamed';
+    }
+    const producers = findValueProducers(graph, value);
+    const labels = [];
+    for (const producer of producers) {
+        if (producer.node) {
+            labels.push(nodeDisplayName(producer.node));
+        } else if (producer.graphInput) {
+            labels.push((producer.argument && producer.argument.name) || 'graph input');
+        }
+    }
+    if (labels.length > 0) {
+        return labels.join('/');
+    }
+    return value.name || 'unnamed';
+};
+
+const dataInputCapacity = (node) => {
+    if (!node) {
+        return 0;
+    }
+    // Prefer declared arity when present (inserted nodes); otherwise count non-weight slots.
+    if (node.max_input !== undefined && node.max_input !== null) {
+        return node.max_input;
+    }
+    if (node.min_input !== undefined && node.min_input !== null) {
+        return node.min_input;
+    }
+    let count = 0;
+    for (let index = 0; index < (node.inputs || []).length; index++) {
+        const tensor = inputTensorAt(node, index);
+        if (!tensor || !tensor.initializer) {
+            count += 1;
+        }
+    }
+    return count;
+};
+
+const keptBypassInputs = (node, dataInputs) => {
+    const outputSlots = (node.outputs || []).length > 0 ? node.outputs.length : 1;
+    const kept = [];
+    const seen = new Set();
+    for (let index = 0; index < outputSlots; index++) {
+        const bypass = bypassInputForOutput(node, index);
+        if (!bypass) {
+            continue;
+        }
+        const key = bypass.name || bypass;
+        if (seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
+        kept.push(bypass);
+    }
+    if (kept.length === 0 && dataInputs.length > 0) {
+        kept.push(dataInputs[0]);
+    }
+    return kept;
+};
+
+const formatMergeDeleteWarning = (graph, node, dataInputs) => {
+    const deletedName = nodeDisplayName(node);
+    const kept = keptBypassInputs(node, dataInputs);
+    const keptSet = new Set(kept.map((tensor) => tensor.name || tensor));
+    const dropped = dataInputs.filter((tensor) => !keptSet.has(tensor.name || tensor));
+    const keptLabel = kept.map((tensor) => valueProducerLabel(graph, tensor)).join(', ');
+    const droppedLabel = dropped.map((tensor) => valueProducerLabel(graph, tensor)).join(', ');
+
+    const consumerParts = [];
+    const seenConsumers = new Set();
+    const outputSlots = (node.outputs || []).length > 0 ? node.outputs.length : 1;
+    for (let index = 0; index < outputSlots; index++) {
+        const outputValue = outputTensorAt(node, index);
+        if (!outputValue) {
+            continue;
+        }
+        for (const consumer of findValueConsumers(graph, outputValue)) {
+            if (!consumer.node || consumer.node === node) {
+                continue;
+            }
+            if (seenConsumers.has(consumer.node)) {
+                continue;
+            }
+            seenConsumers.add(consumer.node);
+            const capacity = dataInputCapacity(consumer.node);
+            const name = nodeDisplayName(consumer.node);
+            consumerParts.push(
+                capacity === 1
+                    ? `${name} takes 1 data input`
+                    : `${name} takes ${capacity} data inputs`
+            );
+        }
+    }
+
+    const pathWord = dataInputs.length === 1 ? 'path' : 'paths';
+    let message =
+        `Deleting ${deletedName} keeps only ${kept.length} of its ${dataInputs.length} input ${pathWord}` +
+        (keptLabel ? ` (from ${keptLabel})` : '') +
+        '.';
+
+    if (consumerParts.length > 0) {
+        message += ` Downstream ${consumerParts.join('; ')}, and this delete only rewires ${kept.length} path${kept.length === 1 ? '' : 's'} into the slot(s) that used ${deletedName}'s output.`;
+    } else {
+        message += ` Other input ${pathWord} are not reassigned.`;
+    }
+
+    if (dropped.length > 0) {
+        message += ` ${droppedLabel || `${dropped.length} branch${dropped.length === 1 ? '' : 'es'}`} may become unused.`;
+    }
+
+    return message;
+};
+
 export const cloneGraphModules = (modules) => readModel({ format: '', modules }).modules;
 
 export const cloneGraph = (graph) => cloneGraphModules([graph])[0];
@@ -1843,7 +1958,7 @@ export const analyzeDeleteNode = (graph, node) => {
         warnings.push({
             code: 'MERGE_NODE',
             level: 'warning',
-            message: 'Only the first data input path will be kept; other branches may become unused.'
+            message: formatMergeDeleteWarning(graph, node, dataInputs)
         });
     }
     const outputSlots = (node.outputs || []).length > 0 ? node.outputs.length : 1;
@@ -1866,10 +1981,14 @@ export const analyzeDeleteNode = (graph, node) => {
         }
     }
     if (predictedDangling.length > 0) {
+        const names = predictedDangling.map((entry) => nodeDisplayName(entry)).join(', ');
+        const hasMergeWarning = warnings.some((entry) => entry.code === 'MERGE_NODE');
         warnings.push({
             code: 'DANGLING_PREDICTED',
             level: 'warning',
-            message: `${predictedDangling.length} node${predictedDangling.length === 1 ? '' : 's'} may become unused (highlighted after delete).`,
+            message: hasMergeWarning
+                ? `Will highlight unused node${predictedDangling.length === 1 ? '' : 's'} after delete: ${names}.`
+                : `${predictedDangling.length} node${predictedDangling.length === 1 ? '' : 's'} may become unused (highlighted after delete): ${names}.`,
             nodes: predictedDangling
         });
     }
@@ -2136,8 +2255,23 @@ class EditorState {
             entityId = `${patch.parentId}/attr:${target.attributes.length - 1}`;
         } else if (patch.changeType === 'delete' && patch.entityType === 'attribute') {
             const location = parseAttributeEntityId(entityId);
-            const target = getAttributeTarget(this.modified.model, location);
-            target.attributes.splice(location.attributeIndex, 1);
+            const graph = this.modified.getGraph(location.graphIndex);
+            const wasAdded = this.delta.getState(entityId) === 'added';
+             // Drop attribute/child deltas for this node while its index is still valid.
+            this.delta.clearEntitySubtree(entityId);
+            deleteNode(graph, location.nodeIndex);
+            this.delta.remapNodeIndices(location.graphIndex, location.nodeIndex + 1, -1);
+            changeType = 'delete';
+            if (wasAdded) {
+                return {
+                    entityId,
+                    entityType: patch.entityType,
+                    changeType,
+                    property: patch.property,
+                    oldValue: undefined,
+                    newValue: patch.newValue
+                };
+            }
         } else if (patch.entityType === 'value') {
             const value = getValueByEntityId(this.modified.model, entityId);
             if (!value) {
