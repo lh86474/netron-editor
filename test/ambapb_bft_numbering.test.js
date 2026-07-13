@@ -20,6 +20,8 @@ import {
     collectBftSearchScopes,
     findEdgeByBftOrderInScope,
     findEdgeByBftOrderInViewGraph,
+    findModelGraphContainingTensor,
+    findViewEdgeForModelTensorInScope,
     findNodeByBftOrder,
     findNodeByBftOrderInGraph,
     findNodeByBftOrderInMainScope,
@@ -34,6 +36,7 @@ import {
     getBftOrderRangeForMainScope,
     getBftOrderRangeForScope,
     getCompiledGraphFromNode,
+    getGraphAttrNameForModelGraph,
     locateBftNodeInGraph,
     nodeIsInDisplayedGraph,
     parseBftEdgeOrderQuery,
@@ -2192,5 +2195,95 @@ describe('scoped find connection by order', () => {
         });
         const tensor = innerA.outputs[0].value[0];
         assert.equal(findModelGraphContainingTensor(graph, tensor), compiled);
+    });
+    it('findViewEdgeForModelTensorInScope finds inner frag edge after numbering', () => {
+        const { graph, paneViewGraph, innerEdge1, innerA } = buildNumberedNvpConnectionFixture();
+        const scopes = collectBftConnectionSearchScopes(graph, paneViewGraph);
+        const tensor = innerA.outputs[0].value[0];
+        const edge = findViewEdgeForModelTensorInScope(graph, paneViewGraph, scopes[1], tensor);
+        assert.equal(edge, innerEdge1);
+    });
+
+    it('getGraphAttrNameForModelGraph distinguishes graph and compiled_prim_graph on frags', () => {
+        const subgraphBody = { name: 'subgraph_body', nodes: [] };
+        const compiled = { name: 'compiled_body', nodes: [] };
+        const frag = {
+            name: 'frag',
+            type: { name: 'FragSubgraph' },
+            attributes: [
+                { name: 'graph', type: 'graph', value: subgraphBody },
+                { name: 'compiled_prim_graph', type: 'graph', value: compiled }
+            ]
+        };
+        assert.equal(getGraphAttrNameForModelGraph(frag, subgraphBody), 'graph');
+        assert.equal(getGraphAttrNameForModelGraph(frag, compiled), 'compiled_prim_graph');
+    });
+
+    it('findViewEdgeForModelTensorInScope uses modelGraph hint for frag graph attribute', () => {
+        const inner = {
+            name: 'sub_inner',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'y', value: [tensor('sub_out')] }]
+        };
+        const subgraphBody = {
+            name: 'subgraph_body',
+            inputs: [{ name: 'input', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'output', value: [tensor('sub_out')] }],
+            nodes: [inner]
+        };
+        const compiled = {
+            name: 'compiled_body',
+            inputs: [],
+            outputs: [],
+            nodes: []
+        };
+        const fragNode = {
+            name: 'frag',
+            type: { name: 'FragSubgraph' },
+            attributes: [
+                { name: 'graph', type: 'graph', value: subgraphBody },
+                { name: 'compiled_prim_graph', type: 'graph', value: compiled }
+            ],
+            inputs: [],
+            outputs: []
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [fragNode]
+        };
+        const innerEdges = new Map();
+        const innerEdge = registerEdge(innerEdges, mockEdge(
+            mockInputView(subgraphBody.inputs[0], -1, 0),
+            mockNodeView(inner, 0, 0),
+            subgraphBody.inputs[0].value[0]
+        ));
+        const subgraphBlock = mockGraphBlock(subgraphBody, innerEdges, new Map([
+            [inner, { x: 0, y: 0 }]
+        ]));
+        const paneViewGraph = mockRuntimeViewGraph(new Map([
+            [fragNode, { x: 0, y: 0 }],
+            [inner, { x: 0, y: 0 }]
+        ]), new Map(), [
+            mockExpandedShellView(fragNode, subgraphBlock, 0, 0)
+        ]);
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: paneViewGraph,
+            layoutDirection: 'horizontal'
+        });
+        const scopes = collectBftConnectionSearchScopes(graph, paneViewGraph);
+        const connectionTensor = subgraphBody.inputs[0].value[0];
+        const edge = findViewEdgeForModelTensorInScope(
+            graph,
+            paneViewGraph,
+            scopes[0],
+            connectionTensor,
+            subgraphBody
+        );
+        assert.equal(edge, innerEdge);
     });
 });

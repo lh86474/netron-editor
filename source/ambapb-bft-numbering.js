@@ -71,6 +71,32 @@ const getMainScopeSubgraphFromNode = (node) => getSubgraphGraphFromNode(node);
 
 export const getSubgraphGraphFromNode = (node) => getGraphAttribute(node, SUBGRAPH_GRAPH_ATTR);
 
+export const getGraphAttrNameForModelGraph = (shellNode, modelGraph) => {
+    if (!shellNode || !modelGraph) {
+        return null;
+    }
+    if (getCompiledPrimGraphFromNode(shellNode) === modelGraph) {
+        return 'compiled_prim_graph';
+    }
+    if (getSubgraphGraphFromNode(shellNode) === modelGraph) {
+        return 'graph';
+    }
+    return null;
+};
+
+export const findNestedViewGraphForModelGraph = (paneViewGraph, modelGraph) => {
+    if (!paneViewGraph || !modelGraph || !isViewGraphLike(paneViewGraph)) {
+        return null;
+    }
+    let found = null;
+    forEachNestedViewGraph(paneViewGraph, (nestedViewGraph) => {
+        if (!found && nestedViewGraph.target === modelGraph) {
+            found = nestedViewGraph;
+        }
+    });
+    return found;
+};
+
 export const getCompiledPrimGraphFromNode = (node) => getGraphAttribute(node, COMPILED_PRIM_GRAPH_ATTR);
 
 const isShellNode = (node, skipTypes = FRAG_SHELL_TYPES) => {
@@ -1177,10 +1203,18 @@ const walkMainScopeViewGraphs = (paneViewGraph, modelGraph, visitor) => {
         for (const node of graph.nodes || []) {
             const subgraph = getMainScopeSubgraphFromNode(node);
             const compiled = getCompiledPrimGraphFromNode(node);
-            if (compiled && !isRestartCompiledHost(node)) {
-                const nestedViewGraph = findNestedViewGraphForHost(paneViewGraph, node);
-                if (nestedViewGraph) {
-                    visitor(nestedViewGraph);
+            if (!isRestartCompiledHost(node)) {
+                if (subgraph) {
+                    const subgraphViewGraph = findNestedViewGraphForModelGraph(paneViewGraph, subgraph);
+                    if (subgraphViewGraph) {
+                        visitor(subgraphViewGraph);
+                    }
+                }
+                if (compiled) {
+                    const compiledViewGraph = findNestedViewGraphForModelGraph(paneViewGraph, compiled);
+                    if (compiledViewGraph) {
+                        visitor(compiledViewGraph);
+                    }
                 }
             }
             if (subgraph) {
@@ -1263,6 +1297,49 @@ export const findModelGraphContainingTensor = (rootModelGraph, tensor) => {
         }
     }
     return null;
+};
+
+export const findViewEdgeForModelTensorInScope = (
+    rootModelGraph, paneViewGraph, scope, tensor, modelGraphHint = null
+) => {
+    if (!tensor) {
+        return null;
+    }
+    const resolved = normalizeBftSearchScope(rootModelGraph, scope);
+    const matchesTensor = (edge) => {
+        const edgeTensor = edge.value && edge.value.value;
+        return edgeTensor === tensor ||
+            (tensor.name && edgeTensor && edgeTensor.name === tensor.name);
+    };
+    if (modelGraphHint && paneViewGraph) {
+        const scopedViewGraph = findNestedViewGraphForModelGraph(paneViewGraph, modelGraphHint);
+        if (scopedViewGraph) {
+            const edge = collectViewEdges(scopedViewGraph).find(matchesTensor);
+            if (edge) {
+                return edge;
+            }
+        }
+    }
+    if (resolved.kind === 'compiled_prim_graph') {
+        const scopedViewGraph = resolved.viewGraph ||
+            (resolved.graph && paneViewGraph ?
+                findNestedViewGraphForModelGraph(paneViewGraph, resolved.graph) :
+                null) ||
+            (resolved.hostNode && paneViewGraph ?
+                findNestedViewGraphForHost(paneViewGraph, resolved.hostNode) :
+                null);
+        if (scopedViewGraph) {
+            return collectViewEdges(scopedViewGraph).find(matchesTensor) || null;
+        }
+        return null;
+    }
+    let found = null;
+    walkMainScopeViewGraphs(paneViewGraph, rootModelGraph, (viewGraph) => {
+        if (!found) {
+            found = collectViewEdges(viewGraph).find(matchesTensor) || null;
+        }
+    });
+    return found;
 };
 
 export const isBftModelTensorConnection = (hit) => Boolean(hit && hit._modelTensor);
