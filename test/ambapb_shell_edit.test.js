@@ -17,7 +17,7 @@ import {
     syncShellAttribute,
     validateAmbapbPatch
 } from '../source/ambapb-editor.js';
-import { ModelEditor, getNodeByEntityId } from '../source/model-editor.js';
+import { ModelEditor, getNodeByEntityId, getValueByEntityId } from '../source/model-editor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -361,6 +361,93 @@ describe('ambapb shell editing', () => {
         assert.equal(attributeChange.changeType, 'modify');
         assert.deepEqual(attributeChange.oldValue, [1, 1]);
         assert.deepEqual(getNodeByEntityId(session.modified.model, nodeEntityId).attributes[0].value, [2, 2]);
+    });
+
+    it('adds attributes to doubly nested compiled connections, not the host node', () => {
+        // FragSubgraph.graph → CVFlowNVP.compiled_prim_graph → connection
+        const connection = {
+            name: 'tensor_in',
+            type: 'float32',
+            attributes: []
+        };
+        const hostNvp = {
+            name: 'inner_nvp',
+            type: { name: CVFLOW_NVP_OP_TYPE },
+            attributes: [
+                { name: 'existing', type: 'string', value: 'keep' },
+                {
+                    name: 'compiled_prim_graph',
+                    type: 'graph',
+                    value: {
+                        name: 'inner_compiled',
+                        _ambapbCompiledGraph: true,
+                        nodes: [{
+                            name: 'Conv_0',
+                            type: { name: 'Conv' },
+                            attributes: [],
+                            inputs: [{ name: 'input', value: [connection] }],
+                            outputs: []
+                        }],
+                        inputs: [],
+                        outputs: []
+                    }
+                }
+            ],
+            inputs: [],
+            outputs: []
+        };
+        const model = {
+            format: 'ONNX',
+            _ambapb: { canEdit: true },
+            modules: [{
+                name: 'shell',
+                nodes: [{
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [{
+                        name: 'graph',
+                        type: 'graph',
+                        value: {
+                            name: 'frag_body',
+                            nodes: [hostNvp],
+                            inputs: [],
+                            outputs: []
+                        }
+                    }],
+                    inputs: [],
+                    outputs: []
+                }],
+                inputs: [],
+                outputs: []
+            }]
+        };
+
+        const session = ModelEditor.createSession(model);
+        const valueId = 'graph:0/node:0/graph/node:0/compiled_prim_graph/value:0';
+        const hostNodeId = 'graph:0/node:0/graph/node:0';
+        const hostAttrCountBefore = getNodeByEntityId(session.modified.model, hostNodeId).attributes.length;
+
+        const change = session.applyPatch({
+            parentId: valueId,
+            entityType: 'attribute',
+            changeType: 'add',
+            property: 'attributes.test',
+            attributeType: 'string',
+            newValue: 'test'
+        });
+        assert.equal(change.parentId, valueId);
+        assert.equal(change.entityId, `${valueId}/attr:0`);
+        assert.equal(change.property, 'attributes.test');
+
+        const value = getValueByEntityId(session.modified.model, valueId);
+        assert.ok(value);
+        assert.equal(value.attributes.length, 1);
+        assert.equal(value.attributes[0].name, 'test');
+        assert.equal(value.attributes[0].value, 'test');
+
+        const hostNode = getNodeByEntityId(session.modified.model, hostNodeId);
+        assert.equal(hostNode.attributes.length, hostAttrCountBefore);
+        assert.equal(hostNode.attributes.some((entry) => entry.name === 'test'), false);
     });
 
     it('deep-clones nested compiled connection values with getter-based fields and metadata', () => {

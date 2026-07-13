@@ -289,6 +289,10 @@ const parseNestedNodeEntityPath = (entityId) => {
         });
         rest = rest.slice(chainMatch[0].length);
     }
+    // Reject prefixes of longer ids (e.g. .../node:0/compiled_prim_graph/value:0).
+    if (rest !== '') {
+        return null;
+    }
     return {
         graphIndex: Number(rootMatch[1]),
         segments,
@@ -499,19 +503,7 @@ const parseValueEntityId = (entityId) => {
 };
 
 const parseAttributeEntityId = (entityId) => {
-    const nestedNodePath = parseNestedNodeEntityPath(entityId);
-    if (nestedNodePath && nestedNodePath.segments) {
-        const last = nestedNodePath.segments[nestedNodePath.segments.length - 1];
-        return {
-            graphIndex: nestedNodePath.graphIndex,
-            target: 'nested-node',
-            hostNodeIndex: last.hostNodeIndex,
-            graphAttrName: last.graphAttrName,
-            targetIndex: last.nodeIndex,
-            segments: nestedNodePath.segments,
-            attributeIndex: nestedNodePath.attributeIndex
-        };
-    }
+    // Prefer value paths so .../node:N/.../value:M is never treated as a node id.
     const nestedValuePath = parseNestedValueEntityPath(entityId);
     if (nestedValuePath && nestedValuePath.segments && nestedValuePath.segments.length > 0) {
         const last = nestedValuePath.segments[nestedValuePath.segments.length - 1];
@@ -523,6 +515,19 @@ const parseAttributeEntityId = (entityId) => {
             targetIndex: nestedValuePath.valueIndex,
             segments: nestedValuePath.segments,
             attributeIndex: nestedValuePath.attributeIndex
+        };
+    }
+    const nestedNodePath = parseNestedNodeEntityPath(entityId);
+    if (nestedNodePath && nestedNodePath.segments) {
+        const last = nestedNodePath.segments[nestedNodePath.segments.length - 1];
+        return {
+            graphIndex: nestedNodePath.graphIndex,
+            target: 'nested-node',
+            hostNodeIndex: last.hostNodeIndex,
+            graphAttrName: last.graphAttrName,
+            targetIndex: last.nodeIndex,
+            segments: nestedNodePath.segments,
+            attributeIndex: nestedNodePath.attributeIndex
         };
     }
     const nestedMatch = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)(?:\/attr:(\d+))?$/.exec(entityId);
@@ -569,18 +574,7 @@ const parseAttributeEntityId = (entityId) => {
 };
 
 const parseAttributeParentId = (parentId) => {
-    const nestedNodePath = parseNestedNodeEntityPath(parentId);
-    if (nestedNodePath && nestedNodePath.segments && nestedNodePath.attributeIndex === null) {
-        const last = nestedNodePath.segments[nestedNodePath.segments.length - 1];
-        return {
-            graphIndex: nestedNodePath.graphIndex,
-            target: 'nested-node',
-            hostNodeIndex: last.hostNodeIndex,
-            graphAttrName: last.graphAttrName,
-            targetIndex: last.nodeIndex,
-            segments: nestedNodePath.segments
-        };
-    }
+    // Prefer value paths so .../node:N/.../value:M is never treated as a node id.
     const nestedValuePath = parseNestedValueEntityPath(parentId);
     if (nestedValuePath && nestedValuePath.segments && nestedValuePath.segments.length > 0 &&
         nestedValuePath.attributeIndex === null) {
@@ -592,6 +586,18 @@ const parseAttributeParentId = (parentId) => {
             graphAttrName: last.graphAttrName,
             targetIndex: nestedValuePath.valueIndex,
             segments: nestedValuePath.segments
+        };
+    }
+    const nestedNodePath = parseNestedNodeEntityPath(parentId);
+    if (nestedNodePath && nestedNodePath.segments && nestedNodePath.attributeIndex === null) {
+        const last = nestedNodePath.segments[nestedNodePath.segments.length - 1];
+        return {
+            graphIndex: nestedNodePath.graphIndex,
+            target: 'nested-node',
+            hostNodeIndex: last.hostNodeIndex,
+            graphAttrName: last.graphAttrName,
+            targetIndex: last.nodeIndex,
+            segments: nestedNodePath.segments
         };
     }
     const nestedMatch = /^graph:(\d+)\/node:(\d+)\/([^/]+)\/node:(\d+)$/.exec(parentId);

@@ -1,7 +1,7 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
-import { ModelEditor, locateNodeEntity, locateValueEntity, getNodeByEntityId, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers, buildEntityMapsForDisplayGraph } from './model-editor.js';
+import { getValueByEntityId, ModelEditor, locateNodeEntity, locateValueEntity, getNodeByEntityId, AttributeSchemaResolver, stringifyEditorJSON, enumerateGraphValues, buildNodeFromMetadata, genUniqueNodeName, extractSubgraph, SubgraphExtractError, analyzeDeleteNode, findDanglingNodes, NodeDeleteError, cloneGraph, locateGraphPath, getGraphByPath, findValueConsumers, buildEntityMapsForDisplayGraph } from './model-editor.js';
 import { canExportOnnx, exportModifiedOnnx, OnnxExportError, rebuildGraphProtoFromModified, rebuildGraphProtoFromModifiedWithAmbapb } from './onnx-export.js';
 import { canEditCheckpoint, isAmbapbCheckpoint, canExportCheckpoint } from './ambapb.js';
 import {
@@ -2030,6 +2030,17 @@ view.View = class {
         return entityId.replace(/\/attr:\d+$/, '');
     }
 
+    _resolveModelValueFromChange(change) {
+        if (!change || !this._editSession) {
+            return null;
+        }
+        const entityId = (change.parentId || change.entityId || '').replace(/\/attr:\d+$/, '');
+        if (!this._entityTargetsValue(entityId)) {
+            return null;
+        }
+        return getValueByEntityId(this._editSession.modified.model, entityId);
+    }
+
     _entityTargetsValue(entityId) {
         if (!entityId) {
             return false;
@@ -2121,10 +2132,14 @@ view.View = class {
         }
         const modelValue = sourceValueForEntity(staleValue) || staleValue;
         const displayGraph = this._resolveModifiedSourceGraph();
-        for (const node of displayGraph.nodes || []) {
-            for (const argList of [node.inputs, node.outputs, node.attributes, node.blocks]) {
+
+        const walkGraph = (graph) => {
+            if (!graph) {
+                return null;
+            }
+            const scanArgs = (argList) => {
                 if (!Array.isArray(argList)) {
-                    continue;
+                    return null;
                 }
                 for (const arg of argList) {
                     const values = Array.isArray(arg.value) ? arg.value : (arg.value ? [arg.value] : []);
@@ -2134,9 +2149,35 @@ view.View = class {
                         }
                     }
                 }
+                return null;
+            };
+            let found = scanArgs(graph.inputs) || scanArgs(graph.outputs);
+            if (found) {
+                return found;
             }
-        }
-        return staleValue;
+            for (const node of graph.nodes || []) {
+                found = scanArgs(node.inputs) || scanArgs(node.outputs);
+                if (found) {
+                    return found;
+                }
+                for (const argList of [node.attributes, node.blocks]) {
+                    if (!Array.isArray(argList)) {
+                        continue;
+                    }
+                    for (const arg of argList) {
+                        if (arg.type === 'graph' && arg.value) {
+                            found = walkGraph(arg.value);
+                            if (found) {
+                                return found;
+                            }
+                        }
+                    }
+                }
+            }
+            return null;
+        };
+
+        return walkGraph(displayGraph) || staleValue;
     }
 
     _resolveValueEntity(value) {
@@ -2191,7 +2232,7 @@ view.View = class {
         paneSidebar.open(sidebar, entry.title || 'Node Properties', 'sidebar');
     }
 
-    _refreshOpenConnectionSidebar() {
+    _refreshOpenConnectionSidebar(lastChange) {
         const paneSidebar = this._sidebars.modified;
         if (!this._editSession || paneSidebar.identifier !== 'connection') {
             return;
@@ -2201,7 +2242,8 @@ view.View = class {
         if (!current || !current._value) {
             return;
         }
-        const value = this._findDisplayValueForSidebar(current._value);
+        let value = this._resolveModelValueFromChange(lastChange) ||
+            this._findDisplayValueForSidebar(current._value);
         const sidebar = this._canEditModelContent() ?
             new view.EditableConnectionSidebar(this, value, current._from, current._to, this._editSession) :
             new view.ConnectionSidebar(this, value, current._from, current._to);
@@ -2211,7 +2253,7 @@ view.View = class {
 
     _refreshOpenSidebars(lastChange) {
         this._refreshOpenNodeSidebar(lastChange);
-        this._refreshOpenConnectionSidebar();
+        this._refreshOpenConnectionSidebar(lastChange);
     }
 
     _resolveNodeFromChange(change) {
@@ -10023,6 +10065,9 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
         this._to = to;
         this._editSession = editSession;
         this._entity = context._resolveValueEntity(value);
+        if (!this._entity && value._sourceEntityId) {
+            this._entity = { valueId: value._sourceEntityId };
+        }
     }
 
     get identifier() {
@@ -10031,10 +10076,18 @@ view.EditableConnectionSidebar = class extends view.EditableObjectSidebar {
 
     render() {
         const displayValue = this._value;
-        const value = sourceValueForEntity(displayValue) || displayValue;
         const from = this._from;
         const to = this._to;
-        const valueId = this._entity ? this._entity.valueId : null;
+        const valueId = (this._entity && this._entity.valueId) ||
+            displayValue._sourceEntityId ||
+            null;
+        let value = sourceValueForEntity(displayValue) || displayValue;
+        if (valueId && this._editSession) {
+            const modelValue = getValueByEntityId(this._editSession.modified.model, valueId);
+            if (modelValue) {
+                value = modelValue;
+            }
+        }
         const [name] = value.name.split('\n');
         if (valueId) {
             this.addEditableProperty('name', name, (newName) => {
