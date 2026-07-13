@@ -1711,12 +1711,12 @@ const inputTensorAt = (node, index) => tensorAt(node.inputs || [], index);
 const outputTensorAt = (node, index) => tensorAt(node.outputs || [], index);
 
 const dataInputTensors = (node) => {
-    const inputSlots = (node.inputs || []).length > 0 ? node.inputs.length : 1;
     const tensors = [];
-    for (let index = 0; index < inputSlots; index++) {
-        const tensor = inputTensorAt(node, index);
-        if (tensor && !tensor.initializer) {
-            tensors.push(tensor);
+    for (const argument of node.inputs || []) {
+        for (const value of argumentValues(argument)) {
+            if (value && !value.initializer) {
+                tensors.push(value);
+            }
         }
     }
     return tensors;
