@@ -1015,6 +1015,22 @@ const syncNodeAttributesFromModified = (protoNode, modifiedNode, originalNodesBy
     return attributes;
 };
 
+const syncPureOnnxNodeDescriptions = (graph, modifiedGraph) => {
+    const modifiedNodes = (modifiedGraph && modifiedGraph.nodes) || [];
+    const protoNodes = (graph && graph.node) || [];
+    const count = Math.min(modifiedNodes.length, protoNodes.length);
+    for (let index = 0; index < count; index++) {
+        const modifiedNode = modifiedNodes[index];
+        const protoNode = protoNodes[index];
+        if (!modifiedNode || !protoNode) {
+            continue;
+        }
+        if (modifiedNode.description !== undefined && modifiedNode.description !== null) {
+            protoNode.doc_string = String(modifiedNode.description);
+        }
+    }
+};
+
 const syncNodeFromModified = (protoNode, modifiedNode, originalNodesByName = null, nestedSourceGraph = null) => {
     syncNodeInputsOutputs(protoNode, modifiedNode);
     protoNode.name = modifiedNode.name || '';
@@ -1708,6 +1724,7 @@ const applyChanges = (cloned, originalProto, editSession, options = {}) => {
         applyFlatGraphFromModified(graph, originalProto, editSession, options.ambapbPrimGraph || null);
     } else {
         applyStructuralNodeChanges(graph, originalProto, editSession);
+        syncPureOnnxNodeDescriptions(graph, modifiedGraph);
     }
     return null;
 };

@@ -356,4 +356,19 @@ describe('ONNX export', () => {
         assert.equal(decoded.graph.node[0].input[0], 'x');
         assert.equal(decoded.graph.node[1].output[0], 'hidden2');
     });
+    it('exports node description edits for pure onnx', () => {
+        const proto = buildMinimalModel();
+        const viewModel = buildViewModel(proto);
+        const editor = ModelEditor.createSession(viewModel);
+        editor.applyPatch({
+            entityId: 'graph:0/node:0',
+            entityType: 'node',
+            changeType: 'modify',
+            property: 'description',
+            newValue: 'exported description'
+        });
+        const bytes = exportModifiedOnnx(viewModel, editor);
+        const decoded = onnx.ModelProto.decode(BinaryReader.open(bytes));
+        assert.equal(decoded.graph.node[0].doc_string, 'exported description');
+    });
 });
