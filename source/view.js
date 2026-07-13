@@ -772,7 +772,7 @@ view.View = class {
                 this._findNodeByOrder = state;
             });
             sidebar.on('select', async (sender, node) => {
-                await this._navigateAndSelectBftNode(node);
+                await this._navigateAndActivateBftNode(node);
             });
             sidebar.on('activate', async (sender, node) => {
                 await this._navigateAndActivateBftNode(node);
@@ -800,7 +800,7 @@ view.View = class {
                 this._findConnectionByOrder = state;
             });
             sidebar.on('select', async (sender, result) => {
-                await this._navigateAndSelectBftConnection(result);
+                await this._navigateAndActivateBftConnection(result);
             });
             sidebar.on('activate', async (sender, result) => {
                 await this._navigateAndActivateBftConnection(result);
@@ -1141,31 +1141,8 @@ view.View = class {
         if (!await this._expandBlocksForBftLocation(location, paneId)) {
             return false;
         }
+        await new Promise((resolve) => this._host.window.requestAnimationFrame(resolve));
         return this._scrollToNodeInFocusedPane(modelNode, source);
-    }
-
-    async _navigateAndSelectBftNode(modelNode, source = 'sidebar') {
-        const grapher = this._focusedPaneGrapher();
-        if (!grapher || !modelNode) {
-            return;
-        }
-        if (grapher._table && grapher._table.has(modelNode)) {
-            grapher.scrollTo(grapher.select([modelNode], source));
-            return;
-        }
-        const searchRoot = this._focusedPaneSearchTarget();
-        const location = locateBftNodeInGraph(searchRoot, modelNode);
-        if (!location || location.ancestors.length === 0) {
-            return;
-        }
-        const paneId = this._focusedPaneIdOrDefault();
-        if (!await this._expandBlocksForBftLocation(location, paneId)) {
-            return;
-        }
-        const refreshed = this._focusedPaneGrapher();
-        if (refreshed) {
-            refreshed.scrollTo(refreshed.select([modelNode], source));
-        }
     }
 
     _scrollToNodeInFocusedPane(modelNode, source = 'sidebar') {
@@ -1175,7 +1152,7 @@ view.View = class {
         }
         const elements = grapher.activate(modelNode, source);
         if (elements && elements.length > 0) {
-            grapher.scrollTo(elements, source);
+            grapher.scrollToCenter(elements);
             return true;
         }
         return false;
@@ -1257,7 +1234,7 @@ view.View = class {
         );
     }
 
-    _selectAndScrollToBftViewEdge(rootGrapher, edge) {
+    _selectAndActivateBftViewEdge(rootGrapher, edge, source = 'sidebar') {
         if (!rootGrapher || !edge) {
             return;
         }
@@ -1272,53 +1249,36 @@ view.View = class {
 
         let elements = [];
         if (context && tensor && context._table && context._table.has(tensor)) {
-            elements = context.select([tensor], 'sidebar') || [];
+            elements = context.select([tensor], source) || [];
         }
         if (elements.length === 0 && edge.element) {
             elements = edge.select();
         }
         if (elements.length > 0) {
-            rootGrapher.scrollTo(elements, 'sidebar');
+            rootGrapher.scrollToCenter(elements);
         }
-    }
-
-    async _navigateAndSelectBftConnection(result) {
-        const searchRoot = this._focusedPaneSearchTarget();
-        if (!searchRoot || !result) {
-            return;
-        }
-        const scopes = collectBftConnectionSearchScopes(searchRoot, this._focusedPaneGrapher());
-        const scope = scopes.find((entry) => entry.id === result.scopeId);
-        if (!scope) {
-            return;
-        }
-        const edge = await this._resolveBftConnectionViewEdge(result, scope);
-        if (!edge) {
-            return;
-        }
-        const grapher = this._focusedPaneGrapher();
-        this._selectAndScrollToBftViewEdge(grapher, edge);
-    }
-
-    async _navigateAndActivateBftConnection(result) {
-        const searchRoot = this._focusedPaneSearchTarget();
-        if (!searchRoot || !result) {
-            return false;
-        }
-        const scopes = collectBftConnectionSearchScopes(searchRoot, this._focusedPaneGrapher());
-        const scope = scopes.find((entry) => entry.id === result.scopeId);
-        if (!scope) {
-            return false;
-        }
-        const edge = await this._resolveBftConnectionViewEdge(result, scope);
-        if (!edge) {
-            return false;
-        }
-        const grapher = this._focusedPaneGrapher();
-        this._selectAndScrollToBftViewEdge(grapher, edge);
         if (edge.activate) {
-            edge.activate();
+            edge.activate(source);
         }
+    }
+
+    async _navigateAndActivateBftConnection(result, source = 'sidebar') {
+        const searchRoot = this._focusedPaneSearchTarget();
+        if (!searchRoot || !result) {
+            return false;
+        }
+        const scopes = collectBftConnectionSearchScopes(searchRoot, this._focusedPaneGrapher());
+        const scope = scopes.find((entry) => entry.id === result.scopeId);
+        if (!scope) {
+            return false;
+        }
+        const edge = await this._resolveBftConnectionViewEdge(result, scope);
+        if (!edge) {
+            return false;
+        }
+        const grapher = this._focusedPaneGrapher();
+        await new Promise((resolve) => this._host.window.requestAnimationFrame(resolve));
+        this._selectAndActivateBftViewEdge(grapher, edge, source);
         return true;
     }
 
@@ -6879,6 +6839,41 @@ view.Graph = class extends grapher.Graph {
         }
     }
 
+    scrollToCenter(selection, behavior) {
+        if (!selection || selection.length === 0) {
+            return;
+        }
+        const container = this._containerElement();
+        const rect = container.getBoundingClientRect();
+        const cw = container.clientWidth;
+        const ch = container.clientHeight;
+        const bounds = {};
+        bounds.left = (rect.x + cw / 2) - (cw * 0.45);
+        bounds.width = cw * 0.9;
+        bounds.top = (rect.y + ch / 2) - (ch * 0.45);
+        bounds.height = ch * 0.9;
+        let x = 0;
+        let y = 0;
+        for (const element of selection) {
+            const elementRect = element.getBoundingClientRect();
+            const width = Math.min(elementRect.width, bounds.width);
+            const height = Math.min(elementRect.height, bounds.height);
+            x += elementRect.left + (width / 2);
+            y += elementRect.top + (height / 2);
+        }
+        x /= selection.length;
+        y /= selection.length;
+        const options = {};
+        options.left = (container.scrollLeft + x - bounds.left) - (bounds.width / 2);
+        options.top = (container.scrollTop + y - bounds.top) - (bounds.height / 2);
+        options.behavior = view.Graph._scrollBehavior(behavior);
+        container.scrollTo(options);
+    }
+
+    static _scrollBehavior(behavior) {
+        return behavior === 'auto' || behavior === 'instant' || behavior === 'smooth' ? behavior : 'smooth';
+    }
+
     scrollTo(selection, behavior) {
         if (selection && selection.length > 0) {
             const container = this._containerElement();
@@ -6922,14 +6917,14 @@ view.Graph = class extends grapher.Graph {
                 const options = {};
                 options.left = (container.scrollLeft + x - bounds.left) - (bounds.width / 2);
                 options.top = (container.scrollTop + y - bounds.top) - (bounds.height / 2);
-                options.behavior = behavior || 'smooth';
+                options.behavior = view.Graph._scrollBehavior(behavior);
                 container.scrollTo(options);
                 return;
             }
             const options = {};
             options.left = 0;
             options.top = 0;
-            options.behavior = behavior || 'smooth';
+            options.behavior = view.Graph._scrollBehavior(behavior);
             // similar to scrollIntoView block: "nearest"
             const dr = bounds.right - right;
             const dl = left - bounds.left;
@@ -7939,8 +7934,8 @@ view.Edge = class extends grapher.Edge {
         this.value.context.blur([this.value.value]);
     }
 
-    activate() {
-        this.value.context.activate(this.value.value, 'target');
+    activate(source = 'target') {
+        this.value.context.activate(this.value.value, source);
     }
 };
 
