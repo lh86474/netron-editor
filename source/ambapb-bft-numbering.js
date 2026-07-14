@@ -667,18 +667,17 @@ const isFragShellHost = (node) => (
     node.type?.name === 'FragSubgraph' || node.type?.name === 'UserDefSubgraph'
 );
 
-const isRestartCompiledHost = (node) => (
-    node.type?.name === 'CVFlowNVP'
-);
-
 const collectCompiledGraphHosts = (graph) => {
-    return (graph.nodes || []).filter((node) => getCompiledGraphFromNode(node));
+    return (graph.nodes || []).filter((node) => getCompiledGraphFromNode(node) || getSubgraphGraphFromNode(node));
 };
 
 const graphHasCompiledGraphHosts = (graph) => {
     return collectCompiledGraphHosts(graph).length > 0;
 };
 
+// Nested compiled_prim_graph bodies are not numbered. FragSubgraph/UserDefSubgraph
+// `graph` attribute bodies continue the global node counter. Recurse into both so
+// nested `graph` shells deeper inside a compiled_prim_graph still get numbers.
 const assignNestedCompiledHosts = (graph, viewGraph, nodeCounter, layoutDirection) => {
     const entries = collectCompiledGraphHosts(graph).map((node, index) => ({
         node,
@@ -687,29 +686,18 @@ const assignNestedCompiledHosts = (graph, viewGraph, nodeCounter, layoutDirectio
     }));
     let nextCounter = nodeCounter;
     for (const entry of sortEntriesByVisualPosition(entries, layoutDirection)) {
-        const subGraph = getCompiledGraphFromNode(entry.node);
-        if (!subGraph) {
-            continue;
-        }
-        const restart = isRestartCompiledHost(entry.node);
-        const startCounter = restart ? 1 : nextCounter;
-        const endCounter = assignNumbersToGraphNodes(subGraph, viewGraph, startCounter, {
-            assignUnreachableAtEnd: !restart,
-            entryOnlySources: true,
-            layoutDirection
-        });
-        assignNestedCompiledHosts(subGraph, viewGraph, endCounter, layoutDirection);
+        const compiledPrim = getCompiledPrimGraphFromNode(entry.node);
         const subgraphDef = getSubgraphGraphFromNode(entry.node);
-        if (subgraphDef && subgraphDef !== subGraph && !restart) {
-            const defEndCounter = assignNumbersToGraphNodes(subgraphDef, viewGraph, endCounter, {
+        if (compiledPrim) {
+            nextCounter = assignNestedCompiledHosts(compiledPrim, viewGraph, nextCounter, layoutDirection);
+        }
+        if (subgraphDef && subgraphDef !== compiledPrim) {
+            nextCounter = assignNumbersToGraphNodes(subgraphDef, viewGraph, nextCounter, {
                 assignUnreachableAtEnd: true,
                 entryOnlySources: true,
                 layoutDirection
             });
-            assignNestedCompiledHosts(subgraphDef, viewGraph, defEndCounter, layoutDirection);
-            nextCounter = defEndCounter;
-        } else if (!restart) {
-            nextCounter = endCounter;
+            nextCounter = assignNestedCompiledHosts(subgraphDef, viewGraph, nextCounter, layoutDirection);
         }
     }
     return nextCounter;
@@ -774,7 +762,7 @@ export const assignBftNumbers = (ctx) => {
         applyPersistedBftNumbersToGraph(displayGraph, sourceBftByNode);
     } else {
         let nodeCounter = assignNumbersToGraphNodes(displayGraph, viewGraph, 1, {
-            assignUnreachableAtEnd: compiledLike,
+            assignUnreachableAtEnd: false,
             entryOnlySources: resolveEntryOnlySources(displayGraph, compiledLike),
             layoutDirection
         });
@@ -835,7 +823,37 @@ const assignEdgeNumbersInScope = (viewGraph, layoutDirection, counter) => {
     return nextCounter;
 };
 
-const assignNestedCompiledHostEdges = (modelGraph, viewGraph, layoutDirection, counter) => {
+const hostNestedModelGraphs = (host) => {
+    const graphs = [];
+    const compiledPrim = getCompiledPrimGraphFromNode(host);
+    const subgraphDef = getSubgraphGraphFromNode(host);
+    if (compiledPrim) {
+        graphs.push(compiledPrim);
+    }
+    if (subgraphDef && subgraphDef !== compiledPrim) {
+        graphs.push(subgraphDef);
+    }
+    return graphs;
+};
+
+const assignHostNestedEdges = (host, viewGraph, layoutDirection, counter) => {
+    const nestedViewGraph = findNestedViewGraphForHost(viewGraph, host);
+    let nextCounter = counter;
+    if (nestedViewGraph) {
+        nextCounter = assignEdgeNumbersInScope(nestedViewGraph, layoutDirection, nextCounter);
+    } else {
+        for (const nested of hostNestedModelGraphs(host)) {
+            nextCounter = assignModelGraphEdgeNumbersInScope(nested, nextCounter);
+        }
+    }
+    for (const nested of hostNestedModelGraphs(host)) {
+        nextCounter = assignNestedHostsEdges(nested, viewGraph, layoutDirection, nextCounter);
+    }
+    return nextCounter;
+};
+
+// All nested hosts (NVP + Frag) inside a model graph, visual order.
+const assignNestedHostsEdges = (modelGraph, viewGraph, layoutDirection, counter) => {
     const entries = collectCompiledGraphHosts(modelGraph).map((node, index) => ({
         node,
         view: findViewNode(viewGraph, node),
@@ -843,27 +861,87 @@ const assignNestedCompiledHostEdges = (modelGraph, viewGraph, layoutDirection, c
     }));
     let nextCounter = counter;
     for (const entry of sortEntriesByVisualPosition(entries, layoutDirection)) {
-        const subGraph = getCompiledGraphFromNode(entry.node);
-        const nestedViewGraph = findNestedViewGraphForHost(viewGraph, entry.node);
-        if (!nestedViewGraph) {
-            if (subGraph) {
-                if (isRestartCompiledHost(entry.node)) {
-                    assignModelGraphEdgeNumbersInScope(subGraph, 1);
-                } else {
-                    nextCounter = assignModelGraphEdgeNumbersInScope(subGraph, nextCounter);
-                }
-                nextCounter = assignNestedCompiledHostEdges(subGraph, viewGraph, layoutDirection, nextCounter);
-            }
+        nextCounter = assignHostNestedEdges(entry.node, viewGraph, layoutDirection, nextCounter);
+    }
+    return nextCounter;
+};
+
+// Main-graph edges first, diving into non-Frag compiled_prim_graph hosts in
+// top-level node order; FragSubgraph/UserDefSubgraph bodies are numbered after.
+const assignMainEdgesWithCompiledDive = (modelGraph, viewGraph, layoutDirection, counter) => {
+    if (!isViewGraphLike(viewGraph)) {
+        return counter;
+    }
+
+    const inputEdges = [];
+    const internalEdges = [];
+    const outputEdges = [];
+    for (const edge of collectViewEdges(viewGraph)) {
+        if (!edge.from || !edge.to) {
             continue;
         }
-        if (isRestartCompiledHost(entry.node)) {
-            assignEdgeNumbersInScope(nestedViewGraph, layoutDirection, 1);
-        } else {
-            nextCounter = assignEdgeNumbersInScope(nestedViewGraph, layoutDirection, nextCounter);
+        if (edge.from.class === 'graph-input') {
+            inputEdges.push(edge);
+        } else if (edge.to.class === 'graph-output') {
+            outputEdges.push(edge);
+        } else if (!isGraphTerminalViewNode(edge.from) && !isGraphTerminalViewNode(edge.to)) {
+            internalEdges.push(edge);
         }
-        if (subGraph) {
-            nextCounter = assignNestedCompiledHostEdges(subGraph, viewGraph, layoutDirection, nextCounter);
+    }
+
+    const numbered = new Set();
+    let nextCounter = counter;
+    const numberEdge = (edge) => {
+        if (!edge || numbered.has(edge) || edge._bftEdgeNumber != null) {
+            return;
         }
+        numbered.add(edge);
+        mirrorEdgeNumberToTensor(edge, nextCounter++);
+    };
+
+    for (const edge of orderTerminalEdges(inputEdges, layoutDirection)) {
+        numberEdge(edge);
+    }
+
+    const orderedNodes = orderedGraphNodes(modelGraph, viewGraph, {
+        skipTypes: FRAG_SHELL_TYPES,
+        assignUnreachableAtEnd: false,
+        entryOnlySources: resolveEntryOnlySources(modelGraph, false),
+        layoutDirection
+    });
+    for (const entry of orderedNodes) {
+        const fromNode = entry.node;
+        for (const edge of orderInternalEdges(internalEdges, layoutDirection)) {
+            if (viewNodeModelValue(edge.from) === fromNode) {
+                numberEdge(edge);
+            }
+        }
+        const compiledPrim = getCompiledPrimGraphFromNode(fromNode);
+        if (compiledPrim && !isFragShellHost(fromNode)) {
+            nextCounter = assignHostNestedEdges(fromNode, viewGraph, layoutDirection, nextCounter);
+        }
+    }
+
+    for (const edge of orderInternalEdges(internalEdges, layoutDirection)) {
+        numberEdge(edge);
+    }
+    for (const edge of orderOutputTerminalEdges(outputEdges, layoutDirection)) {
+        numberEdge(edge);
+    }
+    return nextCounter;
+};
+
+const assignFragShellEdgesAfterMain = (modelGraph, viewGraph, layoutDirection, counter) => {
+    const entries = (modelGraph.nodes || [])
+        .filter((node) => isFragShellHost(node) && (getCompiledGraphFromNode(node) || getSubgraphGraphFromNode(node)))
+        .map((node, index) => ({
+            node,
+            view: findViewNode(viewGraph, node),
+            fallbackIndex: index
+        }));
+    let nextCounter = counter;
+    for (const entry of sortEntriesByVisualPosition(entries, layoutDirection)) {
+        nextCounter = assignHostNestedEdges(entry.node, viewGraph, layoutDirection, nextCounter);
     }
     return nextCounter;
 };
@@ -884,10 +962,13 @@ export const assignEdgeBftNumbers = (ctx) => {
 
     clearAllViewEdgeNumbers(viewGraph);
 
-    let counter = assignEdgeNumbersInScope(viewGraph, layoutDirection, 1);
-    if (displayGraph) {
-        counter = assignNestedCompiledHostEdges(displayGraph, viewGraph, layoutDirection, counter);
+    if (!displayGraph) {
+        assignEdgeNumbersInScope(viewGraph, layoutDirection, 1);
+        return;
     }
+
+    let counter = assignMainEdgesWithCompiledDive(displayGraph, viewGraph, layoutDirection, 1);
+    counter = assignFragShellEdgesAfterMain(displayGraph, viewGraph, layoutDirection, counter);
 };
 
 export const resolveNodeBftNumber = (node) => {
@@ -943,13 +1024,11 @@ const collectMainScopeGraphs = (rootGraph, graphs = new Set()) => {
     }
     graphs.add(rootGraph);
     for (const node of rootGraph.nodes || []) {
+        // Node numbers live on the main graph and on Frag/UserDef `graph`
+        // bodies — never inside compiled_prim_graph.
         const subgraph = getMainScopeSubgraphFromNode(node);
         if (subgraph) {
             collectMainScopeGraphs(subgraph, graphs);
-        }
-        const compiled = getCompiledPrimGraphFromNode(node);
-        if (compiled && !isRestartCompiledHost(node)) {
-            collectMainScopeGraphs(compiled, graphs);
         }
     }
     return graphs;
@@ -960,38 +1039,12 @@ export const collectBftSearchScopes = (rootGraph) => {
         return [];
     }
     const rootName = rootGraph.name || 'Graph';
-    const scopes = [{
+    return [{
         id: 'root',
         kind: 'main',
         graph: rootGraph,
         label: `${rootName} (main graph)`
     }];
-    const walkRestartCompiled = (graph, idPath, labelParts) => {
-        for (const node of graph.nodes || []) {
-            const hostName = node.name || node.type?.name || 'subgraph';
-            const childPath = idPath.concat(hostName);
-            const childLabels = labelParts.concat(hostName);
-            const subgraph = getMainScopeSubgraphFromNode(node);
-            const compiled = getCompiledPrimGraphFromNode(node);
-            if (compiled && isRestartCompiledHost(node)) {
-                scopes.push({
-                    id: childPath.join('/'),
-                    kind: 'compiled_prim_graph',
-                    graph: compiled,
-                    hostNode: node,
-                    label: `${childLabels.join(' / ')} (compiled_prim_graph)`
-                });
-            }
-            if (subgraph) {
-                walkRestartCompiled(subgraph, childPath, childLabels);
-            }
-            if (compiled) {
-                walkRestartCompiled(compiled, childPath, childLabels);
-            }
-        }
-    };
-    walkRestartCompiled(rootGraph, ['root'], [rootName]);
-    return scopes;
 };
 
 export const getBftOrderRangeForGraph = (graph) => {
@@ -1203,24 +1256,18 @@ const walkMainScopeViewGraphs = (paneViewGraph, modelGraph, visitor) => {
         for (const node of graph.nodes || []) {
             const subgraph = getMainScopeSubgraphFromNode(node);
             const compiled = getCompiledPrimGraphFromNode(node);
-            if (!isRestartCompiledHost(node)) {
-                if (subgraph) {
-                    const subgraphViewGraph = findNestedViewGraphForModelGraph(paneViewGraph, subgraph);
-                    if (subgraphViewGraph) {
-                        visitor(subgraphViewGraph);
-                    }
-                }
-                if (compiled) {
-                    const compiledViewGraph = findNestedViewGraphForModelGraph(paneViewGraph, compiled);
-                    if (compiledViewGraph) {
-                        visitor(compiledViewGraph);
-                    }
-                }
-            }
             if (subgraph) {
+                const subgraphViewGraph = findNestedViewGraphForModelGraph(paneViewGraph, subgraph);
+                if (subgraphViewGraph) {
+                    visitor(subgraphViewGraph);
+                }
                 walk(subgraph);
             }
             if (compiled) {
+                const compiledViewGraph = findNestedViewGraphForModelGraph(paneViewGraph, compiled);
+                if (compiledViewGraph) {
+                    visitor(compiledViewGraph);
+                }
                 walk(compiled);
             }
         }
@@ -1259,7 +1306,7 @@ export const getBftEdgeOrderRangeForMainScopeFromModel = (rootModelGraph) => {
         return null;
     }
     let max = 0;
-    for (const graph of collectMainScopeGraphs(rootModelGraph)) {
+    for (const graph of collectNestedGraphs(rootModelGraph)) {
         const range = getBftEdgeOrderRangeForModelGraph(graph);
         if (range) {
             max = Math.max(max, range.max);
@@ -1272,7 +1319,7 @@ export const findTensorByBftOrderInMainScopeFromModel = (rootModelGraph, order) 
     if (!rootModelGraph || !Number.isInteger(order) || order <= 0) {
         return null;
     }
-    for (const graph of collectMainScopeGraphs(rootModelGraph)) {
+    for (const graph of collectNestedGraphs(rootModelGraph)) {
         const tensor = findTensorByBftOrderInModelGraph(graph, order);
         if (tensor) {
             return tensor;
@@ -1285,7 +1332,7 @@ export const findModelGraphContainingTensor = (rootModelGraph, tensor) => {
     if (!rootModelGraph || !tensor) {
         return null;
     }
-    for (const graph of collectMainScopeGraphs(rootModelGraph)) {
+    for (const graph of collectNestedGraphs(rootModelGraph)) {
         let found = false;
         forEachTensorInGraph(graph, (candidate) => {
             if (candidate === tensor || (tensor.name && candidate.name === tensor.name)) {
@@ -1543,15 +1590,22 @@ export const nodeIsInDisplayedGraph = (node, displayGraph) => {
 const pickLowestBftNode = (entries) => {
     let best = null;
     let bestOrder = Infinity;
+    let fallback = null;
     for (const entry of entries) {
         const node = entry && entry.node;
+        if (!node) {
+            continue;
+        }
+        if (!fallback) {
+            fallback = node;
+        }
         const order = resolveNodeBftNumber(node);
-        if (node && order != null && order < bestOrder) {
+        if (order != null && order < bestOrder) {
             best = node;
             bestOrder = order;
         }
     }
-    return best;
+    return best || fallback;
 };
 
 export const resolveTensorSourceNode = (displayGraph, tensorName, role) => {
@@ -1632,25 +1686,31 @@ const assignModelEdgeNumbersForDisplayGraph = (displayGraph) => {
         return;
     }
     let counter = assignModelGraphEdgeNumbersInScope(displayGraph, 1);
-    const walk = (graph) => {
-        for (const node of graph.nodes || []) {
-            const compiled = getCompiledGraphFromNode(node);
-            const subgraphDef = getSubgraphGraphFromNode(node);
-            if (compiled) {
-                if (isRestartCompiledHost(node)) {
-                    assignModelGraphEdgeNumbersInScope(compiled, 1);
-                } else {
-                    counter = assignModelGraphEdgeNumbersInScope(compiled, counter);
-                }
-                walk(compiled);
+
+    const assignNestedFromHosts = (graph, includeFragShells) => {
+        const hosts = (graph.nodes || []).filter((node) => {
+            const hasNested = getCompiledPrimGraphFromNode(node) || getSubgraphGraphFromNode(node);
+            if (!hasNested) {
+                return false;
             }
-            if (subgraphDef && subgraphDef !== compiled) {
-                counter = assignModelGraphEdgeNumbersInScope(subgraphDef, counter);
-                walk(subgraphDef);
+            return includeFragShells ? isFragShellHost(node) : !isFragShellHost(node);
+        });
+        const entries = hosts.map((node, index) => ({
+            node,
+            view: null,
+            fallbackIndex: index
+        }));
+        for (const entry of sortEntriesByVisualPosition(entries, 'horizontal')) {
+            for (const nested of hostNestedModelGraphs(entry.node)) {
+                counter = assignModelGraphEdgeNumbersInScope(nested, counter);
+                assignNestedFromHosts(nested, false);
+                assignNestedFromHosts(nested, true);
             }
         }
     };
-    walk(displayGraph);
+
+    assignNestedFromHosts(displayGraph, false);
+    assignNestedFromHosts(displayGraph, true);
 };
 
 export const formatBftModelTensorLabel = (tensor, modelGraph) => {
