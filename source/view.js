@@ -4500,6 +4500,7 @@ view.View = class {
     }
 
     async pushTarget(graph, context, paneId) {
+        paneId = paneId || this._focusedPaneIdOrDefault()
         const isMergePane = Boolean(paneId && paneId.startsWith('merge-'));
 
         if (paneId === 'original' || paneId === 'modified') {
@@ -7672,7 +7673,8 @@ view.Node = class extends grapher.Node {
             const blockEntityPrefix = this._blockEntityPrefix(argument.name, blockKey);
             if (type === 'graph' && blockKey && this.context.isBlockExpanded(blockKey)) {
                 content = this.context.createGraph(argument.value, 'graph', blockKey, this.value);
-                content.blocks.push(new view.Block(this.context.view, argument.value, this.context.blocks, blockEntityPrefix, this.context.deltaTracker));
+                content.blocks.push(new view.Block(
+                    this.context.view, argument.value, this.context.blocks, blockEntityPrefix, this.context.deltaTracker, this.context));
                 content.activate = () => this.context.view.showTargetProperties(argument.value);
                 const item = list().argument(argument.name, content);
                 list().add(item);
@@ -7771,10 +7773,12 @@ view.Node = class extends grapher.Node {
 
 view.Block = class {
 
-    constructor(viewRef, target, blocks, entityIdPrefix, deltaTracker = null) {
+    constructor(viewRef, target, blocks, entityIdPrefix, deltaTracker = null, parentGraph = null) {
         this.target = new view.Graph(viewRef, false, {
             entityIdPrefix,
-            deltaTracker
+            deltaTracker,
+            paneId: parentGraph ? parentGraph.paneId : '',
+            readOnly: parentGraph ? Boolean(parentGraph.readOnly) : false
         });
         if (blocks) {
             this.target.blocks = blocks;
