@@ -2096,6 +2096,51 @@ view.View = class {
         return change || null;
     }
 
+    _focusFromEditorChange(change) {
+        if (!change) {
+            return null;
+        }
+        const stripAttr = (id) => (id || '').replace(/\/attr:\d+$/, '') || null;
+        let entityId = this._entityIdFromChange(change);
+        if (!entityId && change.entityId) {
+            entityId = this._modelNodeIdFromEntityId(stripAttr(change.entityId));
+        }
+        if (entityId && this._entityTargetsValue(entityId)) {
+            entityId = stripAttr(change.parentId) || null;
+        }
+        const anchorId = stripAttr(change.parentId);
+        return {
+            entityId: entityId || null,
+            anchorId: anchorId && anchorId !== entityId ? anchorId : null,
+            changeType: change.changeType || null,
+            entityType: change.entityType || null
+        };
+    }
+
+    _resolveNodeFromEditFocus(focus) {
+        if (!focus || !this._editSession) {
+            return null;
+        }
+        const model = this._editSession.modified.model;
+        const tryId = (id) => {
+            if (!id) {
+                return null;
+            }
+            return getNodeByEntityId(model, this._modelNodeIdFromEntityId(id));
+        };
+        // Prefer primary target; fall back to insert/delete anchor when node is gone
+        return tryId(focus.entityId) || tryId(focus.anchorId);
+    }
+
+    async _teleportToEditFocus(focus) {
+        const node = this._resolveNodeFromEditFocus(focus);
+        if (!node) {
+            return;
+        }
+        const displayNode = this._findDisplayNodeForSidebar(node) || node;
+        await this._navigateAndActivateBftNode(displayNode, 'sidebar');
+    }
+
     _entityIdFromChange(change) {
         if (!change || !change.entityId) {
             return null;
@@ -2469,6 +2514,7 @@ view.View = class {
         try {
             this._syncBatchInlineToSession();
             this._editSession.history.undo(this._editSession);
+            const focus = this._editSession.history.lastFocus;
             this._invalidateDisplayGraphCache();
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
@@ -2476,6 +2522,7 @@ view.View = class {
             this._closeGraphOverlays();
             this._closeAllSidebars();
             await this._refreshModifiedPane();
+            await this._teleportToEditFocus(focus);
         } catch (error) {
             this.error(error, 'Error undoing edit.', null);
         } finally {
@@ -2492,6 +2539,7 @@ view.View = class {
         try {
             this._syncBatchInlineToSession();
             this._editSession.history.redo(this._editSession);
+            const focus = this._editSession.history.lastFocus;
             this._invalidateDisplayGraphCache();
             this._syncBatchInlineFromSession();
             this._danglingNodeNames.clear();
@@ -2499,6 +2547,7 @@ view.View = class {
             this._closeGraphOverlays();
             this._closeAllSidebars();
             await this._refreshModifiedPane();
+            await this._teleportToEditFocus(focus);
         } catch (error) {
             this.error(error, 'Error redoing edit.', null);
         } finally {
@@ -2599,6 +2648,7 @@ view.View = class {
             this.error(error, 'Error applying edit.', null);
             return null;
         }
+        this._editSession.history.setLastFocus(this._focusFromEditorChange(change || patch));
         // eslint-disable-next-line no-console
         console.log('[editor] Patch applied:', stringifyEditorJSON(patch));
         // eslint-disable-next-line no-console
@@ -3715,7 +3765,7 @@ view.View = class {
                 await this._host.message(analysis.blockReason, true, 'OK');
                 return;
             }
-            if (analysis.needsConfirm || analysis.warnings.length > 0) {
+            if (analysis.needsConfirm) {
                 const confirmed = await this._host.confirm(
                     this._formatDeleteWarningMessage(node, analysis),
                     { title: 'Delete Node', confirmLabel: 'Delete', cancelLabel: 'Cancel' }

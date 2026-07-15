@@ -33,6 +33,7 @@ export class EditHistory {
         this._undoStack = [];
         this._redoStack = [];
         this._maxSize = maxSize;
+        this._lastFocus = null;
     }
 
     get canUndo() {
@@ -43,6 +44,10 @@ export class EditHistory {
         return this._redoStack.length > 0;
     }
 
+    get lastFocus() {
+        return this._lastFocus;
+    }
+
     checkpoint(session) {
         this._undoStack.push(this._capture(session));
         if (this._undoStack.length > this._maxSize) {
@@ -51,12 +56,23 @@ export class EditHistory {
         this._redoStack = [];
     }
 
+    setLastFocus(focus) {
+        if (this._undoStack.length === 0) {
+            return;
+        }
+        this._undoStack[this._undoStack.length - 1].focus = focus ? { ...focus } : null;
+    }
+
     undo(session) {
         if (!this.canUndo) {
             return false;
         }
-        this._redoStack.push(this._capture(session));
-        this._restore(session, this._undoStack.pop());
+        const previous = this._undoStack.pop();
+        const current = this._capture(session);
+        current.focus = previous.focus || null;
+        this._redoStack.push(current);
+        this._restore(session, previous);
+        this._lastFocus = previous.focus || null;
         return true;
     }
 
@@ -64,14 +80,19 @@ export class EditHistory {
         if (!this.canRedo) {
             return false;
         }
-        this._undoStack.push(this._capture(session));
-        this._restore(session, this._redoStack.pop());
+        const previous = this._redoStack.pop();
+        const current = this._capture(session);
+        current.focus = previous.focus || null;
+        this._undoStack.push(current);
+        this._restore(session, previous);
+        this._lastFocus = previous.focus || null;
         return true;
     }
 
     clear() {
         this._undoStack = [];
         this._redoStack = [];
+        this._lastFocus = null;
     }
 
     _capture(session) {
