@@ -1859,44 +1859,39 @@ export const cloneGraphModules = (modules) => readModel({ format: '', modules })
 export const cloneGraph = (graph) => cloneGraphModules([graph])[0];
 
 export const findDanglingNodes = (graph) => {
-    const dangling = [];
-    const graphOutputNames = new Set();
+    const nodes = graph.nodes || [];
+    if (nodes.length === 0) {
+        return [];
+    }
+    const live = new Set();
+    const queue = [];
     for (const output of graph.outputs || []) {
         for (const value of argumentValues(output)) {
-            if (value && value.name) {
-                graphOutputNames.add(value.name);
+            if (!value) {
+                continue;
+            }
+            for (const producer of findValueProducers(graph, value)) {
+                if (producer.node) {
+                    queue.push(producer.node);
+                }
             }
         }
     }
-    for (const node of graph.nodes || []) {
-        const outputs = node.outputs || [];
-        if (outputs.length === 0) {
+    while (queue.length > 0) {
+        const node = queue.shift();
+        if (live.has(node)) {
             continue;
         }
-        let allUnused = true;
-        for (const output of outputs) {
-            for (const value of argumentValues(output)) {
-                if (!value || !value.name) {
-                    continue;
-                }
-                if (graphOutputNames.has(value.name)) {
-                    allUnused = false;
-                    break;
-                }
-                if (findValueConsumers(graph, value).length > 0) {
-                    allUnused = false;
-                    break;
+        live.add(node);
+        for (const value of dataInputTensors(node)) {
+            for (const producer of findValueProducers(graph, value)) {
+                if (producer.node && !live.has(producer.node)) {
+                    queue.push(producer.node);
                 }
             }
-            if (!allUnused) {
-                break;
-            }
-        }
-        if (allUnused) {
-            dangling.push(node);
         }
     }
-    return dangling;
+    return nodes.filter((node) => !live.has(node));
 };
 
 const rewireAndRemoveNode = (graph, nodeIndex) => {
