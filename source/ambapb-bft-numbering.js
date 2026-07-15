@@ -839,11 +839,18 @@ const hostNestedModelGraphs = (host) => {
 const assignHostNestedEdges = (host, viewGraph, layoutDirection, counter) => {
     const nestedViewGraph = findNestedViewGraphForHost(viewGraph, host);
     let nextCounter = counter;
+    if (nestedViewGraph && nestedViewGraph.target) {
+        nextCounter = assignMainEdgesWithCompiledDive(nestedViewGraph.target, nestedViewGraph, layoutDirection, nextCounter);
+        nextCounter = assignFragShellEdgesAfterMain(nestedViewGraph.target, viewGraph, layoutDirection, nextCounter);
+        return nextCounter;
+    } 
     if (nestedViewGraph) {
         nextCounter = assignEdgeNumbersInScope(nestedViewGraph, layoutDirection, nextCounter);
     } else {
         for (const nested of hostNestedModelGraphs(host)) {
-            nextCounter = assignModelGraphEdgeNumbersInScope(nested, nextCounter);
+            nextCounter = assignModelGraphEdgeNumbersInScope(nested, nextCounter, {
+                reserveSharedInputs: true
+            });
         }
     }
     for (const nested of hostNestedModelGraphs(host)) {
@@ -911,14 +918,14 @@ const assignMainEdgesWithCompiledDive = (modelGraph, viewGraph, layoutDirection,
     });
     for (const entry of orderedNodes) {
         const fromNode = entry.node;
+        const compiledPrim = getCompiledPrimGraphFromNode(fromNode);
+        if (compiledPrim && !isFragShellHost(fromNode)) {
+            nextCounter = assignHostNestedEdges(fromNode, viewGraph, layoutDirection, nextCounter);
+        }
         for (const edge of orderInternalEdges(internalEdges, layoutDirection)) {
             if (viewNodeModelValue(edge.from) === fromNode) {
                 numberEdge(edge);
             }
-        }
-        const compiledPrim = getCompiledPrimGraphFromNode(fromNode);
-        if (compiledPrim && !isFragShellHost(fromNode)) {
-            nextCounter = assignHostNestedEdges(fromNode, viewGraph, layoutDirection, nextCounter);
         }
     }
 
@@ -1623,58 +1630,122 @@ export const resolveTensorSourceNode = (displayGraph, tensorName, role) => {
     );
 };
 
-const assignModelGraphEdgeNumbersInScope = (modelGraph, counter) => {
+
+const modelConsumerEdgeCount = (modelGraph, tensor, nodeSet) => {
+    let count = 0;
+    for (const entry of findValueConsumers(modelGraph, tensor)) {
+        if (entry.graphOutput) {
+            count++;
+        } else if (entry.node && nodeSet.has(entry.node)) {
+            count++;
+        }
+    }
+    return count;
+};
+
+const lowestNodeConsumerSortKey = (modelGraph, tensor, nodeSet) => {
+    let best = Infinity;
+    for (const entry of findValueConsumers(modelGraph, tensor)) {
+        if (!entry.node || !nodeSet.has(entry.node)) {
+            continue;
+        }
+        if (entry.node._bftNumber != null) {
+            best = Math.min(best, entry.node._bftNumber);
+        }
+    }
+    return best;
+};
+
+// Count one id per consumer edge (including graph-output terminals), matching
+// expanded view numbering. Orphan node outputs (no consumers) reserve one id,
+// matching view._promoteOrphanOutputTerminals.
+const assignModelGraphEdgeNumbersInScope = (modelGraph, counter, options = {}) => {
     if (!modelGraph) {
         return counter;
     }
+    const { reserveSharedInputs = false } = options;
     let nextCounter = counter;
+    const seen = new Set();
+    const nodes = modelGraph.nodes || [];
+    const nodeSet = new Set(nodes);
+
+    const markSameNameGraphOutputs = (name) => {
+        if (!name) {
+            return;
+        }
+        for (const output of modelGraph.outputs || []) {
+            for (const value of argumentValues(output)) {
+                if (value && value.name === name) {
+                    seen.add(value);
+                }
+            }
+        }
+    };
+
     const inputConnections = [];
     for (const input of modelGraph.inputs || []) {
         for (const tensor of argumentValues(input)) {
-            if (!tensor || tensor._bftEdgeNumber != null) {
+            if (!tensor || seen.has(tensor)) {
                 continue;
             }
-            const consumer = resolveTensorSourceNode(modelGraph, tensor.name, 'input');
-            if (consumer) {
-                inputConnections.push({
-                    tensor,
-                    sortKey: consumer._bftNumber != null ? consumer._bftNumber : Infinity
-                });
+            if (tensor._bftEdgeNumber != null && !reserveSharedInputs) {
+                continue;
             }
+            const edgeCount = modelConsumerEdgeCount(modelGraph, tensor, nodeSet);
+            if (edgeCount === 0) {
+                continue;
+            }
+            seen.add(tensor);
+            markSameNameGraphOutputs(tensor.name);
+            inputConnections.push({
+                tensor,
+                alreadyNumbered: tensor._bftEdgeNumber != null,
+                edgeCount,
+                sortKey: lowestNodeConsumerSortKey(modelGraph, tensor, nodeSet)
+            });
         }
     }
     inputConnections.sort((a, b) => a.sortKey - b.sortKey);
     for (const entry of inputConnections) {
-        entry.tensor._bftEdgeNumber = nextCounter++;
+        if (!entry.alreadyNumbered) {
+            entry.tensor._bftEdgeNumber = nextCounter;
+        }
+        nextCounter += entry.edgeCount;
     }
 
-    const internalConnections = [];
-    for (const node of modelGraph.nodes || []) {
+    const outputConnections = [];
+    for (const node of nodes) {
         for (const output of node.outputs || []) {
             for (const tensor of argumentValues(output)) {
-                if (!tensor || tensor._bftEdgeNumber != null) {
+                if (!tensor || tensor._bftEdgeNumber != null || seen.has(tensor)) {
                     continue;
                 }
-                const consumer = resolveTensorSourceNode(modelGraph, tensor.name, 'input');
-                if (consumer) {
-                    internalConnections.push({
-                        tensor,
-                        sortKey: node._bftNumber != null ? node._bftNumber : Infinity
-                    });
+                let edgeCount = modelConsumerEdgeCount(modelGraph, tensor, nodeSet);
+                if (edgeCount === 0) {
+                    edgeCount = 1;
                 }
+                seen.add(tensor);
+                markSameNameGraphOutputs(tensor.name);
+                outputConnections.push({
+                    tensor,
+                    edgeCount,
+                    sortKey: node._bftNumber != null ? node._bftNumber : Infinity
+                });
             }
         }
     }
-    internalConnections.sort((a, b) => a.sortKey - b.sortKey);
-    for (const entry of internalConnections) {
-        entry.tensor._bftEdgeNumber = nextCounter++;
+    outputConnections.sort((a, b) => a.sortKey - b.sortKey);
+    for (const entry of outputConnections) {
+        entry.tensor._bftEdgeNumber = nextCounter;
+        nextCounter += entry.edgeCount;
     }
 
     for (const output of modelGraph.outputs || []) {
         for (const tensor of argumentValues(output)) {
-            if (!tensor || tensor._bftEdgeNumber != null) {
+            if (!tensor || tensor._bftEdgeNumber != null || seen.has(tensor)) {
                 continue;
             }
+            seen.add(tensor);
             tensor._bftEdgeNumber = nextCounter++;
         }
     }
@@ -1702,7 +1773,9 @@ const assignModelEdgeNumbersForDisplayGraph = (displayGraph) => {
         }));
         for (const entry of sortEntriesByVisualPosition(entries, 'horizontal')) {
             for (const nested of hostNestedModelGraphs(entry.node)) {
-                counter = assignModelGraphEdgeNumbersInScope(nested, counter);
+                counter = assignModelGraphEdgeNumbersInScope(nested, counter, {
+                    reserveSharedInputs: true
+                });
                 assignNestedFromHosts(nested, false);
                 assignNestedFromHosts(nested, true);
             }

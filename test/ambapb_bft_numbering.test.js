@@ -1566,11 +1566,244 @@ describe('ambapb bft numbering', () => {
         assert.equal(nvpNode._bftNumber, 2);
         assert.equal(graph.nodes[2]._bftNumber, 3);
         assert.equal(graph.nodes[0].outputs[0].value[0]._bftEdgeNumber, 1);
-        assert.equal(nvpNode.outputs[0].value[0]._bftEdgeNumber, 2);
         assert.equal(innerA._bftNumber, undefined);
         assert.equal(innerB._bftNumber, undefined);
-        assert.equal(nvpCompiled.inputs[0].value[0]._bftEdgeNumber, 3);
-        assert.equal(innerA.outputs[0].value[0]._bftEdgeNumber, 4);
+        assert.equal(nvpCompiled.inputs[0].value[0]._bftEdgeNumber, 2);
+        assert.equal(innerA.outputs[0].value[0]._bftEdgeNumber, 3);
+        assert.equal(nvpNode.outputs[0].value[0]._bftEdgeNumber, 4);
+    });
+
+    it('reserves orphan compiled_prim_graph outputs when CVFlowNVP is collapsed', () => {
+        const orphanA = tensor('orphan_a');
+        const orphanB = tensor('orphan_b');
+        const shellOut = tensor('nvp_shell_out');
+        const inner = {
+            name: 'dram',
+            type: { name: 'DRAMTransfer' },
+            inputs: [{ name: 'x', value: [tensor('nvp_in')] }],
+            outputs: [
+                { name: 'y0', value: [orphanA] },
+                { name: 'y1', value: [orphanB] }
+            ]
+        };
+        const nvpCompiled = {
+            name: 'nvp_compiled',
+            inputs: [{ name: 'input', value: [tensor('nvp_in')] }],
+            outputs: [],
+            nodes: [inner]
+        };
+        const nvpNode = {
+            name: 'nvp0',
+            type: { name: 'CVFlowNVP' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: nvpCompiled }],
+            inputs: [{ name: 'x', value: [tensor('conv_out')] }],
+            outputs: [{ name: 'y', value: [shellOut] }]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'conv',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('conv_out')] }]
+                },
+                nvpNode,
+                {
+                    name: 'relu',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [shellOut] }],
+                    outputs: [{ name: 'y', value: [tensor('relu_out')] }]
+                }
+            ]
+        };
+        const outerEdges = new Map();
+        registerEdge(outerEdges, mockEdge(
+            mockNodeView(graph.nodes[0], 0, 0),
+            mockNodeView(nvpNode, 1, 0),
+            graph.nodes[0].outputs[0].value[0]
+        ));
+        registerEdge(outerEdges, mockEdge(
+            mockNodeView(nvpNode, 1, 0),
+            mockNodeView(graph.nodes[2], 2, 0),
+            shellOut
+        ));
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockRuntimeViewGraph(new Map([
+                [graph.nodes[0], { x: 0, y: 0 }],
+                [nvpNode, { x: 1, y: 0 }],
+                [graph.nodes[2], { x: 2, y: 0 }]
+            ]), outerEdges),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(graph.nodes[0].outputs[0].value[0]._bftEdgeNumber, 1);
+        assert.equal(nvpCompiled.inputs[0].value[0]._bftEdgeNumber, 2);
+        assert.equal(orphanA._bftEdgeNumber, 3);
+        assert.equal(orphanB._bftEdgeNumber, 4);
+        assert.equal(shellOut._bftEdgeNumber, 5);
+    });
+    it('reserves nested graph inputs shared with outer edges when CVFlowNVP is collapsed', () => {
+        const sharedIn0 = tensor('shared_in_0');
+        const sharedIn1 = tensor('shared_in_1');
+        const shellOut = tensor('nvp_shell_out');
+        const inner = {
+            name: 'dram',
+            type: { name: 'DRAMTransfer' },
+            inputs: [
+                { name: 'x0', value: [sharedIn0] },
+                { name: 'x1', value: [sharedIn1] }
+            ],
+            outputs: [{ name: 'y', value: [tensor('inner_out')] }]
+        };
+        const nvpCompiled = {
+            name: 'nvp_compiled',
+            inputs: [
+                { name: 'input0', value: [sharedIn0] },
+                { name: 'input1', value: [sharedIn1] }
+            ],
+            outputs: [{ name: 'output', value: [tensor('inner_out')] }],
+            nodes: [inner]
+        };
+        const nvpNode = {
+            name: 'nvp0',
+            type: { name: 'CVFlowNVP' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: nvpCompiled }],
+            inputs: [
+                { name: 'x0', value: [sharedIn0] },
+                { name: 'x1', value: [sharedIn1] }
+            ],
+            outputs: [{ name: 'y', value: [shellOut] }]
+        };
+        const producer = {
+            name: 'prod',
+            type: { name: 'Conv' },
+            inputs: [],
+            outputs: [
+                { name: 'y0', value: [sharedIn0] },
+                { name: 'y1', value: [sharedIn1] }
+            ]
+        };
+        const consumer = {
+            name: 'relu',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [shellOut] }],
+            outputs: [{ name: 'y', value: [tensor('relu_out')] }]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [producer, nvpNode, consumer]
+        };
+        const outerEdges = new Map();
+        const producerView0 = mockNodeView(producer, 0, 0);
+        producerView0.name = 'prod:0';
+        const producerView1 = mockNodeView(producer, 0, 1);
+        producerView1.name = 'prod:1';
+        const nvpView0 = mockNodeView(nvpNode, 1, 0);
+        nvpView0.name = 'nvp0:0';
+        const nvpView1 = mockNodeView(nvpNode, 1, 1);
+        nvpView1.name = 'nvp0:1';
+        registerEdge(outerEdges, mockEdge(producerView0, nvpView0, sharedIn0));
+        registerEdge(outerEdges, mockEdge(producerView1, nvpView1, sharedIn1));
+        registerEdge(outerEdges, mockEdge(
+            mockNodeView(nvpNode, 1, 0),
+            mockNodeView(consumer, 2, 0),
+            shellOut
+        ));
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockRuntimeViewGraph(new Map([
+                [producer, { x: 0, y: 0 }],
+                [nvpNode, { x: 1, y: 0 }],
+                [consumer, { x: 2, y: 0 }]
+            ]), outerEdges),
+            layoutDirection: 'horizontal'
+        });
+        // Outer edges into NVP: 1, 2. Nested still reserves 2 input slots, then inner_out, then shell out.
+        assert.equal(sharedIn0._bftEdgeNumber, 1);
+        assert.equal(sharedIn1._bftEdgeNumber, 2);
+        assert.equal(inner.outputs[0].value[0]._bftEdgeNumber, 5);
+        assert.equal(shellOut._bftEdgeNumber, 6);
+    });
+
+    it('reserves fan-out nested input edges when CVFlowNVP is collapsed', () => {
+        const sharedIn = tensor('shared_fan_in');
+        const shellOut = tensor('nvp_shell_out');
+        const left = {
+            name: 'left',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [sharedIn] }],
+            outputs: [{ name: 'y', value: [tensor('left_out')] }]
+        };
+        const right = {
+            name: 'right',
+            type: { name: 'Conv' },
+            inputs: [{ name: 'x', value: [sharedIn] }],
+            outputs: [{ name: 'y', value: [tensor('right_out')] }]
+        };
+        const nvpCompiled = {
+            name: 'nvp_compiled',
+            inputs: [{ name: 'input', value: [sharedIn] }],
+            outputs: [],
+            nodes: [left, right]
+        };
+        const nvpNode = {
+            name: 'nvp0',
+            type: { name: 'CVFlowNVP' },
+            attributes: [{ name: 'compiled_prim_graph', type: 'graph', value: nvpCompiled }],
+            inputs: [{ name: 'x', value: [sharedIn] }],
+            outputs: [{ name: 'y', value: [shellOut] }]
+        };
+        const producer = {
+            name: 'prod',
+            type: { name: 'Conv' },
+            inputs: [],
+            outputs: [{ name: 'y', value: [sharedIn] }]
+        };
+        const consumer = {
+            name: 'relu',
+            type: { name: 'Relu' },
+            inputs: [{ name: 'x', value: [shellOut] }],
+            outputs: [{ name: 'y', value: [tensor('relu_out')] }]
+        };
+        const graph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [producer, nvpNode, consumer]
+        };
+        const outerEdges = new Map();
+        registerEdge(outerEdges, mockEdge(
+            mockNodeView(producer, 0, 0),
+            mockNodeView(nvpNode, 1, 0),
+            sharedIn
+        ));
+        registerEdge(outerEdges, mockEdge(
+            mockNodeView(nvpNode, 1, 0),
+            mockNodeView(consumer, 2, 0),
+            shellOut
+        ));
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockRuntimeViewGraph(new Map([
+                [producer, { x: 0, y: 0 }],
+                [nvpNode, { x: 1, y: 0 }],
+                [consumer, { x: 2, y: 0 }]
+            ]), outerEdges),
+            layoutDirection: 'horizontal'
+        });
+        // Outer into NVP: 1. Nested input fans to left+right (2 edges), then two orphans, then shell out.
+        assert.equal(sharedIn._bftEdgeNumber, 1);
+        assert.equal(left.outputs[0].value[0]._bftEdgeNumber, 4);
+        assert.equal(right.outputs[0].value[0]._bftEdgeNumber, 5);
+        assert.equal(shellOut._bftEdgeNumber, 6);
     });
 
     it('continues frag connection numbering into nested CVFlowNVP without node numbers', () => {
@@ -2020,15 +2253,15 @@ describe('scoped find connection by order', () => {
         const { paneViewGraph, nestedViewGraph, outerEdge1, outerEdge2, innerEdge1, innerEdge2 } =
             buildNumberedNvpConnectionFixture();
         assert.equal(findEdgeByBftOrderInViewGraph(paneViewGraph, 1), outerEdge1);
-        assert.equal(findEdgeByBftOrderInViewGraph(paneViewGraph, 2), outerEdge2);
-        assert.equal(findEdgeByBftOrderInViewGraph(nestedViewGraph, 3), innerEdge1);
-        assert.equal(findEdgeByBftOrderInViewGraph(nestedViewGraph, 4), innerEdge2);
+        assert.equal(findEdgeByBftOrderInViewGraph(nestedViewGraph, 2), innerEdge1);
+        assert.equal(findEdgeByBftOrderInViewGraph(nestedViewGraph, 3), innerEdge2);
+        assert.equal(findEdgeByBftOrderInViewGraph(paneViewGraph, 4), outerEdge2);
     });
 
     it('getBftEdgeOrderRangeForViewGraph returns ranges for each view layer', () => {
         const { paneViewGraph, nestedViewGraph } = buildNumberedNvpConnectionFixture();
-        assert.deepEqual(getBftEdgeOrderRangeForViewGraph(paneViewGraph), { min: 1, max: 2 });
-        assert.deepEqual(getBftEdgeOrderRangeForViewGraph(nestedViewGraph), { min: 1, max: 4 });
+        assert.deepEqual(getBftEdgeOrderRangeForViewGraph(paneViewGraph), { min: 1, max: 4 });
+        assert.deepEqual(getBftEdgeOrderRangeForViewGraph(nestedViewGraph), { min: 1, max: 3 });
     });
 
     it('parseBftEdgeOrderQuery validates and resolves within the main global scope', () => {
@@ -2039,9 +2272,9 @@ describe('scoped find connection by order', () => {
         assert.equal(mainResult.edge._bftEdgeNumber, 1);
         assert.match(formatBftEdgeLabel(mainResult.edge), /conv_out/);
 
-        const nestedResult = parseBftEdgeOrderQuery('3', graph, scopes[0]);
+        const nestedResult = parseBftEdgeOrderQuery('2', graph, scopes[0]);
         assert.equal(nestedResult.ok, true);
-        assert.equal(nestedResult.edge._bftEdgeNumber, 3);
+        assert.equal(nestedResult.edge._bftEdgeNumber, 2);
         assert.match(formatBftEdgeLabel(nestedResult.edge), /nvp_in/);
 
         const invalid = parseBftEdgeOrderQuery('5', graph, scopes[0]);
@@ -2087,7 +2320,8 @@ describe('scoped find connection by order', () => {
             label: 'runtime (main graph)',
             viewGraph: null
         };
-        assert.deepEqual(getBftEdgeOrderRangeForModelGraph(nvpCompiled), { min: 1, max: 2 });
+        // nvp_in + orphan inner_a_out + declared nvp_out
+        assert.deepEqual(getBftEdgeOrderRangeForModelGraph(nvpCompiled), { min: 1, max: 3 });
         const hit = findEdgeByBftOrderInScope(graph, scope, 1);
         assert.ok(hit && hit._modelTensor);
         assert.equal(hit._modelTensor.name, 'nvp_in');
