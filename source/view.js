@@ -32,6 +32,7 @@ import {
     collectBftConnectionSearchScopes,
     findEdgeByBftOrderInScope,
     findModelGraphContainingTensor,
+    findNodeByBftOrderInMainScope,
     findViewEdgeForModelTensorInScope,
     formatBftEdgeLabel,
     formatBftModelTensorLabel,
@@ -1094,15 +1095,21 @@ view.View = class {
         if (!shellNode || !this._editSession) {
             return null;
         }
-        const entity = locateNodeEntity(this._editSession.modified.model, shellNode);
-        if (!entity || !entity.nodeId) {
+        // Display-graph shells are clones — resolve via source entity, not identity.
+        let nodeId = shellNode._sourceEntityId || null;
+        if (!nodeId) {
+            const sourceNode = sourceNodeForEntity(shellNode) || shellNode;
+            const entity = locateNodeEntity(this._editSession.modified.model, sourceNode);
+            nodeId = entity && entity.nodeId ? entity.nodeId : null;
+        }
+        if (!nodeId) {
             return null;
         }
         const resolvedAttr = attrName || getCompiledGraphAttrName(shellNode);
         if (!resolvedAttr) {
             return null;
         }
-        return `${entity.nodeId}/${resolvedAttr}`;
+        return `${nodeId}/${resolvedAttr}`;
     }
 
     async _expandBlocksForBftLocation(location, paneId) {
@@ -1128,12 +1135,14 @@ view.View = class {
         return true;
     }
 
+   
     async _navigateAndActivateBftNode(modelNode, source = 'sidebar') {
         const grapher = this._focusedPaneGrapher();
         if (!grapher || !modelNode) {
             return false;
         }
-        if (grapher._table && grapher._table.has(modelNode)) {
+        // find() walks nested Blocks; _table.has only sees the root graph
+        if (typeof grapher.find === 'function' && grapher.find(modelNode)) {
             return this._scrollToNodeInFocusedPane(modelNode, source);
         }
         const searchRoot = this._focusedPaneSearchTarget();
@@ -1141,12 +1150,21 @@ view.View = class {
         if (!location || location.ancestors.length === 0) {
             return false;
         }
+        // Wrapper order for inlined nodes; body order for originals.
+        const lookupOrder = modelNode._inlineExpanded && modelNode._bftWrapperNumber != null
+            ? modelNode._bftWrapperNumber
+            : modelNode._bftNumber;
         const paneId = this._focusedPaneIdOrDefault();
         if (!await this._expandBlocksForBftLocation(location, paneId)) {
             return false;
         }
         await new Promise((resolve) => this._host.window.requestAnimationFrame(resolve));
-        return this._scrollToNodeInFocusedPane(modelNode, source);
+        // refresh() rebuilds the display graph — rematch by order on the new graph
+        const freshRoot = this._focusedPaneSearchTarget();
+        const resolved = (Number.isInteger(lookupOrder)
+            ? findNodeByBftOrderInMainScope(freshRoot, lookupOrder)
+            : null) || modelNode;
+        return this._scrollToNodeInFocusedPane(resolved, source);
     }
 
     _scrollToNodeInFocusedPane(modelNode, source = 'sidebar') {
@@ -1154,9 +1172,27 @@ view.View = class {
         if (!grapher || !modelNode) {
             return false;
         }
-        const elements = grapher.activate(modelNode, source);
-        if (elements && elements.length > 0) {
+        const viewNode = typeof grapher.find === 'function' ? grapher.find(modelNode) : null;
+        if (!viewNode) {
+            return false;
+        }
+        const context = viewNode.context || grapher;
+        grapher.clearSelection();
+        if (context !== grapher && context.clearSelection) {
+            context.clearSelection();
+        }
+        // activate on the owning (possibly nested) graph so sidebar opens
+        if (typeof viewNode.activate === 'function') {
+            viewNode.activate(source);
+        }
+        const elements = context.select ? (context.select([modelNode], source) || []) : [];
+        if (elements.length > 0) {
+            // scroll on root grapher — it owns the pane scroll container
             grapher.scrollToCenter(elements);
+            return true;
+        }
+        if (viewNode.element) {
+            grapher.scrollToCenter([viewNode.element]);
             return true;
         }
         return false;
