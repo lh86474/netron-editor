@@ -2199,6 +2199,87 @@ describe('scoped find node by order', () => {
         assert.equal(parseBftOrderQuery('4', graph, mainScope).ok, false);
         assert.match(parseBftOrderQuery('4', graph, mainScope).error, /between 1 and 3/);
     });
+    it('find by wrapper order hits inlined node; body order hits original frag node', () => {
+        const inner = {
+            name: 'inner_nvp',
+            type: { name: 'CVFlowNVP' },
+            inputs: [{ name: 'x', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'y', value: [tensor('sub_out')] }]
+        };
+        const subgraphBody = {
+            name: 'subgraph_body',
+            inputs: [{ name: 'input', value: [tensor('sub_in')] }],
+            outputs: [{ name: 'output', value: [tensor('sub_out')] }],
+            nodes: [inner]
+        };
+        const compiled = {
+            name: 'compiled',
+            _ambapbCompiledGraph: true,
+            inputs: [],
+            outputs: [],
+            nodes: []
+        };
+        const sourceGraph = {
+            name: 'runtime',
+            inputs: [],
+            outputs: [],
+            nodes: [
+                {
+                    name: 'producer',
+                    type: { name: 'Conv' },
+                    inputs: [],
+                    outputs: [{ name: 'y', value: [tensor('producer_out')] }]
+                },
+                {
+                    name: 'batch_call',
+                    type: { name: 'BatchCall' },
+                    attributes: [
+                        { name: 'graph_id', type: 'string', value: 'subgraph_body' },
+                        { name: 'src_mappings', type: 'string', value: '[]' },
+                        { name: 'out_mappings', type: 'string', value: '[]' }
+                    ],
+                    inputs: [{ name: 'x', value: [tensor('producer_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('batch_out')] }]
+                },
+                {
+                    name: 'consumer',
+                    type: { name: 'Relu' },
+                    inputs: [{ name: 'x', value: [tensor('batch_out')] }],
+                    outputs: [{ name: 'y', value: [tensor('consumer_out')] }]
+                },
+                {
+                    name: 'frag',
+                    type: { name: 'FragSubgraph' },
+                    attributes: [
+                        { name: 'graph', type: 'graph', value: subgraphBody },
+                        { name: 'compiled_prim_graph', type: 'graph', value: compiled }
+                    ],
+                    inputs: [],
+                    outputs: []
+                }
+            ]
+        };
+        const displayGraph = applyBatchInlineExpansions(sourceGraph, new Set(['batch_call']));
+        assignBftNumbers({
+            displayGraph,
+            sourceGraph,
+            viewGraph: mockViewGraph(new Map([
+                [displayGraph.nodes.find((n) => n.name === 'producer'), { x: 0, y: 0 }],
+                [displayGraph.nodes.find((n) => n._inlineExpanded), { x: 1, y: 0 }],
+                [displayGraph.nodes.find((n) => n.name === 'consumer'), { x: 2, y: 0 }]
+            ])),
+            layoutDirection: 'horizontal'
+        });
+        const inlined = displayGraph.nodes.find((n) => n._inlineExpanded);
+        assert.ok(inlined);
+        assert.equal(inlined._bftWrapperNumber, 2);
+        assert.equal(inlined._bftNumber, inner._bftNumber);
+        assert.ok(inner._bftNumber != null);
+
+        assert.equal(findNodeByBftOrderInMainScope(displayGraph, 2), inlined);
+        assert.equal(findNodeByBftOrderInMainScope(displayGraph, inner._bftNumber), inner);
+        assert.notEqual(findNodeByBftOrderInMainScope(displayGraph, inner._bftNumber), inlined);
+    });
 });
 
 describe('scoped find connection by order', () => {

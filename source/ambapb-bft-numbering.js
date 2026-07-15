@@ -1093,31 +1093,31 @@ export const getBftOrderRange = (graph) => {
     return max > 0 ? { min: 1, max } : null;
 };
 
+const findNodeByBftWrapperOrderInGraph = (graph, order) => {
+    if (!graph || !Number.isInteger(order) || order <= 0) {
+        return null;
+    }
+    return (graph.nodes || []).find((entry) => (
+        entry._inlineExpanded && entry._bftWrapperNumber === order
+    )) || null;
+};
+
 export const findNodeByBftOrderInGraph = (graph, order) => {
     if (!graph || !Number.isInteger(order) || order <= 0) {
         return null;
     }
-    return (graph.nodes || []).find((entry) => entry._bftNumber === order) || null;
-};
-
-export const getBftOrderRangeForMainScope = (rootGraph) => {
-    if (!rootGraph) {
-        return null;
-    }
-    let max = 0;
-    for (const graph of collectMainScopeGraphs(rootGraph)) {
-        for (const node of graph.nodes || []) {
-            if (node._bftNumber != null) {
-                max = Math.max(max, node._bftNumber);
-            }
-        }
-    }
-    return max > 0 ? { min: 1, max } : null;
+    return (graph.nodes || []).find((entry) => (entry._bftNumber === order && !entry._inlineExpanded)) || null;
 };
 
 export const findNodeByBftOrderInMainScope = (rootGraph, order) => {
     if (!rootGraph || !Number.isInteger(order) || order <= 0) {
         return null;
+    }
+    for (const graph of collectMainScopeGraphs(rootGraph)) {
+        const wrapper = findNodeByBftWrapperOrderInGraph(graph, order);
+        if (wrapper) {
+            return wrapper;
+        }
     }
     for (const graph of collectMainScopeGraphs(rootGraph)) {
         const node = findNodeByBftOrderInGraph(graph, order);
@@ -1149,6 +1149,21 @@ export const getBftOrderRangeForScope = (rootGraph, scope) => {
     return getBftOrderRangeForGraph(resolved.graph);
 };
 
+export const getBftOrderRangeForMainScope = (rootGraph) => {
+    if (!rootGraph) {
+        return null;
+    }
+    let max = 0;
+    for (const graph of collectMainScopeGraphs(rootGraph)) {
+        for (const node of graph.nodes || []) {
+            if (node._bftNumber != null) {
+                max = Math.max(max, node._bftNumber);
+            }
+        }
+    }
+    return max > 0 ? { min: 1, max } : null;
+};
+
 export const findNodeByBftOrderInScope = (rootGraph, scope, order) => {
     const resolved = normalizeBftSearchScope(rootGraph, scope);
     if (!resolved) {
@@ -1163,6 +1178,12 @@ export const findNodeByBftOrderInScope = (rootGraph, scope, order) => {
 export const findNodeByBftOrder = (graph, order) => {
     if (!graph || !Number.isInteger(order) || order <= 0) {
         return null;
+    }
+    for (const nested of collectNestedGraphs(graph)) {
+        const wrapper = findNodeByBftWrapperOrderInGraph(nested, order);
+        if (wrapper) {
+            return wrapper;
+        }
     }
     for (const nested of collectNestedGraphs(graph)) {
         const node = findNodeByBftOrderInGraph(nested, order);
