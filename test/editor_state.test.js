@@ -597,7 +597,8 @@ describe('Node deletion', () => {
         graph.nodes[1].inputs[0].value[0] = graph.nodes[0].outputs[0].value[0];
         const analysis = analyzeDeleteNode(graph, graph.nodes[0]);
         assert.equal(analysis.ok, true);
-        assert.ok(analysis.warnings.some((entry) => entry.code === 'WEIGHTS_IGNORED'));
+        assert.equal(analysis.needsConfirm, false);
+        assert.ok(!analysis.warnings.some((entry) => entry.code === 'WEIGHTS_IGNORED'));
         deleteNode(graph, 0);
         assert.equal(graph.nodes.length, 1);
         assert.equal(graph.nodes[0].inputs[0].value[0].name, 'act');
@@ -645,6 +646,40 @@ describe('Node deletion', () => {
         const dangling = findDanglingNodes(graph);
         assert.equal(dangling.length, 1);
         assert.equal(dangling[0].name, 'Right');
+    });
+
+    it('analyzeDeleteNode ignores already-dangling nodes in DANGLING_PREDICTED', () => {
+        const kept = { name: 'kept', attributes: [] };
+        const orphan = { name: 'orphan', attributes: [] };
+        const graph = {
+            outputs: [{ name: 'output', value: [kept] }],
+            nodes: [
+                {
+                    name: 'Live',
+                    inputs: [{ name: 'X', value: [{ name: 'in', attributes: [] }] }],
+                    outputs: [{ name: 'Y', value: [kept] }]
+                },
+                {
+                    name: 'Dead',
+                    inputs: [{ name: 'X', value: [{ name: 'in2', attributes: [] }] }],
+                    outputs: [{ name: 'Y', value: [orphan] }]
+                },
+                {
+                    name: 'AlsoDead',
+                    inputs: [{ name: 'X', value: [orphan] }],
+                    outputs: [{ name: 'Y', value: [{ name: 'also_orphan', attributes: [] }] }]
+                }
+            ]
+        };
+        // Dead + AlsoDead already unused
+        const before = findDanglingNodes(graph).map((n) => n.name).sort();
+        assert.deepEqual(before, ['AlsoDead', 'Dead']);
+
+        // Deleting Live keeps those dangling but creates no *new* unused nodes → no warn
+        const analysis = analyzeDeleteNode(graph, graph.nodes[0]);
+        assert.equal(analysis.ok, true);
+        assert.ok(!analysis.warnings.some((entry) => entry.code === 'DANGLING_PREDICTED'));
+        assert.equal(analysis.needsConfirm, false);
     });
 });
 // This section is used to test if adding properties to our nodes / connections work

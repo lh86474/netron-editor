@@ -1927,18 +1927,6 @@ export const analyzeDeleteNode = (graph, node) => {
     if (!graph || !node) {
         return { ok: false, blockReason: 'Node not found.', warnings, needsConfirm: false };
     }
-    const inputs = node.inputs || [];
-    const hasInitializerInputs = inputs.some((_, index) => {
-        const tensor = inputTensorAt(node, index);
-        return tensor && tensor.initializer;
-    });
-    if (hasInitializerInputs) {
-        warnings.push({
-            code: 'WEIGHTS_IGNORED',
-            level: 'info',
-            message: 'Weight and bias inputs will be disconnected.'
-        });
-    }
     const dataInputs = dataInputTensors(node);
     if (dataInputs.length === 0) {
         return {
@@ -1968,9 +1956,11 @@ export const analyzeDeleteNode = (graph, node) => {
     let predictedDangling = [];
     if (nodeIndex >= 0) {
         try {
+            const danglingKey = (entry) => entry.name || nodeDisplayName(entry);
+            const alreadyDangling = new Set(findDanglingNodes(graph).map(danglingKey));
             const cloned = cloneGraph(graph);
             rewireAndRemoveNode(cloned, nodeIndex);
-            predictedDangling = findDanglingNodes(cloned);
+            predictedDangling = findDanglingNodes(cloned).filter((entry) => !alreadyDangling.has(danglingKey(entry)));
         } catch {
             predictedDangling = [];
         }
