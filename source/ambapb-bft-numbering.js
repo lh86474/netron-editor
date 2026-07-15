@@ -359,11 +359,22 @@ const orderTerminalEdges = (edges, layoutDirection) => {
 };
 
 const orderOutputTerminalEdges = (edges, layoutDirection) => {
-    return sortEntriesByVisualPosition(edges.map((edge, index) => ({
-        edge,
-        view: edge.to,
-        fallbackIndex: index
-    })), layoutDirection).map((entry) => entry.edge);
+    return edges.slice().sort((a, b) => {
+        const aFromNode = viewNodeModelValue(a.from);
+        const bFromNode = viewNodeModelValue(b.from);
+        const aOrder = aFromNode && aFromNode._bftNumber != null ? aFromNode._bftNumber : Infinity;
+        const bOrder = bFromNode && bFromNode._bftNumber != null ? bFromNode._bftNumber : Infinity;
+        if (aOrder !== bOrder) {
+            return aOrder - bOrder;
+        }
+        const aKey = visualSortKey(a.to, layoutDirection, 0);
+        const bKey = visualSortKey(b.to, layoutDirection, 0);
+        if (aKey !== bKey) {
+            return aKey - bKey;
+        }
+        return edgeMidpointSortKey(a.from, a.to, layoutDirection) -
+            edgeMidpointSortKey(b.from, b.to, layoutDirection);
+    });
 };
 
 const orderInternalEdges = (edges, layoutDirection) => {

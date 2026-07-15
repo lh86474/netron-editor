@@ -651,6 +651,66 @@ describe('ambapb bft numbering', () => {
         assert.equal(internalValue._bftEdgeNumber, 2);
         assert.equal(outputEdgeValue._bftEdgeNumber, 4);
     });
+    it('numbers output terminals by producer BFT order before destination position', () => {
+        const nvpOut0 = tensor('nvp_to_batch');
+        const nvpOut1 = tensor('conti_1320_prim_nvp0:1');
+        const nvpOut3 = tensor('conti_1320_prim_nvp0:3');
+        const runtimeOut = tensor('conti_1320_prim_runtime2:0');
+        const graph = {
+            name: 'UserDefSubgraph',
+            inputs: [],
+            outputs: [
+                { name: 'o1', value: [nvpOut1] },
+                { name: 'o3', value: [nvpOut3] },
+                { name: 'o0', value: [runtimeOut] }
+            ],
+            nodes: [
+                {
+                    name: 'conti_1320_prim_nvp0',
+                    type: { name: 'CVFlowNVP' },
+                    inputs: [],
+                    outputs: [
+                        { name: 'out0', value: [nvpOut0] },
+                        { name: 'out1', value: [nvpOut1] },
+                        { name: 'out3', value: [nvpOut3] }
+                    ]
+                },
+                {
+                    name: 'conti_1320_prim_runtime2',
+                    type: { name: 'BatchCall' },
+                    inputs: [{ name: 'in0', value: [nvpOut0] }],
+                    outputs: [{ name: 'out0', value: [runtimeOut] }]
+                }
+            ]
+        };
+        const nvp = graph.nodes[0];
+        const batch = graph.nodes[1];
+        const positions = new Map([
+            [nvp, { x: 1, y: 0 }],
+            [batch, { x: 0, y: 1 }]
+        ]);
+        const nvpView = mockNodeView(nvp, 1, 0);
+        const batchView = mockNodeView(batch, 0, 1);
+        // runtime terminal is leftmost (would incorrectly win under old to-only sort)
+        const outRuntime = mockOutputView(graph.outputs[2], 0, 2);
+        const outNvp1 = mockOutputView(graph.outputs[0], 1, 2);
+        const outNvp3 = mockOutputView(graph.outputs[1], 2, 2);
+        const edges = new Map();
+        registerEdge(edges, mockEdge(nvpView, batchView, nvpOut0));
+        registerEdge(edges, mockEdge(nvpView, outNvp1, nvpOut1));
+        registerEdge(edges, mockEdge(nvpView, outNvp3, nvpOut3));
+        registerEdge(edges, mockEdge(batchView, outRuntime, runtimeOut));
+        assignBftNumbers({
+            displayGraph: graph,
+            sourceGraph: graph,
+            viewGraph: mockViewGraph(positions, edges),
+            layoutDirection: 'horizontal'
+        });
+        assert.equal(nvpOut0._bftEdgeNumber, 1);
+        assert.equal(nvpOut1._bftEdgeNumber, 2);
+        assert.equal(nvpOut3._bftEdgeNumber, 3);
+        assert.equal(runtimeOut._bftEdgeNumber, 4);
+    });
 
     it('resolves sidebar connection order from numbered display graph roots', () => {
         const graph = buildLinearGraph();
